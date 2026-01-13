@@ -1,0 +1,57 @@
+<?xml version="1.0"?>
+<!--
+  로봇에 RealSense D405 카메라를 추가하는 예제
+
+  사용 방법:
+  1. hand-eye 캘리브레이션 완료
+  2. 결과 YAML 파일에서 camera_to_gripper_transform 값 확인
+  3. 아래 xyz, rpy 값을 캘리브레이션 결과로 업데이트
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="robot_with_camera">
+
+  <!-- RealSense D405 Macro 포함 -->
+  <xacro:include filename="$(find realsense_service)/urdf/realsense_d405.xacro"/>
+
+  <!-- 로봇의 기존 URDF (예시) -->
+  <!-- 실제 사용 시 로봇의 URDF/XACRO를 include 하세요 -->
+
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <box size="0.1 0.1 0.1"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <link name="tool0"/>
+  <joint name="tool_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="tool0"/>
+    <origin xyz="0 0 0.5" rpy="0 0 0"/>
+  </joint>
+
+  <!--
+  카메라 추가
+
+  캘리브레이션 결과 예시:
+  camera_to_gripper_transform:
+    translation:
+      x: 0.05
+      y: 0.02
+      z: 0.08
+    rotation_rpy:  # 라디안 단위
+      roll: 0.0
+      pitch: 1.57
+      yaw: 0.0
+  -->
+
+  <xacro:realsense_d405 parent="tool0">
+    <!--
+    캘리브레이션 결과를 여기에 입력하세요!
+    xyz: translation 값 (미터)
+    rpy: rotation 값 (라디안)
+    -->
+    <origin xyz="0.05 0.02 0.08" rpy="0.0 1.57 0.0"/>
+  </xacro:realsense_d405>
+
+</robot>

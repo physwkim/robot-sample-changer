@@ -1,0 +1,6 @@
+# Request
+bool start             # true: 시작, false: 정지
+---
+# Response
+bool success           # 성공 여부
+string message         # 응답 메시지
