@@ -1,0 +1,60 @@
+record(bo, "Robot:Trigger")
+{
+    field(DESC, "Robot trigger")
+    field(ZNAM, "Off")
+    field(ONAM, "On")
+    field(VAL,  "0")
+}
+record(mbbo, "Robot:Wait")
+{
+    field(DESC, "Robot wait state")
+    field(ZRST, "Wait")
+    field(ONST, "Continue")
+    field(TWST, "Abort")
+    field(ZRVL, "0")
+    field(ONVL, "1")
+    field(TWVL, "2")
+    field(VAL,  "0")
+}
+record(longout, "Robot:StartStep")
+{
+    field(DESC, "Robot start step")
+    field(VAL,  "0")
+    field(DRVL, "0")
+    field(DRVH, "300")
+}
+record(longout, "Robot:Holder")
+{
+    field(DESC, "Robot holder number")
+    field(DRVL, "1")
+    field(DRVH, "100")   # 미래 확장 대비
+    field(VAL,  "1")
+}
+record(bo, "Robot:Stop")
+{
+    field(DESC, "Robot pause/stop request")
+    field(ZNAM, "Run")
+    field(ONAM, "Pause")
+    field(VAL,  "0")
+}
+record(longin, "Robot:CurrentStep")
+{
+    field(DESC, "Robot current step (1-30)")
+    field(VAL,  "0")
+    field(HOPR, "30")
+    field(LOPR, "0")
+}
+record(longin, "Robot:PauseStep")
+{
+    field(DESC, "Robot pause at specified step")
+    field(VAL,  "0")
+    field(HOPR, "30")
+    field(LOPR, "0")
+}
+record(bo, "Robot:Gripper")
+{
+    field(DESC, "Gripper open/close status")
+    field(ZNAM, "Close")
+    field(ONAM, "Open")
+    field(VAL,  "0")
+}

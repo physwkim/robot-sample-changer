@@ -1,0 +1,40 @@
+pick_and_place_task:
+  ros__parameters:
+    # Groups / frames (UR3e + Hand-E)
+    arm_group: ur_arm
+    hand_group: hand
+    eef: hand
+    ik_frame: flange
+    tcp_frame: robotiq_hande_end   # tool0가 TF에 없거나 prefix가 붙는 경우가 있어 기본은 gripper tip
+    world_frame: base_link    # or world
+
+    # Arm joint order (must match the values arrays below)
+    arm_joint_names:
+      - shoulder_pan_joint
+      - shoulder_lift_joint
+      - elbow_joint
+      - wrist_1_joint
+      - wrist_2_joint
+      - wrist_3_joint
+
+    # Hand SRDF group_state names
+    hand_open: open
+    hand_close: close
+
+    # ====== Paste joint values from: ros2 topic echo /joint_states --once ======
+    # Each list must have 6 values (same size as arm_joint_names)
+    home: [0, 0, 0, 0, 0, 0]
+    sample_approach: [0, 0, 0, 0, 0, 0]
+    sample_pregrasp: [0, 0, 0, 0, 0, 0]
+    sample_grasp: [0, 0, 0, 0, 0, 0]
+    load_approach: [0, 0, 0, 0, 0, 0]
+    load_place: [0, 0, 0, 0, 0, 0]
+    return_approach: [0, 0, 0, 0, 0, 0]
+
+    # Relative motions (meters)
+    lift_z: 0.05
+    retreat_x: 0.05
+    lower_z: 0.05
+    retreat2_x: 0.05
+
+
