@@ -59,6 +59,7 @@ ros2 run epics_robot epics_triggered_sequence \
     -p epics_stop_pv:="Robot:Stop" \
     -p epics_current_step_pv:="Robot:CurrentStep" \
     -p epics_gripper_pv:="Robot:Gripper" \
+    -p epics_gripper_rbv_pv:="Robot:Gripper_RBV" \
     -p gripper_open_threshold:=0.02 \
     -p epics_pause_step_pv:="Robot:PauseStep"
 ```

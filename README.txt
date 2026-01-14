@@ -257,20 +257,58 @@ EPICS IOC 터미널(터미널 3)에서 다음 명령어로 로봇을 제어할 �
 현재 스텝 확인:
     caget Robot:CurrentStep
 
-홀더 번호 설정 (1 또는 2):
+홀더 번호 설정 (1-10):
     caput Robot:Holder 1
 
 시작 스텝 설정:
     caput Robot:StartStep 0
 
+캘리브레이션 모드 설정:
+    caput Robot:CalibMode 0    # 일반 모드 (전체 시퀀스)
+    caput Robot:CalibMode 1    # Holder 캘리브레이션
+    caput Robot:CalibMode 2    # Sample Holder 캘리브레이션
 
-9. 종료 방법
+
+9. 캘리브레이션 모드 (위치 미세 조정)
+--------------------------------------------------------------------------------
+홀더 또는 샘플홀더 위치를 미세 조정할 때 사용합니다.
+시료를 집어서 above 위치에서 멈추므로 중심 정렬을 확인할 수 있습니다.
+
+[Holder 캘리브레이션 모드] (CalibMode = 1)
+
+    목적: 홀더 위치 확인 및 조정
+    동작: 스텝 0-5 수행 -> above에서 멈춤 -> 트리거 대기 -> 스텝 20-23 수행
+
+    사용 방법:
+    1. caput Robot:CalibMode 1
+    2. caput Robot:Holder 5        # 확인할 홀더 번호
+    3. caput Robot:Trigger 1       # 시작 -> 스텝 5에서 멈춤
+    4. (시료를 잡은 상태에서 정렬 확인)
+    5. caput Robot:Trigger 1       # 시료 돌려놓기
+
+[Sample Holder 캘리브레이션 모드] (CalibMode = 2)
+
+    목적: 샘플홀더 위치 확인 및 조정
+    동작: 스텝 0-8 수행 -> sample holder above에서 멈춤 -> 트리거 대기 -> 스텝 16-23 수행
+
+    사용 방법:
+    1. caput Robot:CalibMode 2
+    2. caput Robot:Holder 1        # 시료를 가져올 홀더 번호
+    3. caput Robot:Trigger 1       # 시작 -> 스텝 8에서 멈춤
+    4. (시료를 잡은 상태에서 샘플홀더 정렬 확인)
+    5. caput Robot:Trigger 1       # 시료 돌려놓기
+
+캘리브레이션 완료 후:
+    caput Robot:CalibMode 0        # 일반 모드로 복귀
+
+
+10. 종료 방법
 --------------------------------------------------------------------------------
 각 터미널에서 Ctrl+C를 눌러 프로그램을 종료합니다.
 종료 순서: 터미널 4 -> 터미널 3 -> 터미널 2 -> 터미널 1
 
 
-10. 문제 해결
+11. 문제 해결
 --------------------------------------------------------------------------------
 문제: "ur.urdf.xacro 파일을 찾을 수 없습니다"
 해결: colcon build를 다시 실행하고 source install/setup.bash 실행
@@ -291,7 +329,7 @@ EPICS IOC 터미널(터미널 3)에서 다음 명령어로 로봇을 제어할 �
   3. use_tool_communication:=true 설정 확인
 
 
-11. 폴더 구조
+12. 폴더 구조
 --------------------------------------------------------------------------------
 ws/
 ├── src/

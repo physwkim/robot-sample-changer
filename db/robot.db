@@ -16,6 +16,17 @@ record(mbbo, "Robot:Wait")
     field(TWVL, "2")
     field(VAL,  "0")
 }
+record(mbbo, "Robot:CalibMode")
+{
+    field(DESC, "Robot Calibration Mode")
+    field(ZRST, "Normal")
+    field(ONST, "Holder Calib")
+    field(TWST, "Sample Holder Calib")
+    field(ZRVL, "0")
+    field(ONVL, "1")
+    field(TWVL, "2")
+    field(VAL,  "0")
+}
 record(longout, "Robot:StartStep")
 {
     field(DESC, "Robot start step")
@@ -27,7 +38,7 @@ record(longout, "Robot:Holder")
 {
     field(DESC, "Robot holder number")
     field(DRVL, "1")
-    field(DRVH, "100")   # 미래 확장 대비
+    field(DRVH, "100")
     field(VAL,  "1")
 }
 record(bo, "Robot:Stop")
@@ -53,7 +64,14 @@ record(longin, "Robot:PauseStep")
 }
 record(bo, "Robot:Gripper")
 {
-    field(DESC, "Gripper open/close status")
+    field(DESC, "Gripper command (set to open/close)")
+    field(ZNAM, "Close")
+    field(ONAM, "Open")
+    field(VAL,  "0")
+}
+record(bi, "Robot:Gripper_RBV")
+{
+    field(DESC, "Gripper status readback")
     field(ZNAM, "Close")
     field(ONAM, "Open")
     field(VAL,  "0")

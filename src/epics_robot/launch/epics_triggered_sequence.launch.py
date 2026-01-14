@@ -63,6 +63,12 @@ def generate_launch_description():
         description='EPICS PV for pausing at specific step (0=no pause, N=pause after step N until value changes)'
     )
 
+    epics_calib_mode_pv_arg = DeclareLaunchArgument(
+        'epics_calib_mode_pv',
+        default_value='Robot:CalibMode',
+        description='EPICS PV for calibration mode (0=normal, 1=holder, 2=sample_holder)'
+    )
+
     holder_offset_arg = DeclareLaunchArgument(
         'holder_offset',
         default_value='0.03',
@@ -91,6 +97,7 @@ def generate_launch_description():
                 'epics_current_step_pv': LaunchConfiguration('epics_current_step_pv'),
                 'epics_gripper_pv': LaunchConfiguration('epics_gripper_pv'),
                 'epics_pause_step_pv': LaunchConfiguration('epics_pause_step_pv'),
+                'epics_calib_mode_pv': LaunchConfiguration('epics_calib_mode_pv'),
                 'waypoints_yaml_path': LaunchConfiguration('waypoints_yaml_path'),
                 'use_gripper_action': True,
                 'gripper_action_name': '/gripper_action_controller/gripper_cmd',

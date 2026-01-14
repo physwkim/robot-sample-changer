@@ -27,6 +27,7 @@
 #include <sstream>
 #include <iostream>
 #include <future>
+#include <functional>
 #include <set>
 #include <ctime>
 #include <iomanip>
@@ -39,6 +40,7 @@
 #include <moveit/task_constructor/stages/current_state.h>
 #include <moveit/task_constructor/stages/move_to.h>
 
+#include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit/robot_model_loader/robot_model_loader.h>
 #include <moveit/robot_state/robot_state.h>
 #include <moveit/robot_model/robot_model.h>
@@ -101,17 +103,29 @@ static chid epics_wait_write_chid = nullptr;
 static chid epics_holder_chid = nullptr;
 static chid epics_stop_chid = nullptr;
 static chid epics_current_step_chid = nullptr;
-static chid epics_gripper_chid = nullptr;
+static chid epics_gripper_rbv_chid = nullptr;
+static chid epics_gripper_cmd_chid = nullptr;
 static chid epics_pause_step_chid = nullptr;
+static chid epics_calib_mode_chid = nullptr;
 static std::string epics_trigger_pv_name;
 static std::string epics_start_step_pv_name;
 static std::string epics_wait_pv_name;
 static std::string epics_holder_pv_name;
 static std::string epics_stop_pv_name;
 static std::string epics_current_step_pv_name;
-static std::string epics_gripper_pv_name;
+static std::string epics_gripper_rbv_pv_name;
+static std::string epics_gripper_cmd_pv_name;
 static std::string epics_pause_step_pv_name;
+static std::string epics_calib_mode_pv_name;
 static bool epics_initialized = false;
+static struct ca_client_context* epics_ca_context = nullptr;  // For multi-thread CA access
+
+// Calibration mode values
+enum class CalibMode {
+  NORMAL = 0,        // Normal full sequence
+  HOLDER = 1,        // Holder calibration: 0-5, wait, 20-23
+  SAMPLE_HOLDER = 2  // Sample holder calibration: 0-8, wait, 16-23
+};
 
 // Gripper state tracking
 static std::atomic<int> last_gripper_state{-1};  // -1: unknown, 0: close, 1: open
@@ -252,8 +266,27 @@ static bool epics_init()
     return false;
   }
 
+  // Save context for multi-thread access
+  epics_ca_context = ca_current_context();
+
   epics_initialized = true;
-  RCLCPP_INFO(LOGGER, "EPICS CA context created successfully");
+  RCLCPP_INFO(LOGGER, "EPICS CA context created successfully (preemptive callbacks enabled)");
+  return true;
+}
+
+// Attach current thread to EPICS CA context (must be called from new threads)
+static bool epics_attach_context()
+{
+  if (!epics_ca_context) {
+    RCLCPP_ERROR(LOGGER, "EPICS CA context not initialized");
+    return false;
+  }
+
+  int status = ca_attach_context(epics_ca_context);
+  if (status != ECA_NORMAL) {
+    RCLCPP_ERROR(LOGGER, "Failed to attach to EPICS CA context: %s", ca_message(status));
+    return false;
+  }
   return true;
 }
 
@@ -291,13 +324,21 @@ static void epics_cleanup()
     ca_clear_channel(epics_current_step_chid);
     epics_current_step_chid = nullptr;
   }
-  if (epics_gripper_chid) {
-    ca_clear_channel(epics_gripper_chid);
-    epics_gripper_chid = nullptr;
+  if (epics_gripper_rbv_chid) {
+    ca_clear_channel(epics_gripper_rbv_chid);
+    epics_gripper_rbv_chid = nullptr;
+  }
+  if (epics_gripper_cmd_chid) {
+    ca_clear_channel(epics_gripper_cmd_chid);
+    epics_gripper_cmd_chid = nullptr;
   }
   if (epics_pause_step_chid) {
     ca_clear_channel(epics_pause_step_chid);
     epics_pause_step_chid = nullptr;
+  }
+  if (epics_calib_mode_chid) {
+    ca_clear_channel(epics_calib_mode_chid);
+    epics_calib_mode_chid = nullptr;
   }
   if (epics_initialized) {
     ca_context_destroy();
@@ -308,7 +349,8 @@ static void epics_cleanup()
 static bool epics_connect_pvs(const std::string& trigger_pv, const std::string& start_step_pv,
                                const std::string& wait_pv, const std::string& holder_pv,
                                const std::string& stop_pv, const std::string& current_step_pv,
-                               const std::string& gripper_pv, const std::string& pause_step_pv)
+                               const std::string& gripper_rbv_pv, const std::string& gripper_cmd_pv,
+                               const std::string& pause_step_pv, const std::string& calib_mode_pv)
 {
   epics_trigger_pv_name = trigger_pv;
   epics_start_step_pv_name = start_step_pv;
@@ -316,8 +358,10 @@ static bool epics_connect_pvs(const std::string& trigger_pv, const std::string& 
   epics_holder_pv_name = holder_pv;
   epics_stop_pv_name = stop_pv;
   epics_current_step_pv_name = current_step_pv;
-  epics_gripper_pv_name = gripper_pv;
+  epics_gripper_rbv_pv_name = gripper_rbv_pv;
+  epics_gripper_cmd_pv_name = gripper_cmd_pv;
   epics_pause_step_pv_name = pause_step_pv;
+  epics_calib_mode_pv_name = calib_mode_pv;
 
   // Create channel for trigger PV (read)
   int status = ca_create_channel(trigger_pv.c_str(), nullptr, nullptr, CA_PRIORITY_DEFAULT, &epics_trigger_chid);
@@ -375,10 +419,17 @@ static bool epics_connect_pvs(const std::string& trigger_pv, const std::string& 
     return false;
   }
 
-  // Create channel for gripper PV (write only)
-  status = ca_create_channel(gripper_pv.c_str(), nullptr, nullptr, CA_PRIORITY_DEFAULT, &epics_gripper_chid);
+  // Create channel for gripper RBV PV (write only - status display)
+  status = ca_create_channel(gripper_rbv_pv.c_str(), nullptr, nullptr, CA_PRIORITY_DEFAULT, &epics_gripper_rbv_chid);
   if (status != ECA_NORMAL) {
-    RCLCPP_ERROR(LOGGER, "Failed to create channel for PV '%s': %s", gripper_pv.c_str(), ca_message(status));
+    RCLCPP_ERROR(LOGGER, "Failed to create channel for PV '%s': %s", gripper_rbv_pv.c_str(), ca_message(status));
+    return false;
+  }
+
+  // Create channel for gripper command PV (read - to receive commands)
+  status = ca_create_channel(gripper_cmd_pv.c_str(), nullptr, nullptr, CA_PRIORITY_DEFAULT, &epics_gripper_cmd_chid);
+  if (status != ECA_NORMAL) {
+    RCLCPP_ERROR(LOGGER, "Failed to create channel for PV '%s': %s", gripper_cmd_pv.c_str(), ca_message(status));
     return false;
   }
 
@@ -386,6 +437,13 @@ static bool epics_connect_pvs(const std::string& trigger_pv, const std::string& 
   status = ca_create_channel(pause_step_pv.c_str(), nullptr, nullptr, CA_PRIORITY_DEFAULT, &epics_pause_step_chid);
   if (status != ECA_NORMAL) {
     RCLCPP_ERROR(LOGGER, "Failed to create channel for PV '%s': %s", pause_step_pv.c_str(), ca_message(status));
+    return false;
+  }
+
+  // Create channel for calib_mode PV (read only)
+  status = ca_create_channel(calib_mode_pv.c_str(), nullptr, nullptr, CA_PRIORITY_DEFAULT, &epics_calib_mode_chid);
+  if (status != ECA_NORMAL) {
+    RCLCPP_ERROR(LOGGER, "Failed to create channel for PV '%s': %s", calib_mode_pv.c_str(), ca_message(status));
     return false;
   }
 
@@ -426,13 +484,23 @@ static bool epics_connect_pvs(const std::string& trigger_pv, const std::string& 
     return false;
   }
 
-  if (ca_state(epics_gripper_chid) != cs_conn) {
-    RCLCPP_ERROR(LOGGER, "PV '%s' is not connected", gripper_pv.c_str());
+  if (ca_state(epics_gripper_rbv_chid) != cs_conn) {
+    RCLCPP_ERROR(LOGGER, "PV '%s' is not connected", gripper_rbv_pv.c_str());
+    return false;
+  }
+
+  if (ca_state(epics_gripper_cmd_chid) != cs_conn) {
+    RCLCPP_ERROR(LOGGER, "PV '%s' is not connected", gripper_cmd_pv.c_str());
     return false;
   }
 
   if (ca_state(epics_pause_step_chid) != cs_conn) {
     RCLCPP_ERROR(LOGGER, "PV '%s' is not connected", pause_step_pv.c_str());
+    return false;
+  }
+
+  if (ca_state(epics_calib_mode_chid) != cs_conn) {
+    RCLCPP_ERROR(LOGGER, "PV '%s' is not connected", calib_mode_pv.c_str());
     return false;
   }
 
@@ -443,8 +511,10 @@ static bool epics_connect_pvs(const std::string& trigger_pv, const std::string& 
   RCLCPP_INFO(LOGGER, "  Holder: %s", holder_pv.c_str());
   RCLCPP_INFO(LOGGER, "  Stop: %s", stop_pv.c_str());
   RCLCPP_INFO(LOGGER, "  CurrentStep: %s", current_step_pv.c_str());
-  RCLCPP_INFO(LOGGER, "  Gripper: %s", gripper_pv.c_str());
+  RCLCPP_INFO(LOGGER, "  Gripper_RBV: %s (status)", gripper_rbv_pv.c_str());
+  RCLCPP_INFO(LOGGER, "  Gripper: %s (command)", gripper_cmd_pv.c_str());
   RCLCPP_INFO(LOGGER, "  PauseStep: %s", pause_step_pv.c_str());
+  RCLCPP_INFO(LOGGER, "  CalibMode: %s", calib_mode_pv.c_str());
   return true;
 }
 
@@ -621,6 +691,31 @@ static int epics_read_pause_step_pv()
   return static_cast<int>(value);
 }
 
+// Read CalibMode PV: 0=normal, 1=holder, 2=sample_holder
+static CalibMode epics_read_calib_mode_pv()
+{
+  if (!epics_calib_mode_chid) {
+    return CalibMode::NORMAL;  // Default: normal mode if PV not connected
+  }
+
+  dbr_long_t value = 0;
+  int status = ca_get(DBR_LONG, epics_calib_mode_chid, &value);
+  if (status != ECA_NORMAL) {
+    RCLCPP_ERROR(LOGGER, "Failed to get calib_mode PV value: %s", ca_message(status));
+    return CalibMode::NORMAL;
+  }
+
+  status = ca_pend_io(1.0);
+  if (status != ECA_NORMAL) {
+    RCLCPP_ERROR(LOGGER, "Failed to complete get: %s", ca_message(status));
+    return CalibMode::NORMAL;
+  }
+
+  if (value == 1) return CalibMode::HOLDER;
+  if (value == 2) return CalibMode::SAMPLE_HOLDER;
+  return CalibMode::NORMAL;
+}
+
 // Wait for PauseStep PV to change from current step (called after each step)
 // If PauseStep == current_step (and PauseStep != 0), pause until PauseStep changes to a different value
 // Returns: true if pause cleared or not matching, false if shutdown requested
@@ -757,17 +852,17 @@ static bool epics_write_current_step_pv(int value)
   return true;
 }
 
-// Write to Gripper PV (0=close, 1=open)
-static bool epics_write_gripper_pv(int value)
+// Write to Gripper RBV PV (0=close, 1=open) - status display
+static bool epics_write_gripper_rbv_pv(int value)
 {
-  if (!epics_gripper_chid) {
+  if (!epics_gripper_rbv_chid) {
     return false;
   }
 
   dbr_long_t val = static_cast<dbr_long_t>(value);
-  int status = ca_put(DBR_LONG, epics_gripper_chid, &val);
+  int status = ca_put(DBR_LONG, epics_gripper_rbv_chid, &val);
   if (status != ECA_NORMAL) {
-    RCLCPP_ERROR(LOGGER, "Failed to put Gripper PV value: %s", ca_message(status));
+    RCLCPP_ERROR(LOGGER, "Failed to put Gripper_RBV PV value: %s", ca_message(status));
     return false;
   }
 
@@ -780,9 +875,33 @@ static bool epics_write_gripper_pv(int value)
   return true;
 }
 
+// Read Gripper command PV (0=close, 1=open)
+static int epics_read_gripper_cmd_pv()
+{
+  if (!epics_gripper_cmd_chid) {
+    return -1;
+  }
+
+  dbr_long_t value = 0;
+  int status = ca_get(DBR_LONG, epics_gripper_cmd_chid, &value);
+  if (status != ECA_NORMAL) {
+    RCLCPP_ERROR(LOGGER, "Failed to get Gripper command PV value: %s", ca_message(status));
+    return -1;
+  }
+
+  status = ca_pend_io(1.0);
+  if (status != ECA_NORMAL) {
+    RCLCPP_ERROR(LOGGER, "Failed to complete get: %s", ca_message(status));
+    return -1;
+  }
+
+  return static_cast<int>(value);
+}
+
 // Wait for EPICS PV trigger (non-zero value), then reset to 0
 // Returns: start_from_step value (>= 0), or -1 if shutdown
-static int wait_for_epics_trigger()
+// Optional callback is called during wait loop (e.g., for gripper command processing)
+static int wait_for_epics_trigger(std::function<void()> idle_callback = nullptr)
 {
   RCLCPP_INFO(LOGGER, " ");
   RCLCPP_INFO(LOGGER, "========================================");
@@ -807,6 +926,11 @@ static int wait_for_epics_trigger()
       return start_step;
     } else if (value < 0) {
       RCLCPP_WARN(LOGGER, "Error reading trigger PV, retrying...");
+    }
+
+    // Execute idle callback (e.g., gripper command processing)
+    if (idle_callback) {
+      idle_callback();
     }
 
     // Poll every 100ms
@@ -966,8 +1090,10 @@ int main(int argc, char** argv)
   const auto epics_holder_pv = node->declare_parameter<std::string>("epics_holder_pv", "Robot:Holder");
   const auto epics_stop_pv = node->declare_parameter<std::string>("epics_stop_pv", "Robot:Stop");
   const auto epics_current_step_pv = node->declare_parameter<std::string>("epics_current_step_pv", "Robot:CurrentStep");
+  const auto epics_gripper_rbv_pv = node->declare_parameter<std::string>("epics_gripper_rbv_pv", "Robot:Gripper_RBV");
   const auto epics_gripper_pv = node->declare_parameter<std::string>("epics_gripper_pv", "Robot:Gripper");
   const auto epics_pause_step_pv = node->declare_parameter<std::string>("epics_pause_step_pv", "Robot:PauseStep");
+  const auto epics_calib_mode_pv = node->declare_parameter<std::string>("epics_calib_mode_pv", "Robot:CalibMode");
 
   RCLCPP_INFO(LOGGER, "EPICS Configuration:");
   RCLCPP_INFO(LOGGER, "  Trigger PV: %s", epics_trigger_pv.c_str());
@@ -976,8 +1102,10 @@ int main(int argc, char** argv)
   RCLCPP_INFO(LOGGER, "  Holder PV: %s (1-10)", epics_holder_pv.c_str());
   RCLCPP_INFO(LOGGER, "  Stop PV: %s (1=pause, 0=resume)", epics_stop_pv.c_str());
   RCLCPP_INFO(LOGGER, "  CurrentStep PV: %s", epics_current_step_pv.c_str());
-  RCLCPP_INFO(LOGGER, "  Gripper PV: %s (0=close, 1=open)", epics_gripper_pv.c_str());
+  RCLCPP_INFO(LOGGER, "  Gripper_RBV PV: %s (status readback)", epics_gripper_rbv_pv.c_str());
+  RCLCPP_INFO(LOGGER, "  Gripper PV: %s (0=close, 1=open - command)", epics_gripper_pv.c_str());
   RCLCPP_INFO(LOGGER, "  PauseStep PV: %s (pause at specific step)", epics_pause_step_pv.c_str());
+  RCLCPP_INFO(LOGGER, "  CalibMode PV: %s (0=normal, 1=holder, 2=sample_holder)", epics_calib_mode_pv.c_str());
 
   // Initialize EPICS CA
   if (!epics_init()) {
@@ -986,7 +1114,7 @@ int main(int argc, char** argv)
     return 1;
   }
 
-  if (!epics_connect_pvs(epics_trigger_pv, epics_start_step_pv, epics_wait_pv, epics_holder_pv, epics_stop_pv, epics_current_step_pv, epics_gripper_pv, epics_pause_step_pv)) {
+  if (!epics_connect_pvs(epics_trigger_pv, epics_start_step_pv, epics_wait_pv, epics_holder_pv, epics_stop_pv, epics_current_step_pv, epics_gripper_rbv_pv, epics_gripper_pv, epics_pause_step_pv, epics_calib_mode_pv)) {
     RCLCPP_ERROR(LOGGER, "Failed to connect to EPICS PVs");
     epics_cleanup();
     rclcpp::shutdown();
@@ -1086,7 +1214,7 @@ int main(int argc, char** argv)
             int prev_state = last_gripper_state.load();
             if (prev_state != gripper_state) {
               last_gripper_state.store(gripper_state);
-              epics_write_gripper_pv(gripper_state);
+              epics_write_gripper_rbv_pv(gripper_state);
               RCLCPP_DEBUG(LOGGER, "Gripper state changed: %s (pos=%.4f)", 
                           gripper_state ? "OPEN" : "CLOSE", gripper_pos);
             }
@@ -1108,6 +1236,86 @@ int main(int argc, char** argv)
 
   std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
+  // Gripper command monitoring variables
+  std::atomic<int> last_gripper_cmd{-1};  // -1: unknown
+  std::atomic<int> pending_gripper_cmd{-1};  // -1: no pending command
+
+  // Gripper command monitoring thread (only reads PV and sets pending command)
+  std::atomic<bool> gripper_cmd_thread_running{true};
+  std::thread gripper_cmd_thread([&gripper_cmd_thread_running, &last_gripper_cmd, &pending_gripper_cmd]() {
+    // Attach this thread to EPICS CA context
+    if (!epics_attach_context()) {
+      RCLCPP_ERROR(LOGGER, "Gripper command thread failed to attach to EPICS CA context");
+      return;
+    }
+    RCLCPP_INFO(LOGGER, "Gripper command monitoring thread attached to EPICS CA context");
+
+    // Wait for system to be ready
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+
+    // Initialize last command value
+    int initial_cmd = epics_read_gripper_cmd_pv();
+    if (initial_cmd >= 0) {
+      last_gripper_cmd.store(initial_cmd);
+      RCLCPP_INFO(LOGGER, "Gripper command PV initialized: %d (%s)",
+                  initial_cmd, initial_cmd ? "OPEN" : "CLOSE");
+    }
+
+    while (gripper_cmd_thread_running && rclcpp::ok() && !shutdown_requested) {
+      int cmd = epics_read_gripper_cmd_pv();
+      if (cmd >= 0) {
+        int prev_cmd = last_gripper_cmd.load();
+        if (prev_cmd >= 0 && cmd != prev_cmd) {
+          RCLCPP_INFO(LOGGER, "Gripper command PV changed: %d -> %d (%s)",
+                      prev_cmd, cmd, cmd ? "OPEN" : "CLOSE");
+          last_gripper_cmd.store(cmd);
+          pending_gripper_cmd.store(cmd);  // Set pending command for main thread
+        } else if (prev_cmd < 0) {
+          last_gripper_cmd.store(cmd);
+        }
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    RCLCPP_INFO(LOGGER, "Gripper command monitoring thread stopped");
+  });
+
+  // Helper function to execute pending gripper command
+  auto execute_pending_gripper_cmd = [&]() -> bool {
+    int cmd = pending_gripper_cmd.exchange(-1);  // Get and clear pending command
+    if (cmd < 0) return false;  // No pending command
+
+    RCLCPP_INFO(LOGGER, "Executing gripper command: %s", cmd ? "OPEN" : "CLOSE");
+
+    if (use_gripper_action) {
+      double position = (cmd == 1) ? gripper_open_position : gripper_close_position;
+      if (call_gripper_action(node, gripper_action_name, position, gripper_max_effort)) {
+        RCLCPP_INFO(LOGGER, "Gripper %s via action", cmd ? "OPENED" : "CLOSED");
+        return true;
+      } else {
+        RCLCPP_WARN(LOGGER, "Gripper action failed");
+        return false;
+      }
+    } else {
+      try {
+        moveit::planning_interface::MoveGroupInterface hand_move_group(node, hand_group);
+        const std::string& target = (cmd == 1) ? hand_open : hand_close;
+        hand_move_group.setNamedTarget(target);
+        auto result = hand_move_group.move();
+        if (result == moveit::core::MoveItErrorCode::SUCCESS) {
+          RCLCPP_INFO(LOGGER, "Gripper %s via MoveIt named target '%s'",
+                      cmd ? "OPENED" : "CLOSED", target.c_str());
+          return true;
+        } else {
+          RCLCPP_WARN(LOGGER, "Gripper MoveIt command failed");
+          return false;
+        }
+      } catch (const std::exception& e) {
+        RCLCPP_ERROR(LOGGER, "Exception in gripper command: %s", e.what());
+        return false;
+      }
+    }
+  };
+
   // YAML file path for waypoints (will be reloaded on each trigger)
   const auto waypoints_yaml_path = node->declare_parameter<std::string>(
       "waypoints_yaml_path", "");
@@ -1116,8 +1324,10 @@ int main(int argc, char** argv)
     RCLCPP_ERROR(LOGGER, "waypoints_yaml_path parameter is required!");
     RCLCPP_ERROR(LOGGER, "Set it via launch file or command line: --ros-args -p waypoints_yaml_path:=/path/to/taught_waypoints.yaml");
     executor_running = false;
+    gripper_cmd_thread_running = false;
     executor.cancel();
     if (executor_thread.joinable()) executor_thread.join();
+    if (gripper_cmd_thread.joinable()) gripper_cmd_thread.join();
     epics_cleanup();
     rclcpp::shutdown();
     return 1;
@@ -1199,8 +1409,10 @@ int main(int argc, char** argv)
     if (!reload_waypoints()) {
       RCLCPP_ERROR(LOGGER, "Failed to load initial waypoints");
       executor_running = false;
+      gripper_cmd_thread_running = false;
       executor.cancel();
       if (executor_thread.joinable()) executor_thread.join();
+      if (gripper_cmd_thread.joinable()) gripper_cmd_thread.join();
       epics_cleanup();
       rclcpp::shutdown();
       return 1;
@@ -1525,8 +1737,10 @@ int main(int argc, char** argv)
     // Cleanup helper
     auto cleanup_and_exit = [&](int code) -> int {
       executor_running = false;
+      gripper_cmd_thread_running = false;
       executor.cancel();
       if (executor_thread.joinable()) executor_thread.join();
+      if (gripper_cmd_thread.joinable()) gripper_cmd_thread.join();
       g_executor = nullptr;
       epics_cleanup();
       rclcpp::shutdown();
@@ -1543,28 +1757,38 @@ int main(int argc, char** argv)
     RCLCPP_INFO(LOGGER, "  Holder PV: %s (1-10)", epics_holder_pv.c_str());
     RCLCPP_INFO(LOGGER, "  Stop PV: %s (1=pause, 0=resume)", epics_stop_pv.c_str());
     RCLCPP_INFO(LOGGER, "  CurrentStep PV: %s (updated after each step)", epics_current_step_pv.c_str());
-    RCLCPP_INFO(LOGGER, "  Gripper PV: %s (0=close, 1=open, threshold=%.3f)", epics_gripper_pv.c_str(), gripper_open_threshold);
+    RCLCPP_INFO(LOGGER, "  Gripper_RBV PV: %s (status, threshold=%.3f)", epics_gripper_rbv_pv.c_str(), gripper_open_threshold);
+    RCLCPP_INFO(LOGGER, "  Gripper PV: %s (command: 0=close, 1=open)", epics_gripper_pv.c_str());
     RCLCPP_INFO(LOGGER, "  PauseStep PV: %s (N=pause after step N until changed)", epics_pause_step_pv.c_str());
+    RCLCPP_INFO(LOGGER, "  CalibMode PV: %s", epics_calib_mode_pv.c_str());
+    RCLCPP_INFO(LOGGER, "    0=Normal (full sequence)");
+    RCLCPP_INFO(LOGGER, "    1=Holder calibration (0-5, wait, 20-23)");
+    RCLCPP_INFO(LOGGER, "    2=SampleHolder calibration (0-8, wait, 16-23)");
     RCLCPP_INFO(LOGGER, "========================================");
 
     // Main loop: Wait for trigger -> Execute sequence -> Repeat
     int sequence_count = 0;
     while (rclcpp::ok() && !shutdown_requested) {
       // Wait for EPICS trigger and get start_from_step
-      int start_from_step = wait_for_epics_trigger();
+      int start_from_step = wait_for_epics_trigger(execute_pending_gripper_cmd);
       if (start_from_step < 0) {
         break;  // Shutdown requested
       }
 
       sequence_count++;
-      
+
       // Read holder number from EPICS PV
       int holder_number = epics_read_holder_pv();
-      
+
+      // Read calibration mode from EPICS PV
+      CalibMode calib_mode = epics_read_calib_mode_pv();
+      const char* calib_mode_str = (calib_mode == CalibMode::HOLDER) ? "Holder" :
+                                   (calib_mode == CalibMode::SAMPLE_HOLDER) ? "SampleHolder" : "Normal";
+
       RCLCPP_INFO(LOGGER, " ");
       RCLCPP_INFO(LOGGER, "========================================");
-      RCLCPP_INFO(LOGGER, "[%s] Starting sequence #%d (from step %d, holder %d)", 
-                  get_timestamp().c_str(), sequence_count, start_from_step, holder_number);
+      RCLCPP_INFO(LOGGER, "[%s] Starting sequence #%d (from step %d, holder %d, mode=%s)",
+                  get_timestamp().c_str(), sequence_count, start_from_step, holder_number, calib_mode_str);
       RCLCPP_INFO(LOGGER, "========================================");
 
       // Reset Wait PV to 0 before starting sequence
@@ -1633,61 +1857,152 @@ int main(int argc, char** argv)
       #define EXEC_HAND(n, name, state) \
         if (!skip_remaining && !(sequence_success = execute_hand_stage(n, name, state, start_from_step))) break
 
-      // First sample: pick from holder, place to sample holder
-      // Steps 2, 6, 8, 12 use Cartesian (line) path to avoid collision
-      EXEC_HAND(0, "open_hand", hand_open);
-      EXEC_ARM(1, "holder_standby", j_standby);
-      EXEC_CARTESIAN(2, "holder_above", j_above);              // Line: standby -> above
-      EXEC_CARTESIAN(3, "holder_on_position", j_on_pos);
-      EXEC_HAND(4, "close_gripper", hand_close);
-      EXEC_CARTESIAN(5, "holder_above_return", j_above);
-      EXEC_CARTESIAN(6, "holder_retreat", j_retreat);          // Line: above -> retreat
-      EXEC_ARM(7, "sample_holder_standby", j_sh_standby);
-      EXEC_CARTESIAN(8, "sample_holder_above", j_sh_above);    // Line: standby -> above
-      EXEC_CARTESIAN(9, "sample_holder_on_position", j_sh_on_pos);
-      EXEC_HAND(10, "open_gripper", hand_open);
-      EXEC_CARTESIAN(11, "sample_holder_above_return", j_sh_above);
-      EXEC_CARTESIAN(12, "sample_holder_standby_return", j_sh_standby);  // Line: above -> standby
+      // ========================================
+      // CALIBRATION MODE: HOLDER (steps 0-5, wait for trigger, 20-23)
+      // ========================================
+      if (calib_mode == CalibMode::HOLDER) {
+        RCLCPP_INFO(LOGGER, ">>> HOLDER CALIBRATION MODE: Steps 0-5, wait, 20-23 <<<");
 
-      // Wait for measurement after step 12 (before picking up measured sample)
-      if (sequence_success && !skip_remaining && start_from_step <= 12) {
-        WaitStatus wait_result = wait_for_measurement();
-        if (wait_result == WaitStatus::SKIP) {
-          RCLCPP_INFO(LOGGER, "Skip requested - skipping remaining steps (13-23)");
-          skip_remaining = true;
+        // Phase 1: Pick sample from holder and hold at above position (steps 0-5)
+        EXEC_HAND(0, "open_hand", hand_open);
+        EXEC_ARM(1, "holder_standby", j_standby);
+        EXEC_CARTESIAN(2, "holder_above", j_above);
+        EXEC_CARTESIAN(3, "holder_on_position", j_on_pos);
+        EXEC_HAND(4, "close_gripper", hand_close);
+        EXEC_CARTESIAN(5, "holder_above_return", j_above);
+
+        // Wait for next trigger to return sample
+        if (sequence_success) {
+          RCLCPP_INFO(LOGGER, " ");
+          RCLCPP_INFO(LOGGER, "========================================");
+          RCLCPP_INFO(LOGGER, "[%s] HOLDER CALIBRATION: Holding at above position", get_timestamp().c_str());
+          RCLCPP_INFO(LOGGER, "  Check alignment, then set Trigger=1 to return sample");
+          RCLCPP_INFO(LOGGER, "========================================");
+
+          // Wait for next trigger
+          int next_trigger = wait_for_epics_trigger(execute_pending_gripper_cmd);
+          if (next_trigger < 0) {
+            break;  // Shutdown requested
+          }
+
+          // Phase 2: Return sample to holder (steps 20-23)
+          RCLCPP_INFO(LOGGER, ">>> Returning sample to holder (steps 20-23) <<<");
+          EXEC_CARTESIAN(20, "holder_on_position_final", j_on_pos);
+          EXEC_HAND(21, "open_gripper_final", hand_open);
+          EXEC_CARTESIAN(22, "holder_above_final_return", j_above);
+          EXEC_CARTESIAN(23, "holder_standby_final", j_standby);
         }
-        // WaitStatus::CONTINUE -> proceed normally
       }
+      // ========================================
+      // CALIBRATION MODE: SAMPLE_HOLDER (steps 0-8, wait for trigger, 16-23)
+      // ========================================
+      else if (calib_mode == CalibMode::SAMPLE_HOLDER) {
+        RCLCPP_INFO(LOGGER, ">>> SAMPLE HOLDER CALIBRATION MODE: Steps 0-8, wait, 16-23 <<<");
 
-      // Second sample: pick from sample holder, place to holder
-      if (!skip_remaining) {
-        EXEC_CARTESIAN(13, "sample_holder_above_2nd", j_sh_above);
-        EXEC_CARTESIAN(14, "sample_holder_on_position_2nd", j_sh_on_pos);
-        EXEC_HAND(15, "close_gripper_2nd", hand_close);
-        EXEC_CARTESIAN(16, "sample_holder_above_2nd_return", j_sh_above);
-        EXEC_CARTESIAN(17, "sample_holder_standby_2nd", j_sh_standby);
-        EXEC_ARM(18, "holder_standby_return", j_standby);
-        EXEC_CARTESIAN(19, "holder_above_final", j_above);
-        EXEC_CARTESIAN(20, "holder_on_position_final", j_on_pos);
-        EXEC_HAND(21, "open_gripper_final", hand_open);
-        EXEC_CARTESIAN(22, "holder_above_final_return", j_above);
-        EXEC_CARTESIAN(23, "holder_standby_final", j_standby);
+        // Phase 1: Pick from holder and move to sample holder above (steps 0-8)
+        EXEC_HAND(0, "open_hand", hand_open);
+        EXEC_ARM(1, "holder_standby", j_standby);
+        EXEC_CARTESIAN(2, "holder_above", j_above);
+        EXEC_CARTESIAN(3, "holder_on_position", j_on_pos);
+        EXEC_HAND(4, "close_gripper", hand_close);
+        EXEC_CARTESIAN(5, "holder_above_return", j_above);
+        EXEC_CARTESIAN(6, "holder_retreat", j_retreat);
+        EXEC_ARM(7, "sample_holder_standby", j_sh_standby);
+        EXEC_CARTESIAN(8, "sample_holder_above", j_sh_above);
+
+        // Wait for next trigger to continue
+        if (sequence_success) {
+          RCLCPP_INFO(LOGGER, " ");
+          RCLCPP_INFO(LOGGER, "========================================");
+          RCLCPP_INFO(LOGGER, "[%s] SAMPLE HOLDER CALIBRATION: Holding at sample holder above", get_timestamp().c_str());
+          RCLCPP_INFO(LOGGER, "  Check alignment, then set Trigger=1 to return sample");
+          RCLCPP_INFO(LOGGER, "========================================");
+
+          // Wait for next trigger
+          int next_trigger = wait_for_epics_trigger(execute_pending_gripper_cmd);
+          if (next_trigger < 0) {
+            break;  // Shutdown requested
+          }
+
+          // Phase 2: Return sample to holder (steps 16-23)
+          RCLCPP_INFO(LOGGER, ">>> Returning sample to holder (steps 16-23) <<<");
+          EXEC_CARTESIAN(16, "sample_holder_above_2nd_return", j_sh_above);
+          EXEC_CARTESIAN(17, "sample_holder_standby_2nd", j_sh_standby);
+          EXEC_ARM(18, "holder_standby_return", j_standby);
+          EXEC_CARTESIAN(19, "holder_above_final", j_above);
+          EXEC_CARTESIAN(20, "holder_on_position_final", j_on_pos);
+          EXEC_HAND(21, "open_gripper_final", hand_open);
+          EXEC_CARTESIAN(22, "holder_above_final_return", j_above);
+          EXEC_CARTESIAN(23, "holder_standby_final", j_standby);
+        }
+      }
+      // ========================================
+      // NORMAL MODE: Full sequence (steps 0-23)
+      // ========================================
+      else {
+        // First sample: pick from holder, place to sample holder
+        // Steps 2, 6, 8, 12 use Cartesian (line) path to avoid collision
+        EXEC_HAND(0, "open_hand", hand_open);
+        EXEC_ARM(1, "holder_standby", j_standby);
+        EXEC_CARTESIAN(2, "holder_above", j_above);              // Line: standby -> above
+        EXEC_CARTESIAN(3, "holder_on_position", j_on_pos);
+        EXEC_HAND(4, "close_gripper", hand_close);
+        EXEC_CARTESIAN(5, "holder_above_return", j_above);
+        EXEC_CARTESIAN(6, "holder_retreat", j_retreat);          // Line: above -> retreat
+        EXEC_ARM(7, "sample_holder_standby", j_sh_standby);
+        EXEC_CARTESIAN(8, "sample_holder_above", j_sh_above);    // Line: standby -> above
+        EXEC_CARTESIAN(9, "sample_holder_on_position", j_sh_on_pos);
+        EXEC_HAND(10, "open_gripper", hand_open);
+        EXEC_CARTESIAN(11, "sample_holder_above_return", j_sh_above);
+        EXEC_CARTESIAN(12, "sample_holder_standby_return", j_sh_standby);  // Line: above -> standby
+
+        // Wait for measurement after step 12 (before picking up measured sample)
+        if (sequence_success && !skip_remaining && start_from_step <= 12) {
+          WaitStatus wait_result = wait_for_measurement();
+          if (wait_result == WaitStatus::SKIP) {
+            RCLCPP_INFO(LOGGER, "Skip requested - skipping remaining steps (13-23)");
+            skip_remaining = true;
+          }
+          // WaitStatus::CONTINUE -> proceed normally
+        }
+
+        // Second sample: pick from sample holder, place to holder
+        if (!skip_remaining) {
+          EXEC_CARTESIAN(13, "sample_holder_above_2nd", j_sh_above);
+          EXEC_CARTESIAN(14, "sample_holder_on_position_2nd", j_sh_on_pos);
+          EXEC_HAND(15, "close_gripper_2nd", hand_close);
+          EXEC_CARTESIAN(16, "sample_holder_above_2nd_return", j_sh_above);
+          EXEC_CARTESIAN(17, "sample_holder_standby_2nd", j_sh_standby);
+          EXEC_ARM(18, "holder_standby_return", j_standby);
+          EXEC_CARTESIAN(19, "holder_above_final", j_above);
+          EXEC_CARTESIAN(20, "holder_on_position_final", j_on_pos);
+          EXEC_HAND(21, "open_gripper_final", hand_open);
+          EXEC_CARTESIAN(22, "holder_above_final_return", j_above);
+          EXEC_CARTESIAN(23, "holder_standby_final", j_standby);
+        }
       }
 
       #undef EXEC_ARM
       #undef EXEC_CARTESIAN
       #undef EXEC_HAND
 
-      if (skip_remaining) {
+      // Completion messages
+      if (calib_mode != CalibMode::NORMAL) {
         RCLCPP_INFO(LOGGER, " ");
         RCLCPP_INFO(LOGGER, "========================================");
-        RCLCPP_INFO(LOGGER, "[%s] Sequence #%d: Steps 13-23 skipped (Wait PV = 2)", 
+        RCLCPP_INFO(LOGGER, "[%s] Calibration sequence #%d completed (%s mode)",
+                    get_timestamp().c_str(), sequence_count, calib_mode_str);
+        RCLCPP_INFO(LOGGER, "========================================");
+      } else if (skip_remaining) {
+        RCLCPP_INFO(LOGGER, " ");
+        RCLCPP_INFO(LOGGER, "========================================");
+        RCLCPP_INFO(LOGGER, "[%s] Sequence #%d: Steps 13-23 skipped (Wait PV = 2)",
                     get_timestamp().c_str(), sequence_count);
         RCLCPP_INFO(LOGGER, "========================================");
       } else if (sequence_success) {
         RCLCPP_INFO(LOGGER, " ");
         RCLCPP_INFO(LOGGER, "========================================");
-        RCLCPP_INFO(LOGGER, "[%s] Sequence #%d completed successfully!", 
+        RCLCPP_INFO(LOGGER, "[%s] Sequence #%d completed successfully!",
                     get_timestamp().c_str(), sequence_count);
         RCLCPP_INFO(LOGGER, "========================================");
       } else {
@@ -1703,8 +2018,10 @@ int main(int argc, char** argv)
   } catch (const std::exception& e) {
     RCLCPP_ERROR(LOGGER, "Error: %s", e.what());
     executor_running = false;
+    gripper_cmd_thread_running = false;
     executor.cancel();
     if (executor_thread.joinable()) executor_thread.join();
+    if (gripper_cmd_thread.joinable()) gripper_cmd_thread.join();
     epics_cleanup();
     rclcpp::shutdown();
     return 1;
