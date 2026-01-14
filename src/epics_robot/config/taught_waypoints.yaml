@@ -1,57 +1,23 @@
-# Taught Waypoints for Multi-Holder Sample Loading
-# Only the essential waypoints need to be taught - the rest are calculated
-# All positions are in joint space: [gripper, shoulder_pan, wrist_3, wrist_2, wrist_1, elbow, shoulder_lift]
-# GLOBAL FRAME (World/Base Frame):
-#   - X axis: Robot forward direction (앞쪽, forward)
-#   - Y axis: Robot left direction (왼쪽, left)
-#   - Z axis: Upward direction (위쪽, up, opposite to gravity)
-#
-# LOCAL FRAME (End-Effector Frame):
-#   - X axis: Robot right direction (오른쪽, right)
-#   - Y axis: Downward direction (아래쪽, down)
-#   - Z axis: Forward direction (진행 방향, forward/approach)
 /**:
   ros__parameters:
-    # Holder 1 positions (taught)
-    holder1_standby: [0.024705882352941178, -1.2054403463946741, 0.006688363384455442, -1.207269016896383, -3.4068523846068324, -1.6373335123062134, -1.253219024544098]
-    holder1_on_position: [0.024705882352941178, -1.3271001021014612, 6.194162415340543e-05, -1.3306644598590296, -3.3016468487181605, -1.3807628154754639, -1.6005197964110316]
-
-    # Sample holder positions (taught)
-    sample_holder_standby: [0.024705882352941178, -0.17618304887880498, 0.0090628145262599, -1.7623332182513636, -2.3054896793761195, -2.479313373565674, -1.4844883319786568]
-    sample_holder_on_position: [0.003333333333333334, -0.09870034853090459, 0.007620103191584349, -1.6875322500811976, -2.418257852593893, -1.8540196418762207, -1.9946166477599085]
-    # Cartesian offsets (in meters) for calculated waypoints
-    # These define how to compute intermediate waypoints from taught positions
-    # above = on_position - Y offset (5mm in -Y direction)
-    above_y_offset: -0.005  # -5mm in Y direction from on_position
-
-    # retreat = above + Z offset (50mm retreat in -Z direction after picking/placing)
-    retreat_z_offset: -0.05  # -50mm in Z direction (horizontal retreat)
-
-    # Fine-tuning offsets for holder1 waypoints (in end-effector local frame)
-    # These allow small adjustments to the taught positions without re-teaching
-    # Applied to ALL holder1 waypoints (standby, on_position, above, retreat)
-    # Positive values move in the positive direction of the end-effector's local axes
-    holder1_on_position_x_offset: 0.0015   # X axis offset (m) - end-effector local X
-    holder1_on_position_y_offset: 0.0      # Y axis offset (m) - end-effector local Y
-    holder1_on_position_z_offset: -0.0005      # Z axis offset (m) - end-effector local Z
-
-    sample_holder_on_position_x_offset: 0.0015    # X axis offset (m) - end-effector local X, moved 1.5mm left (user view) = +X (robot local), was 0.001
-    sample_holder_on_position_y_offset: -0.0005     # Y axis offset (m) - end-effector local Y, moved 1mm up (was 0.001)
-    sample_holder_on_position_z_offset: -0.0005   # Z axis offset (m) - end-effector local Z, -0.5mm deeper into holder
-
-    # Multi-holder X offset array (in end-effector local frame)
-    # Additional X offset for each holder (holder 2~10) to compensate for mechanical alignment
-    # Index 0 = holder 2, Index 1 = holder 3, ..., Index 8 = holder 10
-    # These are added on top of the holder1 base offset (1.5mm)
-    holder_multi_x_offsets: [0.000, 0.000, 0.000, 0.000, 0.0015, 0.0015, 0.0015, 0.0015, 0.0015]  # holder 2~10 in meters
-
-    # Multi-holder Z offset array (in end-effector local frame)
-    # Additional Z offset for each holder (holder 2~10), -1mm for all
-    # Index 0 = holder 2, Index 1 = holder 3, ..., Index 8 = holder 10
-    holder_multi_z_offsets: [0.00025, 0.00020, 0.00020, 0.00020, 0.00025, 0.0003, 0.00035, 0.0004, 0.00045]  # holder 2~10 in meters
-
-    # wrist_3_joint rotation offset (in radians)
-    # Applied to all holder positions (standby, on_position, above, retreat)
-    # Positive = counter-clockwise rotation when looking down the tool axis
-    # Example: 0.0175 rad ≈ 1 degree, 0.035 rad ≈ 2 degrees
-    wrist3_rotation_offset: 0.0  # radians (~2 degrees)
+    holder1_standby: [0.024705882352941178, -1.2054403463946741, 0.006688363384455442,
+      -1.207269016896383, -3.4068523846068324, -1.6373335123062134, -1.253219024544098]
+    holder1_on_position: [0.024705882352941178, -1.3271001021014612, 6.194162415340543e-05,
+      -1.3306644598590296, -3.3016468487181605, -1.3807628154754639, -1.6005197964110316]
+    sample_holder_standby: [0.024705882352941178, -0.17618304887880498, 0.0090628145262599,
+      -1.7623332182513636, -2.3054896793761195, -2.479313373565674, -1.4844883319786568]
+    sample_holder_on_position: [0.003333333333333334, -0.09870034853090459, 0.007620103191584349,
+      -1.6875322500811976, -2.418257852593893, -1.8540196418762207, -1.9946166477599085]
+    above_y_offset: -0.005
+    retreat_z_offset: -0.05
+    holder1_on_position_x_offset: 0.0015
+    holder1_on_position_y_offset: 0.0
+    holder1_on_position_z_offset: -0.0005
+    sample_holder_on_position_x_offset: 0.0015
+    sample_holder_on_position_y_offset: -0.0005
+    sample_holder_on_position_z_offset: -0.0005
+    holder_multi_x_offsets: [-0.0008, 0.0, 0.0, 0.0, 0.0015, 0.0015, 0.0015, 0.0015,
+      0.0015]
+    holder_multi_z_offsets: [0.00025, 0.0002, 0.0002, 0.0002, 0.00025, 0.0003, 0.00035,
+      0.0004, 0.00045]
+    wrist3_rotation_offset: 0.0

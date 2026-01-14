@@ -284,21 +284,23 @@ class OffsetTableWidget(qt.QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.setStyleSheet("""
             QTableWidget {
-                background-color: #2a2a2a;
-                gridline-color: #444;
+                background-color: #3a3a3a;
+                alternate-background-color: #424242;
+                gridline-color: #555;
                 font-size: 10px;
             }
             QTableWidget::item {
                 padding: 4px;
+                color: #ddd;
             }
             QTableWidget::item:selected {
-                background-color: #3d5a80;
+                background-color: #4a6a90;
             }
             QHeaderView::section {
-                background-color: #3a3a3a;
-                color: #ccc;
+                background-color: #4a4a4a;
+                color: #eee;
                 padding: 4px;
-                border: 1px solid #444;
+                border: 1px solid #555;
                 font-weight: bold;
             }
         """)
@@ -312,11 +314,11 @@ class OffsetTableWidget(qt.QWidget):
             name_item = qt.QTableWidgetItem(label)
             name_item.setFlags(name_item.flags() & ~qt.Qt.ItemIsEditable)
             if row == 0:
-                name_item.setBackground(qt.QColor(60, 40, 80))
+                name_item.setBackground(qt.QColor(75, 55, 95))  # Sample Holder - purple tint
             elif row == 1:
-                name_item.setBackground(qt.QColor(40, 60, 80))
+                name_item.setBackground(qt.QColor(55, 75, 95))  # Holder 1 - blue tint
             else:
-                name_item.setBackground(qt.QColor(50, 50, 60))
+                name_item.setBackground(qt.QColor(65, 65, 75))  # Holder 2-10 - gray
             self.table.setItem(row, 0, name_item)
 
             # X, Y, Z spinboxes
@@ -331,16 +333,16 @@ class OffsetTableWidget(qt.QWidget):
                 
                 # Color coding
                 if col == 1:  # X
-                    spin.setStyleSheet("QDoubleSpinBox { color: #FF8888; background: #333; }")
+                    spin.setStyleSheet("QDoubleSpinBox { color: #FF8888; background: #454545; border: 1px solid #555; }")
                 elif col == 2:  # Y
-                    spin.setStyleSheet("QDoubleSpinBox { color: #88FF88; background: #333; }")
+                    spin.setStyleSheet("QDoubleSpinBox { color: #88FF88; background: #454545; border: 1px solid #555; }")
                 else:  # Z
-                    spin.setStyleSheet("QDoubleSpinBox { color: #88AAFF; background: #333; }")
+                    spin.setStyleSheet("QDoubleSpinBox { color: #88AAFF; background: #454545; border: 1px solid #555; }")
 
                 # Holder 2-10 don't have Y offset
                 if row >= 2 and col == 2:
                     spin.setEnabled(False)
-                    spin.setStyleSheet("QDoubleSpinBox { color: #666; background: #2a2a2a; }")
+                    spin.setStyleSheet("QDoubleSpinBox { color: #666; background: #3a3a3a; border: 1px solid #444; }")
 
                 spin.valueChanged.connect(self._on_value_changed)
                 self.table.setCellWidget(row, col, spin)
