@@ -102,6 +102,32 @@ EPICS 프로세스 변수를 제공합니다. EPICS Sequence 실행 전에 반�
         -p gripper_open_threshold:=0.02 \
         -p epics_pause_step_pv:="Robot:PauseStep"
 
+--------------------------------------------------------------------------------
+4-1. systemd로 시작/종료 관리 (권장)
+--------------------------------------------------------------------------------
+start/stop 순서가 중요한 시스템이므로 systemd 유닛으로 관리하는 것을
+권장합니다. 유닛 파일은 /home/stevek/ws/systemd에 준비되어 있습니다.
+
+시작 순서:
+    SoftIoc -> ur_control -> MoveIt -> EPICS
+
+종료 순서:
+    EPICS -> MoveIt -> ur_control -> SoftIoc
+
+[설치 및 실행] (user 서비스 권장)
+    mkdir -p ~/.config/systemd/user
+    cp /home/stevek/ws/systemd/*.service /home/stevek/ws/systemd/*.target ~/.config/systemd/user/
+    systemctl --user daemon-reload
+    systemctl --user enable robot-stack.target
+    systemctl --user start robot-stack.target
+
+[종료]
+    systemctl --user stop robot-stack.target
+
+[상태 확인/로그]
+    systemctl --user status robot-epics.service
+    journalctl --user -u robot-epics.service -f
+
 
 5. Stage Scene 추가 (선택사항)
 --------------------------------------------------------------------------------
@@ -304,8 +330,11 @@ EPICS IOC 터미널(터미널 3)에서 다음 명령어로 로봇을 제어할 �
 
 10. 종료 방법
 --------------------------------------------------------------------------------
-각 터미널에서 Ctrl+C를 눌러 프로그램을 종료합니다.
+수동 실행 시 각 터미널에서 Ctrl+C로 종료합니다.
 종료 순서: 터미널 4 -> 터미널 3 -> 터미널 2 -> 터미널 1
+
+systemd 사용 시:
+    systemctl --user stop robot-stack.target
 
 
 11. 문제 해결

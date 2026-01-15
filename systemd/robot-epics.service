@@ -1,0 +1,14 @@
+[Unit]
+Description=EPICS Triggered Robot Sequence
+After=robot-moveit.service robot-softioc.service
+Wants=robot-moveit.service robot-softioc.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/stevek/ws
+ExecStart=/usr/bin/bash -lc "source /opt/ros/humble/setup.bash source /opt/ros/humble/setup.bash &&source /opt/ros/humble/setup.bash && source /home/stevek/ws/install/setup.bash source /opt/ros/humble/setup.bash &&source /opt/ros/humble/setup.bash && ros2 run epics_robot epics_triggered_sequence \\\n  --ros-args \\\n  -p arm_group:=ur_manipulator \\\n  -p waypoints_yaml_path:=/home/stevek/ws/src/epics_robot/config/taught_waypoints.yaml \\\n  -p epics_trigger_pv:=\"Robot:Trigger\" \\\n  -p epics_start_step_pv:=\"Robot:StartStep\" \\\n  -p epics_wait_pv:=\"Robot:Wait\" \\\n  -p epics_holder_pv:=\"Robot:Holder\" \\\n  -p epics_stop_pv:=\"Robot:Stop\" \\\n  -p epics_current_step_pv:=\"Robot:CurrentStep\" \\\n  -p epics_gripper_pv:=\"Robot:Gripper\" \\\n  -p gripper_open_threshold:=0.02 \\\n  -p epics_pause_step_pv:=\"Robot:PauseStep\""
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=robot-stack.target

@@ -1,0 +1,7 @@
+[Unit]
+Description=UR3e + HandE Robot Stack
+Wants=robot-softioc.service robot-ur-control.service robot-moveit.service robot-epics.service
+After=robot-softioc.service robot-ur-control.service robot-moveit.service robot-epics.service
+
+[Install]
+WantedBy=default.target
