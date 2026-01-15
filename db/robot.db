@@ -76,3 +76,10 @@ record(bi, "Robot:Gripper_RBV")
     field(ONAM, "Open")
     field(VAL,  "0")
 }
+record(bi, "Robot:Loaded")
+{
+    field(DESC, "Sample loaded in sample holder")
+    field(ZNAM, "Not Loaded")
+    field(ONAM, "Loaded")
+    field(VAL,  "0")
+}

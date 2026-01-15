@@ -107,6 +107,7 @@ static chid epics_gripper_rbv_chid = nullptr;
 static chid epics_gripper_cmd_chid = nullptr;
 static chid epics_pause_step_chid = nullptr;
 static chid epics_calib_mode_chid = nullptr;
+static chid epics_loaded_chid = nullptr;
 static std::string epics_trigger_pv_name;
 static std::string epics_start_step_pv_name;
 static std::string epics_wait_pv_name;
@@ -117,6 +118,7 @@ static std::string epics_gripper_rbv_pv_name;
 static std::string epics_gripper_cmd_pv_name;
 static std::string epics_pause_step_pv_name;
 static std::string epics_calib_mode_pv_name;
+static std::string epics_loaded_pv_name;
 static bool epics_initialized = false;
 static struct ca_client_context* epics_ca_context = nullptr;  // For multi-thread CA access
 
@@ -340,6 +342,10 @@ static void epics_cleanup()
     ca_clear_channel(epics_calib_mode_chid);
     epics_calib_mode_chid = nullptr;
   }
+  if (epics_loaded_chid) {
+    ca_clear_channel(epics_loaded_chid);
+    epics_loaded_chid = nullptr;
+  }
   if (epics_initialized) {
     ca_context_destroy();
     epics_initialized = false;
@@ -350,7 +356,8 @@ static bool epics_connect_pvs(const std::string& trigger_pv, const std::string& 
                                const std::string& wait_pv, const std::string& holder_pv,
                                const std::string& stop_pv, const std::string& current_step_pv,
                                const std::string& gripper_rbv_pv, const std::string& gripper_cmd_pv,
-                               const std::string& pause_step_pv, const std::string& calib_mode_pv)
+                               const std::string& pause_step_pv, const std::string& calib_mode_pv,
+                               const std::string& loaded_pv)
 {
   epics_trigger_pv_name = trigger_pv;
   epics_start_step_pv_name = start_step_pv;
@@ -362,6 +369,7 @@ static bool epics_connect_pvs(const std::string& trigger_pv, const std::string& 
   epics_gripper_cmd_pv_name = gripper_cmd_pv;
   epics_pause_step_pv_name = pause_step_pv;
   epics_calib_mode_pv_name = calib_mode_pv;
+  epics_loaded_pv_name = loaded_pv;
 
   // Create channel for trigger PV (read)
   int status = ca_create_channel(trigger_pv.c_str(), nullptr, nullptr, CA_PRIORITY_DEFAULT, &epics_trigger_chid);
@@ -447,6 +455,13 @@ static bool epics_connect_pvs(const std::string& trigger_pv, const std::string& 
     return false;
   }
 
+  // Create channel for loaded PV (write only - status for measurement program)
+  status = ca_create_channel(loaded_pv.c_str(), nullptr, nullptr, CA_PRIORITY_DEFAULT, &epics_loaded_chid);
+  if (status != ECA_NORMAL) {
+    RCLCPP_ERROR(LOGGER, "Failed to create channel for PV '%s': %s", loaded_pv.c_str(), ca_message(status));
+    return false;
+  }
+
   // Wait for all connections
   status = ca_pend_io(5.0);
   if (status != ECA_NORMAL) {
@@ -501,6 +516,11 @@ static bool epics_connect_pvs(const std::string& trigger_pv, const std::string& 
 
   if (ca_state(epics_calib_mode_chid) != cs_conn) {
     RCLCPP_ERROR(LOGGER, "PV '%s' is not connected", calib_mode_pv.c_str());
+    return false;
+  }
+
+  if (ca_state(epics_loaded_chid) != cs_conn) {
+    RCLCPP_ERROR(LOGGER, "PV '%s' is not connected", loaded_pv.c_str());
     return false;
   }
 
@@ -875,6 +895,30 @@ static bool epics_write_gripper_rbv_pv(int value)
   return true;
 }
 
+// Write to Loaded PV (0=not loaded, 1=loaded) - for measurement program
+static bool epics_write_loaded_pv(int value)
+{
+  if (!epics_loaded_chid) {
+    return false;
+  }
+
+  dbr_long_t val = static_cast<dbr_long_t>(value);
+  int status = ca_put(DBR_LONG, epics_loaded_chid, &val);
+  if (status != ECA_NORMAL) {
+    RCLCPP_ERROR(LOGGER, "Failed to put Loaded PV value: %s", ca_message(status));
+    return false;
+  }
+
+  status = ca_pend_io(1.0);
+  if (status != ECA_NORMAL) {
+    RCLCPP_ERROR(LOGGER, "Failed to complete put: %s", ca_message(status));
+    return false;
+  }
+
+  RCLCPP_INFO(LOGGER, "Set Loaded PV '%s' to %d", epics_loaded_pv_name.c_str(), value);
+  return true;
+}
+
 // Read Gripper command PV (0=close, 1=open)
 static int epics_read_gripper_cmd_pv()
 {
@@ -1094,6 +1138,7 @@ int main(int argc, char** argv)
   const auto epics_gripper_pv = node->declare_parameter<std::string>("epics_gripper_pv", "Robot:Gripper");
   const auto epics_pause_step_pv = node->declare_parameter<std::string>("epics_pause_step_pv", "Robot:PauseStep");
   const auto epics_calib_mode_pv = node->declare_parameter<std::string>("epics_calib_mode_pv", "Robot:CalibMode");
+  const auto epics_loaded_pv = node->declare_parameter<std::string>("epics_loaded_pv", "Robot:Loaded");
 
   RCLCPP_INFO(LOGGER, "EPICS Configuration:");
   RCLCPP_INFO(LOGGER, "  Trigger PV: %s", epics_trigger_pv.c_str());
@@ -1114,7 +1159,7 @@ int main(int argc, char** argv)
     return 1;
   }
 
-  if (!epics_connect_pvs(epics_trigger_pv, epics_start_step_pv, epics_wait_pv, epics_holder_pv, epics_stop_pv, epics_current_step_pv, epics_gripper_rbv_pv, epics_gripper_pv, epics_pause_step_pv, epics_calib_mode_pv)) {
+  if (!epics_connect_pvs(epics_trigger_pv, epics_start_step_pv, epics_wait_pv, epics_holder_pv, epics_stop_pv, epics_current_step_pv, epics_gripper_rbv_pv, epics_gripper_pv, epics_pause_step_pv, epics_calib_mode_pv, epics_loaded_pv)) {
     RCLCPP_ERROR(LOGGER, "Failed to connect to EPICS PVs");
     epics_cleanup();
     rclcpp::shutdown();
@@ -1958,7 +2003,14 @@ int main(int argc, char** argv)
 
         // Wait for measurement after step 12 (before picking up measured sample)
         if (sequence_success && !skip_remaining && start_from_step <= 12) {
+          // Set Loaded=1 to indicate sample is ready for measurement
+          epics_write_loaded_pv(1);
+
           WaitStatus wait_result = wait_for_measurement();
+
+          // Set Loaded=0 after measurement wait completes
+          epics_write_loaded_pv(0);
+
           if (wait_result == WaitStatus::SKIP) {
             RCLCPP_INFO(LOGGER, "Skip requested - skipping remaining steps (13-23)");
             skip_remaining = true;

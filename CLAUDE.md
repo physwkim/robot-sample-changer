@@ -61,7 +61,8 @@ ros2 run epics_robot epics_triggered_sequence \
     -p epics_gripper_pv:="Robot:Gripper" \
     -p epics_gripper_rbv_pv:="Robot:Gripper_RBV" \
     -p gripper_open_threshold:=0.02 \
-    -p epics_pause_step_pv:="Robot:PauseStep"
+    -p epics_pause_step_pv:="Robot:PauseStep" \
+    -p epics_loaded_pv:="Robot:Loaded"
 ```
 
 ### 5. Stage Scene (선택사항)
@@ -95,11 +96,32 @@ ws/
 │   ├── moveit_task_constructor/
 │   ├── ros2_robotiq_gripper/
 │   ├── ur_moveit_config/
-│   └── realsense_service/         # RealSense D405 카메라 서비스
+│   ├── realsense_service/         # RealSense D405 카메라 서비스
+│   └── robot_gui/                 # EPICS 기반 로봇 제어 GUI (silx/PyQt)
 ├── resources/                     # STL 메쉬 파일
 ├── db/robot.db                    # EPICS IOC 데이터베이스
 └── .gitignore
 ```
+
+## EPICS PV 레퍼런스
+
+| PV 이름 | 타입 | 설명 |
+|---------|------|------|
+| Robot:Trigger | bo | 시퀀스 시작 트리거 (0=Off, 1=On) |
+| Robot:Wait | mbbo | 측정 대기 상태 (0=Wait, 1=Continue, 2=Abort) |
+| Robot:CalibMode | mbbo | 캘리브레이션 모드 (0=Normal, 1=Holder Calib, 2=Sample Holder Calib) |
+| Robot:StartStep | longout | 시작 스텝 번호 (0-300) |
+| Robot:Holder | longout | 홀더 번호 (1-10) |
+| Robot:Stop | bo | 일시정지 요청 (0=Run, 1=Pause) |
+| Robot:CurrentStep | longin | 현재 실행 중인 스텝 (0-30) |
+| Robot:PauseStep | longin | 지정 스텝에서 일시정지 |
+| Robot:Gripper | bo | 그리퍼 명령 (0=Close, 1=Open) |
+| Robot:Gripper_RBV | bi | 그리퍼 상태 피드백 (0=Close, 1=Open) |
+| Robot:Loaded | bi | 샘플 로드 상태 (0=Not Loaded, 1=Loaded) |
+
+### Robot:Loaded PV
+
+측정 프로그램 연동용 PV. Step 12 완료 후 measurement wait 시작 시 `Loaded=1`로 설정되고, wait 종료 후 `Loaded=0`으로 리셋됩니다.
 
 ## 그리퍼 통신
 

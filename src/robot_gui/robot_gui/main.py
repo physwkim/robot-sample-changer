@@ -111,6 +111,7 @@ class RobotControlMainWindow(qt.QMainWindow):
         self.epics_handler.holder_changed.connect(self._on_holder_changed)
         self.epics_handler.calib_mode_changed.connect(self._on_mode_changed)
         self.epics_handler.wait_changed.connect(self._on_wait_changed)
+        self.epics_handler.loaded_changed.connect(self._on_loaded_changed)
 
     def _connect_epics(self):
         self.status_bar.showMessage("Connecting to EPICS...")
@@ -177,6 +178,9 @@ class RobotControlMainWindow(qt.QMainWindow):
     def _on_mode_changed(self, mode):
         self.control_panel.status_display.set_mode(mode)
 
+    def _on_loaded_changed(self, loaded):
+        self.control_panel.status_display.set_loaded(loaded)
+
     def _put_to_sample(self, holder_num):
         self.epics_handler.set_holder(holder_num)
         self.epics_handler.set_calib_mode(0)
@@ -188,8 +192,10 @@ class RobotControlMainWindow(qt.QMainWindow):
     def _remove_from_sample(self, holder_num):
         self.epics_handler.set_holder(holder_num)
         self.epics_handler.set_calib_mode(0)
-        self.epics_handler.set_start_step(13)
-        self.epics_handler.set_wait(1)  # Continue past wait point
+        # Start from step 7 (sample_holder_standby) for safe approach
+        # This ensures robot moves to safe position first before picking up
+        self.epics_handler.set_start_step(7)
+        self.epics_handler.set_wait(1)  # Continue past wait point (skip measurement wait at step 12)
         self.epics_handler.trigger_sequence()
         self.status_bar.showMessage(f"Removing sample to holder {holder_num}...")
 

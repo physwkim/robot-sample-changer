@@ -207,6 +207,12 @@ class StatusDisplay(qt.QGroupBox):
         self.mode_label = qt.QLabel("Normal")
         layout.addWidget(self.mode_label, 4, 1)
 
+        # Sample loaded status
+        layout.addWidget(qt.QLabel("Sample:"), 5, 0)
+        self.loaded_label = qt.QLabel("Not Loaded")
+        self.loaded_label.setStyleSheet("color: gray; font-weight: bold;")
+        layout.addWidget(self.loaded_label, 5, 1)
+
     def set_connected(self, connected):
         if connected:
             self.connection_label.setText("Connected")
@@ -232,6 +238,14 @@ class StatusDisplay(qt.QGroupBox):
     def set_mode(self, mode):
         modes = ["Normal", "Holder Calib", "Sample Calib"]
         self.mode_label.setText(modes[mode] if 0 <= mode < len(modes) else "Unknown")
+
+    def set_loaded(self, loaded):
+        if loaded:
+            self.loaded_label.setText("Loaded")
+            self.loaded_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+        else:
+            self.loaded_label.setText("Not Loaded")
+            self.loaded_label.setStyleSheet("color: gray; font-weight: bold;")
 
 
 class ControlPanel(qt.QWidget):

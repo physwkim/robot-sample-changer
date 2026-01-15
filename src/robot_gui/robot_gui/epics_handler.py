@@ -17,6 +17,7 @@ class EpicsHandler(qt.QObject):
     gripper_rbv_changed = qt.Signal(int)
     calib_mode_changed = qt.Signal(int)
     pause_step_changed = qt.Signal(int)
+    loaded_changed = qt.Signal(int)
     connection_changed = qt.Signal(bool)
 
     # PV names
@@ -31,6 +32,7 @@ class EpicsHandler(qt.QObject):
         'calib_mode': 'Robot:CalibMode',
         'pause_step': 'Robot:PauseStep',
         'start_step': 'Robot:StartStep',
+        'loaded': 'Robot:Loaded',
     }
 
     def __init__(self, parent=None):
@@ -69,6 +71,7 @@ class EpicsHandler(qt.QObject):
             'gripper_rbv': self.gripper_rbv_changed,
             'calib_mode': self.calib_mode_changed,
             'pause_step': self.pause_step_changed,
+            'loaded': self.loaded_changed,
         }
 
         def callback(pvname=None, value=None, **kwargs):
