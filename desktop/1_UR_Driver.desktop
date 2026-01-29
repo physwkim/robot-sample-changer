@@ -3,6 +3,6 @@ Type=Application
 Name=[1] UR Driver
 Comment=Start UR3e robot driver (start first)
 Icon=utilities-terminal
-Exec=bash -c 'if pgrep -f "ur_control.launch.py" > /dev/null; then zenity --warning --title="UR Driver" --text="UR Driver is already running." 2>/dev/null; else gnome-terminal --title="[1] UR Driver - ur_control.launch.py" -- bash -c "source /opt/ros/humble/setup.bash && source /home/bl9b/ws/install/setup.bash && ros2 launch ur3e_hande_robot_description ur_control.launch.py ur_type:=ur3e robot_ip:=192.168.92.10 description_file:=ur_with_hande.xacro runtime_config_package:=ur3e_hande_robot_description controllers_file:=ur_hande_controllers.yaml gripper_use_fake_hardware:=false use_tool_communication:=true tool_voltage:=24 launch_rviz:=false; exec bash"; fi'
-Terminal=false
+Terminal=true
+Exec=/home/bl9b/ws/desktop/scripts/launch_ur_driver.sh
 Categories=Development;
