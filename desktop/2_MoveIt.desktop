@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=[2] MoveIt
+Comment=Start MoveIt motion planning (start after UR Driver)
+Icon=utilities-terminal
+Exec=bash -c 'if pgrep -f "ur_moveit.launch.py" > /dev/null; then zenity --warning --title="MoveIt" --text="MoveIt is already running." 2>/dev/null; else gnome-terminal --title="[2] MoveIt - ur_moveit.launch.py" -- bash -c "source /opt/ros/humble/setup.bash && source /home/bl9b/ws/install/setup.bash && ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur3e description_package:=ur3e_hande_robot_description description_file:=ur_with_hande.xacro moveit_config_package:=ur3e_hande_moveit_config moveit_config_file:=ur.srdf launch_rviz:=false; exec bash"; fi'
+Terminal=false
+Categories=Development;
