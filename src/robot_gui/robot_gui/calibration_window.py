@@ -566,6 +566,288 @@ class YamlOffsetEditor(qt.QGroupBox):
             qt.QMessageBox.critical(self, "Error", f"Failed to save YAML:\n{e}")
 
 
+class TcpJogWidget(qt.QGroupBox):
+    """TCP Jog controls for calibration mode."""
+
+    jog_requested = qt.Signal(str, int)  # axis ('x', 'y', 'z'), direction (-1 or +1)
+    offset_changed = qt.Signal(float, float, float)  # x, y, z accumulated offset in mm
+
+    def __init__(self, parent=None):
+        super().__init__("TCP Jog (캘리브레이션 대기 중 사용)", parent)
+        self._step_mm = 1.0
+        # Base offset from YAML (set when calibration starts)
+        self._base_x = 0.0
+        self._base_y = 0.0
+        self._base_z = 0.0
+        # Accumulated jog offset
+        self._jog_x = 0.0
+        self._jog_y = 0.0
+        self._jog_z = 0.0
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = qt.QVBoxLayout(self)
+        layout.setSpacing(6)
+
+        # Accumulated offset display
+        offset_group = qt.QWidget()
+        offset_layout = qt.QGridLayout(offset_group)
+        offset_layout.setContentsMargins(0, 0, 0, 0)
+        offset_layout.setSpacing(4)
+
+        # Headers
+        offset_layout.addWidget(qt.QLabel(""), 0, 0)
+        base_label = qt.QLabel("Base")
+        base_label.setStyleSheet("color: #888; font-size: 9px;")
+        base_label.setAlignment(qt.Qt.AlignCenter)
+        offset_layout.addWidget(base_label, 0, 1)
+        jog_label = qt.QLabel("Jog")
+        jog_label.setStyleSheet("color: #888; font-size: 9px;")
+        jog_label.setAlignment(qt.Qt.AlignCenter)
+        offset_layout.addWidget(jog_label, 0, 2)
+        total_label = qt.QLabel("Total")
+        total_label.setStyleSheet("color: #fff; font-size: 9px; font-weight: bold;")
+        total_label.setAlignment(qt.Qt.AlignCenter)
+        offset_layout.addWidget(total_label, 0, 3)
+
+        # X row
+        x_axis = qt.QLabel("X:")
+        x_axis.setStyleSheet("color: #ff6666; font-weight: bold;")
+        offset_layout.addWidget(x_axis, 1, 0)
+        self._x_base_label = qt.QLabel("0.000")
+        self._x_base_label.setStyleSheet("color: #888; font-size: 10px;")
+        self._x_base_label.setAlignment(qt.Qt.AlignRight)
+        offset_layout.addWidget(self._x_base_label, 1, 1)
+        self._x_jog_label = qt.QLabel("+0.000")
+        self._x_jog_label.setStyleSheet("color: #ffaa66; font-size: 10px;")
+        self._x_jog_label.setAlignment(qt.Qt.AlignRight)
+        offset_layout.addWidget(self._x_jog_label, 1, 2)
+        self._x_total_label = qt.QLabel("0.000")
+        self._x_total_label.setStyleSheet("color: #ff6666; font-size: 11px; font-weight: bold;")
+        self._x_total_label.setAlignment(qt.Qt.AlignRight)
+        offset_layout.addWidget(self._x_total_label, 1, 3)
+
+        # Y row
+        y_axis = qt.QLabel("Y:")
+        y_axis.setStyleSheet("color: #66ff66; font-weight: bold;")
+        offset_layout.addWidget(y_axis, 2, 0)
+        self._y_base_label = qt.QLabel("0.000")
+        self._y_base_label.setStyleSheet("color: #888; font-size: 10px;")
+        self._y_base_label.setAlignment(qt.Qt.AlignRight)
+        offset_layout.addWidget(self._y_base_label, 2, 1)
+        self._y_jog_label = qt.QLabel("+0.000")
+        self._y_jog_label.setStyleSheet("color: #ffaa66; font-size: 10px;")
+        self._y_jog_label.setAlignment(qt.Qt.AlignRight)
+        offset_layout.addWidget(self._y_jog_label, 2, 2)
+        self._y_total_label = qt.QLabel("0.000")
+        self._y_total_label.setStyleSheet("color: #66ff66; font-size: 11px; font-weight: bold;")
+        self._y_total_label.setAlignment(qt.Qt.AlignRight)
+        offset_layout.addWidget(self._y_total_label, 2, 3)
+
+        # Z row
+        z_axis = qt.QLabel("Z:")
+        z_axis.setStyleSheet("color: #6699ff; font-weight: bold;")
+        offset_layout.addWidget(z_axis, 3, 0)
+        self._z_base_label = qt.QLabel("0.000")
+        self._z_base_label.setStyleSheet("color: #888; font-size: 10px;")
+        self._z_base_label.setAlignment(qt.Qt.AlignRight)
+        offset_layout.addWidget(self._z_base_label, 3, 1)
+        self._z_jog_label = qt.QLabel("+0.000")
+        self._z_jog_label.setStyleSheet("color: #ffaa66; font-size: 10px;")
+        self._z_jog_label.setAlignment(qt.Qt.AlignRight)
+        offset_layout.addWidget(self._z_jog_label, 3, 2)
+        self._z_total_label = qt.QLabel("0.000")
+        self._z_total_label.setStyleSheet("color: #6699ff; font-size: 11px; font-weight: bold;")
+        self._z_total_label.setAlignment(qt.Qt.AlignRight)
+        offset_layout.addWidget(self._z_total_label, 3, 3)
+
+        layout.addWidget(offset_group)
+
+        # Step size selector
+        step_layout = qt.QHBoxLayout()
+        step_layout.addWidget(qt.QLabel("Step:"))
+        self.step_combo = qt.QComboBox()
+        self.step_combo.addItem("0.1 mm", 0.1)
+        self.step_combo.addItem("0.5 mm", 0.5)
+        self.step_combo.addItem("1.0 mm", 1.0)
+        self.step_combo.addItem("2.0 mm", 2.0)
+        self.step_combo.addItem("5.0 mm", 5.0)
+        self.step_combo.setCurrentIndex(2)  # Default 1.0mm
+        self.step_combo.currentIndexChanged.connect(self._on_step_changed)
+        step_layout.addWidget(self.step_combo)
+        step_layout.addStretch()
+        layout.addLayout(step_layout)
+
+        # Jog buttons grid
+        btn_layout = qt.QGridLayout()
+        btn_layout.setSpacing(4)
+
+        # X axis (Left/Right in TCP frame)
+        x_minus = qt.QPushButton("X-")
+        x_minus.setMinimumSize(55, 40)
+        x_minus.setStyleSheet("""
+            QPushButton { background-color: #d32f2f; color: white; font-weight: bold; border-radius: 4px; }
+            QPushButton:hover { background-color: #b71c1c; }
+            QPushButton:disabled { background-color: #555; color: #888; }
+        """)
+        x_minus.clicked.connect(lambda: self.jog_requested.emit('x', -1))
+        btn_layout.addWidget(x_minus, 0, 0)
+
+        x_label = qt.QLabel("X\n←왼쪽")
+        x_label.setAlignment(qt.Qt.AlignCenter)
+        x_label.setStyleSheet("color: #ff6666; font-size: 9px; font-weight: bold;")
+        btn_layout.addWidget(x_label, 0, 1)
+
+        x_plus = qt.QPushButton("X+")
+        x_plus.setMinimumSize(55, 40)
+        x_plus.setStyleSheet("""
+            QPushButton { background-color: #d32f2f; color: white; font-weight: bold; border-radius: 4px; }
+            QPushButton:hover { background-color: #b71c1c; }
+            QPushButton:disabled { background-color: #555; color: #888; }
+        """)
+        x_plus.clicked.connect(lambda: self.jog_requested.emit('x', 1))
+        btn_layout.addWidget(x_plus, 0, 2)
+
+        # Y axis (Up/Down in TCP frame)
+        y_minus = qt.QPushButton("Y-")
+        y_minus.setMinimumSize(55, 40)
+        y_minus.setStyleSheet("""
+            QPushButton { background-color: #388e3c; color: white; font-weight: bold; border-radius: 4px; }
+            QPushButton:hover { background-color: #2e7d32; }
+            QPushButton:disabled { background-color: #555; color: #888; }
+        """)
+        y_minus.clicked.connect(lambda: self.jog_requested.emit('y', -1))
+        btn_layout.addWidget(y_minus, 1, 0)
+
+        y_label = qt.QLabel("Y\n↓아래")
+        y_label.setAlignment(qt.Qt.AlignCenter)
+        y_label.setStyleSheet("color: #66ff66; font-size: 9px; font-weight: bold;")
+        btn_layout.addWidget(y_label, 1, 1)
+
+        y_plus = qt.QPushButton("Y+")
+        y_plus.setMinimumSize(55, 40)
+        y_plus.setStyleSheet("""
+            QPushButton { background-color: #388e3c; color: white; font-weight: bold; border-radius: 4px; }
+            QPushButton:hover { background-color: #2e7d32; }
+            QPushButton:disabled { background-color: #555; color: #888; }
+        """)
+        y_plus.clicked.connect(lambda: self.jog_requested.emit('y', 1))
+        btn_layout.addWidget(y_plus, 1, 2)
+
+        # Z axis (Forward/Backward in TCP frame)
+        z_minus = qt.QPushButton("Z-")
+        z_minus.setMinimumSize(55, 40)
+        z_minus.setStyleSheet("""
+            QPushButton { background-color: #1976d2; color: white; font-weight: bold; border-radius: 4px; }
+            QPushButton:hover { background-color: #1565c0; }
+            QPushButton:disabled { background-color: #555; color: #888; }
+        """)
+        z_minus.clicked.connect(lambda: self.jog_requested.emit('z', -1))
+        btn_layout.addWidget(z_minus, 2, 0)
+
+        z_label = qt.QLabel("Z\n↑정면")
+        z_label.setAlignment(qt.Qt.AlignCenter)
+        z_label.setStyleSheet("color: #6699ff; font-size: 9px; font-weight: bold;")
+        btn_layout.addWidget(z_label, 2, 1)
+
+        z_plus = qt.QPushButton("Z+")
+        z_plus.setMinimumSize(55, 40)
+        z_plus.setStyleSheet("""
+            QPushButton { background-color: #1976d2; color: white; font-weight: bold; border-radius: 4px; }
+            QPushButton:hover { background-color: #1565c0; }
+            QPushButton:disabled { background-color: #555; color: #888; }
+        """)
+        z_plus.clicked.connect(lambda: self.jog_requested.emit('z', 1))
+        btn_layout.addWidget(z_plus, 2, 2)
+
+        layout.addLayout(btn_layout)
+
+        # Apply to YAML button
+        self.apply_btn = qt.QPushButton("Apply Total to YAML")
+        self.apply_btn.setMinimumHeight(32)
+        self.apply_btn.setStyleSheet("""
+            QPushButton { background-color: #FF9800; color: white; font-weight: bold; border-radius: 4px; }
+            QPushButton:hover { background-color: #F57C00; }
+            QPushButton:disabled { background-color: #555; color: #888; }
+        """)
+        layout.addWidget(self.apply_btn)
+
+        # Store buttons for enable/disable
+        self._jog_buttons = [x_minus, x_plus, y_minus, y_plus, z_minus, z_plus]
+
+    def _on_step_changed(self, index):
+        self._step_mm = self.step_combo.currentData()
+
+    def get_step_mm(self):
+        return self._step_mm
+
+    def set_enabled(self, enabled):
+        for btn in self._jog_buttons:
+            btn.setEnabled(enabled)
+        self.step_combo.setEnabled(enabled)
+        self.apply_btn.setEnabled(enabled)
+
+    def set_base_offset(self, x_mm, y_mm, z_mm):
+        """Set base offset from YAML when calibration starts."""
+        self._base_x = x_mm
+        self._base_y = y_mm
+        self._base_z = z_mm
+        self._jog_x = 0.0
+        self._jog_y = 0.0
+        self._jog_z = 0.0
+        self._update_display()
+
+    def add_jog(self, axis, direction):
+        """Add jog amount to accumulated offset."""
+        delta = direction * self._step_mm
+        if axis == 'x':
+            self._jog_x += delta
+        elif axis == 'y':
+            self._jog_y += delta
+        elif axis == 'z':
+            self._jog_z += delta
+        self._update_display()
+        self.offset_changed.emit(
+            self._base_x + self._jog_x,
+            self._base_y + self._jog_y,
+            self._base_z + self._jog_z
+        )
+
+    def get_total_offset(self):
+        """Get total offset (base + jog) in mm."""
+        return (
+            self._base_x + self._jog_x,
+            self._base_y + self._jog_y,
+            self._base_z + self._jog_z
+        )
+
+    def get_jog_offset(self):
+        """Get jog offset only (delta from base) in mm."""
+        return (self._jog_x, self._jog_y, self._jog_z)
+
+    def _update_display(self):
+        """Update offset display labels."""
+        # Base
+        self._x_base_label.setText(f"{self._base_x:.3f}")
+        self._y_base_label.setText(f"{self._base_y:.3f}")
+        self._z_base_label.setText(f"{self._base_z:.3f}")
+        # Jog (with sign)
+        self._x_jog_label.setText(f"{self._jog_x:+.3f}")
+        self._y_jog_label.setText(f"{self._jog_y:+.3f}")
+        self._z_jog_label.setText(f"{self._jog_z:+.3f}")
+        # Total
+        self._x_total_label.setText(f"{self._base_x + self._jog_x:.3f}")
+        self._y_total_label.setText(f"{self._base_y + self._jog_y:.3f}")
+        self._z_total_label.setText(f"{self._base_z + self._jog_z:.3f}")
+
+    def reset_jog(self):
+        """Reset jog accumulation to zero."""
+        self._jog_x = 0.0
+        self._jog_y = 0.0
+        self._jog_z = 0.0
+        self._update_display()
+
+
 class CalibrationControls(qt.QGroupBox):
     """Calibration mode controls."""
 
@@ -655,12 +937,14 @@ class CalibrationWindow(qt.QDialog):
         super().__init__(parent)
         self.epics_handler = epics_handler
         self._calibrating = False
+        self._calib_mode = None  # 'holder' or 'sample'
+        self._calib_holder_num = None
         self._setup_ui()
         self._connect_signals()
 
     def _setup_ui(self):
         self.setWindowTitle("Calibration - TCP Coordinate & YAML Editor")
-        self.setMinimumSize(950, 600)
+        self.setMinimumSize(950, 850)
 
         layout = qt.QHBoxLayout(self)
         layout.setSpacing(10)
@@ -679,6 +963,11 @@ class CalibrationWindow(qt.QDialog):
         # Calibration controls
         self.calib_controls = CalibrationControls()
         left_layout.addWidget(self.calib_controls)
+
+        # TCP Jog controls
+        self.jog_widget = TcpJogWidget()
+        self.jog_widget.set_enabled(False)  # Initially disabled
+        left_layout.addWidget(self.jog_widget)
 
         # Status
         status_group = qt.QGroupBox("Status")
@@ -706,9 +995,30 @@ class CalibrationWindow(qt.QDialog):
 
         self.yaml_editor.offset_changed.connect(self._on_offset_changed)
 
+        self.jog_widget.jog_requested.connect(self._on_jog_requested)
+        self.jog_widget.apply_btn.clicked.connect(self._apply_jog_to_yaml)
+
     def _on_offset_changed(self, x_mm, y_mm, z_mm):
         """Update coordinate view when offset changes."""
         self.coord_view.set_offsets(x_mm, y_mm, z_mm)
+
+    def _on_jog_requested(self, axis, direction):
+        """Handle jog button press."""
+        step_mm = self.jog_widget.get_step_mm()
+        self.epics_handler.set_jog(axis, direction, step_mm)
+        # Accumulate jog offset
+        self.jog_widget.add_jog(axis, direction)
+        # Update coordinate view with total offset
+        x, y, z = self.jog_widget.get_total_offset()
+        self.coord_view.set_offsets(x, y, z)
+        # Update status
+        jog_x, jog_y, jog_z = self.jog_widget.get_jog_offset()
+        self.status_label.setText(
+            f"Jog: {axis.upper()} {'+' if direction > 0 else '-'}{step_mm}mm\n\n"
+            f"누적 Jog: X={jog_x:+.2f} Y={jog_y:+.2f} Z={jog_z:+.2f}\n"
+            f"Total: X={x:.3f} Y={y:.3f} Z={z:.3f}"
+        )
+        self.status_label.setStyleSheet("color: #2196F3;")
 
     def _start_holder_calib(self, holder_num):
         self.epics_handler.set_holder(holder_num)
@@ -716,11 +1026,20 @@ class CalibrationWindow(qt.QDialog):
         self.epics_handler.trigger_sequence()
 
         self._calibrating = True
+        self._calib_mode = 'holder'
+        self._calib_holder_num = holder_num
         self.calib_controls.set_calibrating(True)
+        self.jog_widget.set_enabled(True)
+
+        # Get current holder offset from YAML as base
+        x, y, z = self._get_holder_offset_from_yaml(holder_num)
+        self.jog_widget.set_base_offset(x, y, z)
+        self.coord_view.set_offsets(x, y, z)
+
         self.status_label.setText(
             f"Holder {holder_num} Calibration\n\n"
             "로봇 이동 중...\n\n"
-            "정렬 확인 → 테이블에서 오프셋 조정\n"
+            "Jog 버튼으로 TCP 위치 조정 가능\n"
             "→ Save YAML → Continue"
         )
         self.status_label.setStyleSheet("color: #9C27B0;")
@@ -732,11 +1051,19 @@ class CalibrationWindow(qt.QDialog):
         self.epics_handler.trigger_sequence()
 
         self._calibrating = True
+        self._calib_mode = 'sample'
         self.calib_controls.set_calibrating(True)
+        self.jog_widget.set_enabled(True)
+
+        # Get current sample holder offset from YAML as base
+        x, y, z = self._get_sample_holder_offset_from_yaml()
+        self.jog_widget.set_base_offset(x, y, z)
+        self.coord_view.set_offsets(x, y, z)
+
         self.status_label.setText(
             f"Sample Holder Calibration\n(from Holder {holder_num})\n\n"
             "로봇 이동 중...\n\n"
-            "정렬 확인 → 테이블에서 오프셋 조정\n"
+            "Jog 버튼으로 TCP 위치 조정 가능\n"
             "→ Save YAML → Continue"
         )
         self.status_label.setStyleSheet("color: #673AB7;")
@@ -745,6 +1072,7 @@ class CalibrationWindow(qt.QDialog):
         self.epics_handler.trigger_sequence()
         self._calibrating = False
         self.calib_controls.set_calibrating(False)
+        self.jog_widget.set_enabled(False)
         self.status_label.setText("샘플 복귀 중...")
         self.status_label.setStyleSheet("color: #4CAF50;")
 
@@ -753,8 +1081,77 @@ class CalibrationWindow(qt.QDialog):
         self.epics_handler.trigger_sequence()
         self._calibrating = False
         self.calib_controls.set_calibrating(False)
+        self.jog_widget.set_enabled(False)
         self.status_label.setText("캘리브레이션 중단\n샘플 복귀 중...")
         self.status_label.setStyleSheet("color: #f44336;")
+
+    def _apply_jog_to_yaml(self):
+        """Apply total jog offset to YAML table."""
+        x, y, z = self.jog_widget.get_total_offset()
+
+        if self._calib_mode == 'holder':
+            holder_num = self._calib_holder_num
+            if holder_num == 1:
+                # Holder 1: X, Y, Z all (row 1)
+                self.yaml_editor.offset_table._set_cell_value(1, 1, x)
+                self.yaml_editor.offset_table._set_cell_value(1, 2, y)
+                self.yaml_editor.offset_table._set_cell_value(1, 3, z)
+                self.yaml_editor._mark_modified()
+                self.status_label.setText(
+                    f"Holder 1 offset 적용됨:\n"
+                    f"X={x:.3f} Y={y:.3f} Z={z:.3f}\n\n"
+                    "Save YAML 버튼으로 저장하세요"
+                )
+            else:
+                # Holder 2~10: X, Z only (row = holder_num, Y is based on Holder 1)
+                row = holder_num  # row 2 = Holder 2, etc.
+                self.yaml_editor.offset_table._set_cell_value(row, 1, x)
+                self.yaml_editor.offset_table._set_cell_value(row, 3, z)
+                self.yaml_editor._mark_modified()
+                self.status_label.setText(
+                    f"Holder {holder_num} offset 적용됨:\n"
+                    f"X={x:.3f} Z={z:.3f}\n"
+                    "(Y는 Holder 1 기준)\n\n"
+                    "Save YAML 버튼으로 저장하세요"
+                )
+        elif self._calib_mode == 'sample':
+            # Sample Holder: X, Y, Z all (row 0)
+            self.yaml_editor.offset_table._set_cell_value(0, 1, x)
+            self.yaml_editor.offset_table._set_cell_value(0, 2, y)
+            self.yaml_editor.offset_table._set_cell_value(0, 3, z)
+            self.yaml_editor._mark_modified()
+            self.status_label.setText(
+                f"Sample Holder offset 적용됨:\n"
+                f"X={x:.3f} Y={y:.3f} Z={z:.3f}\n\n"
+                "Save YAML 버튼으로 저장하세요"
+            )
+
+        self.status_label.setStyleSheet("color: #FF9800;")
+
+    def _get_holder_offset_from_yaml(self, holder_num=1):
+        """Get holder offset from loaded YAML (in mm)."""
+        params = self.yaml_editor._params
+        if holder_num == 1:
+            x = params.get('holder1_on_position_x_offset', 0) * 1000
+            y = params.get('holder1_on_position_y_offset', 0) * 1000
+            z = params.get('holder1_on_position_z_offset', 0) * 1000
+        else:
+            # Holder 2~10: base from holder1 + multi offsets
+            x_offsets = params.get('holder_multi_x_offsets', [0] * 9)
+            z_offsets = params.get('holder_multi_z_offsets', [0] * 9)
+            idx = holder_num - 2  # holder 2 -> index 0
+            x = x_offsets[idx] * 1000 if idx < len(x_offsets) else 0
+            y = params.get('holder1_on_position_y_offset', 0) * 1000  # Y from holder1
+            z = z_offsets[idx] * 1000 if idx < len(z_offsets) else 0
+        return (x, y, z)
+
+    def _get_sample_holder_offset_from_yaml(self):
+        """Get sample holder offset from loaded YAML (in mm)."""
+        params = self.yaml_editor._params
+        x = params.get('sample_holder_on_position_x_offset', 0) * 1000
+        y = params.get('sample_holder_on_position_y_offset', 0) * 1000
+        z = params.get('sample_holder_on_position_z_offset', 0) * 1000
+        return (x, y, z)
 
     def load_yaml(self, path):
         """Load YAML file programmatically."""

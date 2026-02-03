@@ -83,3 +83,33 @@ record(bi, "Robot:Loaded")
     field(ONAM, "Loaded")
     field(VAL,  "0")
 }
+record(longout, "Robot:JogX")
+{
+    field(DESC, "Jog X direction (-1, 0, +1)")
+    field(VAL,  "0")
+    field(DRVL, "-1")
+    field(DRVH, "1")
+}
+record(longout, "Robot:JogY")
+{
+    field(DESC, "Jog Y direction (-1, 0, +1)")
+    field(VAL,  "0")
+    field(DRVL, "-1")
+    field(DRVH, "1")
+}
+record(longout, "Robot:JogZ")
+{
+    field(DESC, "Jog Z direction (-1, 0, +1)")
+    field(VAL,  "0")
+    field(DRVL, "-1")
+    field(DRVH, "1")
+}
+record(ao, "Robot:JogStep")
+{
+    field(DESC, "Jog step size in mm")
+    field(VAL,  "1.0")
+    field(DRVL, "0.1")
+    field(DRVH, "10.0")
+    field(PREC, "1")
+    field(EGU,  "mm")
+}

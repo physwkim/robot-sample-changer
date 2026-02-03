@@ -15,7 +15,8 @@ class RobotControlMainWindow(qt.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("UR3e + HandE Robot Control")
-        self.setMinimumSize(600, 750)
+        self.setMinimumSize(650, 850)
+        self.resize(650, 900)
 
         self.epics_handler = EpicsHandler(self)
         self._calibration_window = None
@@ -40,32 +41,9 @@ class RobotControlMainWindow(qt.QMainWindow):
         self.gripper_widget = GripperWidget()
         layout.addWidget(self.gripper_widget)
 
-        self.emergency_btn = self._create_emergency_button()
-        layout.addWidget(self.emergency_btn)
-
         self.status_bar = qt.QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Connecting to EPICS...")
-
-    def _create_emergency_button(self):
-        btn = qt.QPushButton("STOP")
-        btn.setMinimumHeight(60)
-        font = qt.QFont()
-        font.setPointSize(18)
-        font.setBold(True)
-        btn.setFont(font)
-        btn.setStyleSheet("""
-            QPushButton {
-                background-color: #d32f2f;
-                color: white;
-                border: 3px solid #b71c1c;
-                border-radius: 10px;
-            }
-            QPushButton:hover { background-color: #c62828; }
-            QPushButton:pressed { background-color: #b71c1c; }
-        """)
-        btn.clicked.connect(self._on_emergency_stop)
-        return btn
 
     def _setup_menu(self):
         menubar = self.menuBar()
@@ -207,6 +185,7 @@ class RobotControlMainWindow(qt.QMainWindow):
     def _abort_sequence(self):
         """Abort and return sample."""
         self.epics_handler.set_wait(2)
+        self.epics_handler.clear_trigger()  # Cancel any queued sequence
         self.status_bar.showMessage("Aborting - returning sample...")
 
     def _open_calibration(self):
@@ -215,15 +194,6 @@ class RobotControlMainWindow(qt.QMainWindow):
         self._calibration_window.show()
         self._calibration_window.raise_()
         self._calibration_window.activateWindow()
-
-    def _on_emergency_stop(self):
-        self.epics_handler.stop_sequence()
-        self.status_bar.showMessage("EMERGENCY STOP - Sequence paused")
-        qt.QMessageBox.warning(
-            self, "Emergency Stop",
-            "Sequence has been paused.\n"
-            "Click 'Resume' or restart the sequence."
-        )
 
     def closeEvent(self, event):
         self.epics_handler.disconnect()

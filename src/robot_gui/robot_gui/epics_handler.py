@@ -33,6 +33,10 @@ class EpicsHandler(qt.QObject):
         'pause_step': 'Robot:PauseStep',
         'start_step': 'Robot:StartStep',
         'loaded': 'Robot:Loaded',
+        'jog_x': 'Robot:JogX',
+        'jog_y': 'Robot:JogY',
+        'jog_z': 'Robot:JogZ',
+        'jog_step': 'Robot:JogStep',
     }
 
     def __init__(self, parent=None):
@@ -118,6 +122,9 @@ class EpicsHandler(qt.QObject):
     def trigger_sequence(self):
         return self.set_value('trigger', 1)
 
+    def clear_trigger(self):
+        return self.set_value('trigger', 0)
+
     def set_calib_mode(self, mode):
         return self.set_value('calib_mode', mode)
 
@@ -141,6 +148,23 @@ class EpicsHandler(qt.QObject):
 
     def set_start_step(self, step):
         return self.set_value('start_step', step)
+
+    def set_jog(self, axis, direction, step_mm):
+        """Set jog command for TCP relative move during calibration.
+
+        Args:
+            axis: 'x', 'y', or 'z'
+            direction: -1 or +1
+            step_mm: step size in mm
+        """
+        self.set_value('jog_step', float(step_mm))
+        if axis == 'x':
+            return self.set_value('jog_x', direction)
+        elif axis == 'y':
+            return self.set_value('jog_y', direction)
+        elif axis == 'z':
+            return self.set_value('jog_z', direction)
+        return False
 
     def disconnect(self):
         """Disconnect all PVs."""

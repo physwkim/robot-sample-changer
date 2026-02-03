@@ -152,12 +152,14 @@ class SampleOperations(qt.QGroupBox):
         self._is_waiting = waiting
         self.continue_btn.setEnabled(waiting)
         self.abort_btn.setEnabled(waiting)
-        # Put is disabled while waiting, but Remove stays enabled
         self.put_btn.setEnabled(not waiting)
+        self.remove_btn.setEnabled(not waiting)
 
     def set_running(self, running):
         """Set running state (sequence in progress)."""
         self.put_btn.setWaiting(running)
+        self.put_btn.setEnabled(not running)
+        self.remove_btn.setEnabled(not running)
 
     def set_enabled(self, enabled):
         self.put_btn.setEnabled(enabled)

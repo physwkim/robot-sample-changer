@@ -108,6 +108,10 @@ static chid epics_gripper_cmd_chid = nullptr;
 static chid epics_pause_step_chid = nullptr;
 static chid epics_calib_mode_chid = nullptr;
 static chid epics_loaded_chid = nullptr;
+static chid epics_jog_x_chid = nullptr;
+static chid epics_jog_y_chid = nullptr;
+static chid epics_jog_z_chid = nullptr;
+static chid epics_jog_step_chid = nullptr;
 static std::string epics_trigger_pv_name;
 static std::string epics_start_step_pv_name;
 static std::string epics_wait_pv_name;
@@ -119,6 +123,10 @@ static std::string epics_gripper_cmd_pv_name;
 static std::string epics_pause_step_pv_name;
 static std::string epics_calib_mode_pv_name;
 static std::string epics_loaded_pv_name;
+static std::string epics_jog_x_pv_name = "Robot:JogX";
+static std::string epics_jog_y_pv_name = "Robot:JogY";
+static std::string epics_jog_z_pv_name = "Robot:JogZ";
+static std::string epics_jog_step_pv_name = "Robot:JogStep";
 static bool epics_initialized = false;
 static struct ca_client_context* epics_ca_context = nullptr;  // For multi-thread CA access
 
@@ -460,6 +468,24 @@ static bool epics_connect_pvs(const std::string& trigger_pv, const std::string& 
   if (status != ECA_NORMAL) {
     RCLCPP_ERROR(LOGGER, "Failed to create channel for PV '%s': %s", loaded_pv.c_str(), ca_message(status));
     return false;
+  }
+
+  // Create channels for Jog PVs (read/write for calibration TCP jog)
+  status = ca_create_channel(epics_jog_x_pv_name.c_str(), nullptr, nullptr, CA_PRIORITY_DEFAULT, &epics_jog_x_chid);
+  if (status != ECA_NORMAL) {
+    RCLCPP_WARN(LOGGER, "Failed to create channel for PV '%s': %s (jog disabled)", epics_jog_x_pv_name.c_str(), ca_message(status));
+  }
+  status = ca_create_channel(epics_jog_y_pv_name.c_str(), nullptr, nullptr, CA_PRIORITY_DEFAULT, &epics_jog_y_chid);
+  if (status != ECA_NORMAL) {
+    RCLCPP_WARN(LOGGER, "Failed to create channel for PV '%s': %s (jog disabled)", epics_jog_y_pv_name.c_str(), ca_message(status));
+  }
+  status = ca_create_channel(epics_jog_z_pv_name.c_str(), nullptr, nullptr, CA_PRIORITY_DEFAULT, &epics_jog_z_chid);
+  if (status != ECA_NORMAL) {
+    RCLCPP_WARN(LOGGER, "Failed to create channel for PV '%s': %s (jog disabled)", epics_jog_z_pv_name.c_str(), ca_message(status));
+  }
+  status = ca_create_channel(epics_jog_step_pv_name.c_str(), nullptr, nullptr, CA_PRIORITY_DEFAULT, &epics_jog_step_chid);
+  if (status != ECA_NORMAL) {
+    RCLCPP_WARN(LOGGER, "Failed to create channel for PV '%s': %s (jog disabled)", epics_jog_step_pv_name.c_str(), ca_message(status));
   }
 
   // Wait for all connections
@@ -917,6 +943,56 @@ static bool epics_write_loaded_pv(int value)
 
   RCLCPP_INFO(LOGGER, "Set Loaded PV '%s' to %d", epics_loaded_pv_name.c_str(), value);
   return true;
+}
+
+// Read Jog PV value (-1, 0, +1) and reset to 0 if non-zero
+static int epics_read_and_reset_jog_pv(chid jog_chid, const std::string& pv_name)
+{
+  if (!jog_chid) {
+    return 0;
+  }
+
+  dbr_long_t value = 0;
+  int status = ca_get(DBR_LONG, jog_chid, &value);
+  if (status != ECA_NORMAL) {
+    return 0;
+  }
+
+  status = ca_pend_io(0.5);
+  if (status != ECA_NORMAL) {
+    return 0;
+  }
+
+  if (value != 0) {
+    // Reset PV to 0
+    dbr_long_t zero = 0;
+    ca_put(DBR_LONG, jog_chid, &zero);
+    ca_pend_io(0.5);
+    RCLCPP_INFO(LOGGER, "Jog PV '%s' = %d (reset to 0)", pv_name.c_str(), static_cast<int>(value));
+  }
+
+  return static_cast<int>(value);
+}
+
+// Read Jog step size in mm
+static double epics_read_jog_step_pv()
+{
+  if (!epics_jog_step_chid) {
+    return 1.0;  // Default 1mm
+  }
+
+  dbr_double_t value = 1.0;
+  int status = ca_get(DBR_DOUBLE, epics_jog_step_chid, &value);
+  if (status != ECA_NORMAL) {
+    return 1.0;
+  }
+
+  status = ca_pend_io(0.5);
+  if (status != ECA_NORMAL) {
+    return 1.0;
+  }
+
+  return static_cast<double>(value);
 }
 
 // Read Gripper command PV (0=close, 1=open)
@@ -1779,6 +1855,92 @@ int main(int argc, char** argv)
       }
     };
 
+    // Helper: Execute TCP-relative jog move (for calibration)
+    auto execute_tcp_jog = [&](double dx_mm, double dy_mm, double dz_mm) -> bool {
+      if (dx_mm == 0.0 && dy_mm == 0.0 && dz_mm == 0.0) {
+        return true;  // No movement requested
+      }
+
+      try {
+        RCLCPP_INFO(LOGGER, "TCP Jog: dx=%.1fmm, dy=%.1fmm, dz=%.1fmm", dx_mm, dy_mm, dz_mm);
+
+        moveit::planning_interface::MoveGroupInterface move_group(node, arm_group);
+        move_group.setMaxVelocityScalingFactor(0.1);  // Slow for calibration
+        move_group.setMaxAccelerationScalingFactor(0.1);
+
+        // Get current pose
+        geometry_msgs::msg::PoseStamped current_pose = move_group.getCurrentPose();
+
+        // Get current orientation as quaternion
+        Eigen::Quaterniond q(
+            current_pose.pose.orientation.w,
+            current_pose.pose.orientation.x,
+            current_pose.pose.orientation.y,
+            current_pose.pose.orientation.z);
+
+        // Convert offset from TCP frame to base frame
+        Eigen::Vector3d offset_tcp(dx_mm / 1000.0, dy_mm / 1000.0, dz_mm / 1000.0);
+        Eigen::Vector3d offset_base = q * offset_tcp;
+
+        // Calculate target pose
+        geometry_msgs::msg::Pose target_pose = current_pose.pose;
+        target_pose.position.x += offset_base.x();
+        target_pose.position.y += offset_base.y();
+        target_pose.position.z += offset_base.z();
+
+        RCLCPP_INFO(LOGGER, "  Current: x=%.4f, y=%.4f, z=%.4f",
+                    current_pose.pose.position.x, current_pose.pose.position.y, current_pose.pose.position.z);
+        RCLCPP_INFO(LOGGER, "  Target:  x=%.4f, y=%.4f, z=%.4f",
+                    target_pose.position.x, target_pose.position.y, target_pose.position.z);
+
+        // Plan Cartesian path
+        std::vector<geometry_msgs::msg::Pose> waypoints;
+        waypoints.push_back(target_pose);
+
+        moveit_msgs::msg::RobotTrajectory trajectory;
+        const double jump_threshold = 0.0;
+        const double eef_step = 0.005;  // 5mm resolution
+        double fraction = move_group.computeCartesianPath(waypoints, eef_step, jump_threshold, trajectory);
+
+        if (fraction < 0.95) {
+          RCLCPP_WARN(LOGGER, "TCP Jog: Cartesian path only %.1f%% achieved", fraction * 100.0);
+          return false;
+        }
+
+        // Execute
+        moveit::planning_interface::MoveGroupInterface::Plan plan;
+        plan.trajectory = trajectory;
+        auto result = move_group.execute(plan);
+
+        if (result == moveit::core::MoveItErrorCode::SUCCESS) {
+          RCLCPP_INFO(LOGGER, "TCP Jog completed successfully");
+          return true;
+        } else {
+          RCLCPP_ERROR(LOGGER, "TCP Jog execution failed");
+          return false;
+        }
+      } catch (const std::exception& e) {
+        RCLCPP_ERROR(LOGGER, "Exception in TCP jog: %s", e.what());
+        return false;
+      }
+    };
+
+    // Helper: Process jog commands from EPICS PVs
+    auto process_jog_commands = [&]() -> bool {
+      int jog_x = epics_read_and_reset_jog_pv(epics_jog_x_chid, epics_jog_x_pv_name);
+      int jog_y = epics_read_and_reset_jog_pv(epics_jog_y_chid, epics_jog_y_pv_name);
+      int jog_z = epics_read_and_reset_jog_pv(epics_jog_z_chid, epics_jog_z_pv_name);
+
+      if (jog_x != 0 || jog_y != 0 || jog_z != 0) {
+        double step_mm = epics_read_jog_step_pv();
+        double dx = jog_x * step_mm;
+        double dy = jog_y * step_mm;
+        double dz = jog_z * step_mm;
+        return execute_tcp_jog(dx, dy, dz);
+      }
+      return true;  // No jog requested
+    };
+
     // Cleanup helper
     auto cleanup_and_exit = [&](int code) -> int {
       executor_running = false;
@@ -1921,11 +2083,16 @@ int main(int argc, char** argv)
           RCLCPP_INFO(LOGGER, " ");
           RCLCPP_INFO(LOGGER, "========================================");
           RCLCPP_INFO(LOGGER, "[%s] HOLDER CALIBRATION: Holding at above position", get_timestamp().c_str());
-          RCLCPP_INFO(LOGGER, "  Check alignment, then set Trigger=1 to return sample");
+          RCLCPP_INFO(LOGGER, "  Use JogX/Y/Z PVs to adjust TCP position");
+          RCLCPP_INFO(LOGGER, "  Set Trigger=1 to return sample");
           RCLCPP_INFO(LOGGER, "========================================");
 
-          // Wait for next trigger
-          int next_trigger = wait_for_epics_trigger(execute_pending_gripper_cmd);
+          // Wait for next trigger (with jog support)
+          auto calib_idle_callback = [&]() {
+            execute_pending_gripper_cmd();
+            process_jog_commands();
+          };
+          int next_trigger = wait_for_epics_trigger(calib_idle_callback);
           if (next_trigger < 0) {
             break;  // Shutdown requested
           }
@@ -1960,11 +2127,16 @@ int main(int argc, char** argv)
           RCLCPP_INFO(LOGGER, " ");
           RCLCPP_INFO(LOGGER, "========================================");
           RCLCPP_INFO(LOGGER, "[%s] SAMPLE HOLDER CALIBRATION: Holding at sample holder above", get_timestamp().c_str());
-          RCLCPP_INFO(LOGGER, "  Check alignment, then set Trigger=1 to return sample");
+          RCLCPP_INFO(LOGGER, "  Use JogX/Y/Z PVs to adjust TCP position");
+          RCLCPP_INFO(LOGGER, "  Set Trigger=1 to return sample");
           RCLCPP_INFO(LOGGER, "========================================");
 
-          // Wait for next trigger
-          int next_trigger = wait_for_epics_trigger(execute_pending_gripper_cmd);
+          // Wait for next trigger (with jog support)
+          auto calib_idle_callback = [&]() {
+            execute_pending_gripper_cmd();
+            process_jog_commands();
+          };
+          int next_trigger = wait_for_epics_trigger(calib_idle_callback);
           if (next_trigger < 0) {
             break;  // Shutdown requested
           }
