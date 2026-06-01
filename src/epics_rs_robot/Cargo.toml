@@ -1,0 +1,9 @@
+[workspace]
+members = ["robot_ioc"]
+resolver = "3"
+
+[workspace.dependencies]
+# epics-rs stack (local checkout, v0.18.6). Path deps so we track the user's
+# working tree at ~/codes/epics-rs.
+epics-base-rs = { path = "/home/bl9b/codes/epics-rs/crates/epics-base-rs" }
+epics-ca-rs = { path = "/home/bl9b/codes/epics-rs/crates/epics-ca-rs" }

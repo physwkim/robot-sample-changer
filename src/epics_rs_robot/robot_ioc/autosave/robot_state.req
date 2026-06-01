@@ -1,0 +1,7 @@
+# Robot run-state PVs persisted by autosave for resume-after-crash.
+# These capture where a sequence was when it stopped (collision / process death).
+Robot:CurrentStep
+Robot:StartStep
+Robot:Holder
+Robot:CalibMode
+Robot:Loaded

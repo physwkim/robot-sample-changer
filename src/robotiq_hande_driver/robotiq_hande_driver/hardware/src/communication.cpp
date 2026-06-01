@@ -44,6 +44,9 @@ void Communication::configure() {
             cfg_.tty_port.c_str(), cfg_.baudrate, cfg_.parity, cfg_.data_bits, cfg_.stop_bit);
         modbus_set_slave(mb_, cfg_.slave_id);
         modbus_set_debug(mb_, DEBUG_MODBUS);
+        // Override libmodbus' 500 ms default, which is shorter than the UR tool-comm
+        // bridge's first-transaction warm-up (~480 ms) and causes activation to fail.
+        modbus_set_response_timeout(mb_, RESPONSE_TIMEOUT_SEC, RESPONSE_TIMEOUT_USEC);
     }
 
     connect();

@@ -1,0 +1,13 @@
+[package]
+name = "robot_ioc"
+version = "0.1.0"
+edition = "2024"
+description = "Rust soft-record IOC for the UR3e+HandE robot — replaces softIoc -d db/robot.db"
+
+[[bin]]
+name = "robot_ioc"
+path = "src/main.rs"
+
+[dependencies]
+epics-base-rs = { workspace = true }
+epics-ca-rs = { workspace = true }

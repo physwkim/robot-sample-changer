@@ -9,7 +9,7 @@ source /opt/ros/humble/setup.bash
 source /home/bl9b/ws/install/setup.bash
 ros2 launch ur3e_hande_robot_description ur_control.launch.py \
     ur_type:=ur3e \
-    robot_ip:=192.168.92.10 \
+    robot_ip:=192.168.192.10 \
     description_file:=ur_with_hande.xacro \
     runtime_config_package:=ur3e_hande_robot_description \
     controllers_file:=ur_hande_controllers.yaml \

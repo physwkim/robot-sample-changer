@@ -24,7 +24,7 @@ find_package(yaml-cpp REQUIRED)
 if(DEFINED ENV{EPICS_BASE})
   set(EPICS_BASE $ENV{EPICS_BASE})
 else()
-  set(EPICS_BASE "/usr/local/epics/base")
+  set(EPICS_BASE "/home/bl9b/epics-base")
 endif()
 
 # Determine EPICS host architecture
@@ -148,6 +148,11 @@ if(EPICS_FOUND)
   )
   # Link EPICS CA libraries and yaml-cpp
   target_link_libraries(epics_triggered_sequence ca Com yaml-cpp)
+  # Bake the EPICS lib dir into the binary so libca/libCom are found at runtime
+  # without needing LD_LIBRARY_PATH set in the environment.
+  set_target_properties(epics_triggered_sequence PROPERTIES
+    BUILD_RPATH "${EPICS_LIB_DIR}"
+    INSTALL_RPATH "${EPICS_LIB_DIR}")
 endif()
 
 add_executable(upright_constraint_test src/upright_constraint_test.cpp)

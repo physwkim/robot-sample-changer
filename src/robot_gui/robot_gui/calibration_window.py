@@ -266,6 +266,7 @@ class OffsetTableWidget(qt.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._params = {}
+        self._loaded_mm = {}  # (row, col) -> value loaded from YAML, to detect real edits
         self._setup_ui()
 
     def _setup_ui(self):
@@ -383,6 +384,16 @@ class OffsetTableWidget(qt.QWidget):
 
         self.table.blockSignals(False)
 
+        # Snapshot the (quantized) value each cell was loaded with, so on save we
+        # can tell which cells the operator actually edited and leave the rest of
+        # the YAML untouched (e.g. don't rewrite Y when only X/Z were jogged).
+        self._loaded_mm = {}
+        for r in range(self.table.rowCount()):
+            for c in (1, 2, 3):
+                widget = self.table.cellWidget(r, c)
+                if widget is not None:
+                    self._loaded_mm[(r, c)] = widget.value()
+
     def _set_cell_value(self, row, col, value):
         """Set spinbox value at row, col."""
         widget = self.table.cellWidget(row, col)
@@ -402,27 +413,50 @@ class OffsetTableWidget(qt.QWidget):
         """Handle any value change."""
         self.offset_changed.emit()
 
+    def _cell_edited(self, row, col):
+        """True if the operator changed this cell since it was loaded.
+
+        Comparing against the loaded (already 3-decimal-quantized) value means a
+        round-trip with no edit reads as unchanged, so we never rewrite — and
+        re-quantize — fields the operator never touched.
+        """
+        loaded = self._loaded_mm.get((row, col))
+        return loaded is None or self._get_cell_value(row, col) != loaded
+
     def get_updated_params(self):
-        """Get updated parameters from table."""
+        """Get updated parameters from table.
+
+        Only fields whose cell was actually edited are overwritten; untouched
+        fields keep their original full-precision YAML value.
+        """
         params = dict(self._params)
 
-        # Sample Holder
-        params['sample_holder_on_position_x_offset'] = self._get_cell_value(0, 1) / 1000.0
-        params['sample_holder_on_position_y_offset'] = self._get_cell_value(0, 2) / 1000.0
-        params['sample_holder_on_position_z_offset'] = self._get_cell_value(0, 3) / 1000.0
+        single_fields = [
+            ('sample_holder_on_position_x_offset', 0, 1),
+            ('sample_holder_on_position_y_offset', 0, 2),
+            ('sample_holder_on_position_z_offset', 0, 3),
+            ('holder1_on_position_x_offset', 1, 1),
+            ('holder1_on_position_y_offset', 1, 2),
+            ('holder1_on_position_z_offset', 1, 3),
+        ]
+        for key, row, col in single_fields:
+            if self._cell_edited(row, col):
+                params[key] = self._get_cell_value(row, col) / 1000.0
 
-        # Holder 1
-        params['holder1_on_position_x_offset'] = self._get_cell_value(1, 1) / 1000.0
-        params['holder1_on_position_y_offset'] = self._get_cell_value(1, 2) / 1000.0
-        params['holder1_on_position_z_offset'] = self._get_cell_value(1, 3) / 1000.0
-
-        # Holder 2-10
-        x_offsets = []
-        z_offsets = []
+        # Holder 2-10 (X, Z lists). Preserve original list entries, replacing
+        # only the elements whose cell was edited.
+        x_offsets = list(params.get('holder_multi_x_offsets', [0.0] * 9))
+        z_offsets = list(params.get('holder_multi_z_offsets', [0.0] * 9))
+        while len(x_offsets) < 9:
+            x_offsets.append(0.0)
+        while len(z_offsets) < 9:
+            z_offsets.append(0.0)
         for i in range(9):
             row = i + 2
-            x_offsets.append(self._get_cell_value(row, 1) / 1000.0)
-            z_offsets.append(self._get_cell_value(row, 3) / 1000.0)
+            if self._cell_edited(row, 1):
+                x_offsets[i] = self._get_cell_value(row, 1) / 1000.0
+            if self._cell_edited(row, 3):
+                z_offsets[i] = self._get_cell_value(row, 3) / 1000.0
 
         params['holder_multi_x_offsets'] = x_offsets
         params['holder_multi_z_offsets'] = z_offsets

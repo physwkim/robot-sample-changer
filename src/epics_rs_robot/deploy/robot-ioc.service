@@ -1,0 +1,37 @@
+[Unit]
+Description=Robot EPICS soft IOC (robot_ioc) via procServ
+Documentation=file:///home/bl9b/ws/CLAUDE.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bl9b
+Group=bl9b
+WorkingDirectory=/home/bl9b/ws/src/epics_rs_robot/robot_ioc
+
+# robot_ioc reads these (defaulted in main.rs, set explicitly for clarity).
+Environment=ROBOT_DB=/home/bl9b/ws/db
+Environment=ROBOT_IOC=/home/bl9b/ws/src/epics_rs_robot/robot_ioc
+
+# procServ runs the IOC as a child and exposes its iocsh console on TCP 20001
+# (localhost only by default). --foreground keeps procServ in the foreground so
+# systemd (Type=simple) supervises it. procServ auto-restarts the IOC if it exits;
+# systemd restarts procServ itself if procServ dies. --ignore blocks ^D/^C on the
+# console from accidentally killing the IOC.
+ExecStart=/usr/bin/procServ \
+  --foreground --quiet \
+  --name robot_ioc \
+  --chdir /home/bl9b/ws/src/epics_rs_robot/robot_ioc \
+  --logfile /home/bl9b/ws/src/epics_rs_robot/robot_ioc/ioc/procServ.log \
+  --logstamp \
+  --ignore "^D^C" \
+  20001 \
+  /home/bl9b/ws/src/epics_rs_robot/target/release/robot_ioc
+
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

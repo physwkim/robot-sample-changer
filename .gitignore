@@ -28,3 +28,14 @@ Thumbs.db
 *.backup
 *.bak
 *~
+
+# Rust / cargo build artifacts
+target/
+
+# EPICS autosave runtime state (keep .req config, ignore saved values)
+*.sav
+*.sav[0-9]*
+*.savB
+
+# procServ / IOC runtime logs
+*.log

@@ -6,10 +6,13 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
 from ament_index_python.packages import get_package_share_directory
 
+# The node links libca (EPICS base at ~/epics-base) and talks Channel Access
+# directly to the IOC — no bridge. The IOC (robot_ioc) runs under systemd/procServ.
+
 
 def generate_launch_description():
     # Get package directory
-    pkg_share = FindPackageShare('mtc_tutorial').find('mtc_tutorial')
+    pkg_share = FindPackageShare('epics_robot').find('epics_robot')
 
     # Path to taught waypoints config (absolute path for runtime reloading)
     taught_waypoints_file = os.path.join(pkg_share, 'config', 'taught_waypoints.yaml')
@@ -81,9 +84,9 @@ def generate_launch_description():
         description='Path to taught waypoints YAML file (will be reloaded on each trigger)'
     )
 
-    # EPICS triggered sequence node
+    # EPICS triggered sequence node (started after IOC + bridge are up)
     epics_triggered_node = Node(
-        package='mtc_tutorial',
+        package='epics_robot',
         executable='epics_triggered_sequence',
         name='epics_triggered_sequence',
         output='screen',

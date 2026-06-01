@@ -125,6 +125,12 @@ class Communication {
 
     static constexpr auto DEBUG_MODBUS = false;
     static constexpr auto FAILURE_MODBUS = -1;
+    // The UR tool-communication bridge adds a one-time ~480 ms warm-up latency on the
+    // first Modbus transaction after connect. libmodbus defaults to a 500 ms response
+    // timeout, so that first transaction (the deactivate write in on_activate) races the
+    // warm-up and intermittently times out. Give it generous margin.
+    static constexpr uint32_t RESPONSE_TIMEOUT_SEC = 2;
+    static constexpr uint32_t RESPONSE_TIMEOUT_USEC = 0;
 };
 }  // namespace robotiq_hande_driver
 #endif  // ROBOTIQ_HANDE_DRIVER__COMMUNICATION_HPP_

@@ -371,7 +371,45 @@ ws/
 │   └── ...
 ├── db/
 │   └── robot.db                   - EPICS IOC 데이터베이스
+├── src/epics_rs_robot/            - Rust EPICS IOC(robot_ioc) + 배포(deploy)
 └── resources/                     - STL 메쉬 파일
+
+
+================================================================================
+
+
+13. 변경 이력
+--------------------------------------------------------------------------------
+
+[2026-06-01] EPICS 계층 재정비 및 시퀀스 안정화
+
+* 그리퍼(Hand-E) 활성화 실패 수정
+  - libmodbus 응답 타임아웃을 2초로 설정 (robotiq_hande_driver communication.cpp/.hpp).
+    UR tool-comm 브리지의 첫 트랜잭션 warm-up(~480ms)이 libmodbus 기본 타임아웃
+    500ms를 넘겨 활성화 write가 실패하던 문제 해결.
+  - 이중 socat 충돌 제거: ur_with_hande.xacro 의 create_socat_tty=false,
+    socat_ip_address 정정(로봇 IP 192.168.192.10).
+
+* 빌드 의존성/오류 수정
+  - ur_moveit_config: Python 모듈 설치 경로 오류 수정(ament_python_install_package).
+  - epics_triggered_sequence.cpp: MoveIt Plan.trajectory_ 빌드 오류 수정.
+
+* EPICS IOC 를 Rust(epics-rs) 기반 robot_ioc 로 전환
+  - src/epics_rs_robot/robot_ioc: robot.db 를 CA 로 서빙(softIoc 대체).
+  - autosave 로 실행 상태(CurrentStep/Holder/CalibMode/Loaded/StartStep) 영속화
+    → 크래시/전원 재시작 후에도 복원.
+  - procServ + systemd 로 부팅 자동시작(src/epics_rs_robot/deploy/).
+  - epics_triggered_sequence(C++ 노드)는 libca(~/epics-base)에 직접 CA 연결(rpath 내장).
+
+* 시퀀스 노드 안전/안정성 개선 (epics_triggered_sequence.cpp)
+  - 시작 시 Trigger=0 강제 → 재시작 직후 stale trigger 로 인한 자동실행 방지.
+  - 시퀀스 완료 시 StartStep=0 리셋 → 다음 실행에서 스텝 스킵 잔류 방지.
+  - 그리퍼 명령 후 실제 관절이 목표 도달/정지(물체 잡음 포함)할 때까지 대기
+    → 그리퍼가 다 열리/닫히기 전에 다음 스텝으로 넘어가는 문제 해결.
+
+* 충돌/중단 후 재개(resume) 운영
+  - CurrentStep 확인 → StartStep 설정 → 프리드라이브로 안전 위치 확보 + 보호정지 해제
+    → Trigger=1 로 중단 지점부터 재개(StartStep 미만 스텝 자동 skip).
 
 
 ================================================================================

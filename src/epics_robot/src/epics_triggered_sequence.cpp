@@ -898,6 +898,30 @@ static bool epics_write_current_step_pv(int value)
   return true;
 }
 
+// Write to StartStep PV. Used to clear the resume override (StartStep=0) after a
+// completed run so the next trigger starts from the top instead of re-skipping.
+static bool epics_write_start_step_pv(int value)
+{
+  if (!epics_start_step_chid) {
+    return false;
+  }
+
+  dbr_long_t val = static_cast<dbr_long_t>(value);
+  int status = ca_put(DBR_LONG, epics_start_step_chid, &val);
+  if (status != ECA_NORMAL) {
+    RCLCPP_ERROR(LOGGER, "Failed to put StartStep PV value: %s", ca_message(status));
+    return false;
+  }
+
+  status = ca_pend_io(1.0);
+  if (status != ECA_NORMAL) {
+    RCLCPP_ERROR(LOGGER, "Failed to complete put: %s", ca_message(status));
+    return false;
+  }
+
+  return true;
+}
+
 // Write to Gripper RBV PV (0=close, 1=open) - status display
 static bool epics_write_gripper_rbv_pv(int value)
 {
@@ -1242,6 +1266,15 @@ int main(int argc, char** argv)
     return 1;
   }
 
+  // Safety: clear the Trigger PV on startup so a stale Trigger=1 (left by a crash or
+  // set while the node was down) does NOT auto-start the sequence on restart. The
+  // operator must deliberately set Trigger=1 again after the node is ready.
+  if (epics_write_pv(0)) {
+    RCLCPP_INFO(LOGGER, "Startup: reset %s to 0 (no auto-start)", epics_trigger_pv.c_str());
+  } else {
+    RCLCPP_WARN(LOGGER, "Startup: failed to reset Trigger PV to 0");
+  }
+
   // Get robot description from move_group
   RCLCPP_INFO(LOGGER, "Waiting for move_group parameter service...");
   auto param_client_node = rclcpp::Node::make_shared("epics_triggered_sequence_param_client");
@@ -1291,6 +1324,12 @@ int main(int argc, char** argv)
   const auto gripper_open_position = node->declare_parameter<double>("gripper_open_position", 0.025);
   const auto gripper_close_position = node->declare_parameter<double>("gripper_close_position", 0.01);
   const auto gripper_max_effort = node->declare_parameter<double>("gripper_max_effort", 100.0);
+  // After a gripper command, wait until the gripper joint actually reaches the target
+  // (within gripper_reach_tol) or stalls on an object, up to gripper_settle_timeout
+  // seconds, before proceeding to the next step. Uses /joint_states feedback (more
+  // precise than the threshold-based Gripper_RBV).
+  const auto gripper_settle_timeout = node->declare_parameter<double>("gripper_settle_timeout", 5.0);
+  const auto gripper_reach_tol = node->declare_parameter<double>("gripper_reach_tol", 0.0015);
 
   // Holder offset parameter (holder number is read from EPICS PV)
   const auto holder_offset = node->declare_parameter<double>("holder_offset", 0.03);
@@ -1793,6 +1832,54 @@ int main(int argc, char** argv)
     };
 
     // Helper: Execute hand stage
+    // Wait until the physical gripper reaches the commanded position or stalls (grabs
+    // an object), via /joint_states feedback, so the sequence does not proceed before
+    // the gripper finishes moving. (Gripper_RBV alone is threshold-based and flips
+    // before the gripper is fully open/closed — especially when closing.)
+    auto wait_gripper_reached = [&](const std::string& hand_state) -> void {
+      const std::string GJ = "robotiq_hande_left_finger_joint";
+      const double target = (hand_state == hand_open) ? gripper_open_position : gripper_close_position;
+      auto abs_d = [](double x) { return x < 0 ? -x : x; };
+      const auto t0 = std::chrono::steady_clock::now();
+      auto last_move = t0;
+      double prev = 0.0;
+      bool have_prev = false;
+      while (rclcpp::ok() && !shutdown_requested) {
+        double pos = 0.0; bool have_pos = false;
+        {
+          std::lock_guard<std::mutex> lock(joint_state_mutex);
+          if (latest_joint_state) {
+            for (size_t i = 0; i < latest_joint_state->name.size(); ++i) {
+              if (latest_joint_state->name[i] == GJ &&
+                  i < latest_joint_state->position.size()) {
+                pos = latest_joint_state->position[i]; have_pos = true; break;
+              }
+            }
+          }
+        }
+        auto now = std::chrono::steady_clock::now();
+        if (have_pos) {
+          if (abs_d(pos - target) < gripper_reach_tol) {
+            RCLCPP_INFO(LOGGER, "  Gripper reached target (pos=%.4f)", pos);
+            return;
+          }
+          if (!have_prev || abs_d(pos - prev) >= 0.0003) last_move = now;  // still moving
+          prev = pos; have_prev = true;
+          // Stopped moving (reached limit / stalled on object) for 300 ms after a 250 ms dwell.
+          if (now - t0 > std::chrono::milliseconds(250) &&
+              now - last_move > std::chrono::milliseconds(300)) {
+            RCLCPP_INFO(LOGGER, "  Gripper settled (pos=%.4f, target=%.4f)", pos, target);
+            return;
+          }
+        }
+        if (std::chrono::duration<double>(now - t0).count() > gripper_settle_timeout) {
+          RCLCPP_WARN(LOGGER, "  Gripper settle timeout (pos=%.4f, target=%.4f)", pos, target);
+          return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+      }
+    };
+
     auto execute_hand_stage = [&](int step_number, const std::string& step_name,
                                   const std::string& hand_state,
                                   int start_from_step) -> bool {
@@ -1815,6 +1902,7 @@ int main(int argc, char** argv)
         if (!call_gripper_action(node, gripper_action_name, position, gripper_max_effort)) {
           RCLCPP_WARN(LOGGER, "Gripper action failed, continuing...");
         }
+        wait_gripper_reached(hand_state);  // wait until gripper physically finishes
         epics_write_current_step_pv(step_number);  // Update CurrentStep PV
         // Check PauseStep PV - if matches this step, wait until it changes
         if (!wait_for_pause_step_change(step_number)) {
@@ -1845,6 +1933,7 @@ int main(int argc, char** argv)
           RCLCPP_ERROR(LOGGER, "Hand stage error: %s", e.what());
           return false;
         }
+        wait_gripper_reached(hand_state);  // wait until gripper physically finishes
         RCLCPP_INFO(LOGGER, "  -> Completed");
         epics_write_current_step_pv(step_number);  // Update CurrentStep PV
         // Check PauseStep PV - if matches this step, wait until it changes
@@ -1868,17 +1957,25 @@ int main(int argc, char** argv)
         move_group.setMaxVelocityScalingFactor(0.1);  // Slow for calibration
         move_group.setMaxAccelerationScalingFactor(0.1);
 
-        // Get current pose
+        // Get current pose of the group tip (flange) — used as the Cartesian
+        // target reference. The jog is a pure translation, so translating the
+        // flange by a base-frame vector rigidly translates the whole tool.
         geometry_msgs::msg::PoseStamped current_pose = move_group.getCurrentPose();
 
-        // Get current orientation as quaternion
-        Eigen::Quaterniond q(
-            current_pose.pose.orientation.w,
-            current_pose.pose.orientation.x,
-            current_pose.pose.orientation.y,
-            current_pose.pose.orientation.z);
+        // Express the jog axes in the SAME frame the calibration offsets use
+        // (ik_frame = robotiq_hande_end), NOT the group tip. The ur_manipulator
+        // group tip is 'flange', which is rotated rpy(-pi/2,0,-pi/2) relative to
+        // robotiq_hande_end, so using the flange orientation here would make the
+        // jog directions disagree with the taught/calibration offsets.
+        moveit::core::RobotStatePtr current_state = move_group.getCurrentState();
+        if (!current_state) {
+          RCLCPP_ERROR(LOGGER, "TCP Jog: failed to get current robot state");
+          return false;
+        }
+        const Eigen::Isometry3d& tcp_tf = current_state->getGlobalLinkTransform(ik_frame);
+        Eigen::Quaterniond q(tcp_tf.rotation());
 
-        // Convert offset from TCP frame to base frame
+        // Convert offset from TCP (ik_frame) frame to base frame
         Eigen::Vector3d offset_tcp(dx_mm / 1000.0, dy_mm / 1000.0, dz_mm / 1000.0);
         Eigen::Vector3d offset_base = q * offset_tcp;
 
@@ -1909,7 +2006,7 @@ int main(int argc, char** argv)
 
         // Execute
         moveit::planning_interface::MoveGroupInterface::Plan plan;
-        plan.trajectory = trajectory;
+        plan.trajectory_ = trajectory;
         auto result = move_group.execute(plan);
 
         if (result == moveit::core::MoveItErrorCode::SUCCESS) {
@@ -2235,6 +2332,15 @@ int main(int argc, char** argv)
 
       // Reset CurrentStep PV to 0 after sequence completion
       epics_write_current_step_pv(0);
+
+      // Clear the StartStep resume override on a completed run so the next trigger
+      // starts from the top (StartStep is a one-shot override). On failure, leave it
+      // so the operator can resume from where it stopped.
+      if (sequence_success || skip_remaining) {
+        if (epics_write_start_step_pv(0)) {
+          RCLCPP_INFO(LOGGER, "Reset StartStep to 0 (next run starts from the beginning)");
+        }
+      }
     }
 
     return cleanup_and_exit(0);

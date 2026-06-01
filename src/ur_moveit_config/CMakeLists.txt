@@ -7,6 +7,7 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
 
 # Install launch files
 install(DIRECTORY launch
@@ -19,10 +20,8 @@ install(DIRECTORY config
   OPTIONAL
 )
 
-# Install Python package
-install(DIRECTORY ur_moveit_config
-  DESTINATION lib/python${PYTHON_VERSION_MAJOR}.${PYTHON_VERSION_MINOR}/site-packages/
-)
+# Install Python package (ament helper resolves the correct pythonX.Y/site-packages path)
+ament_python_install_package(${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

@@ -11,11 +11,11 @@
     above_y_offset: -0.005
     retreat_z_offset: -0.05
     holder1_on_position_x_offset: 0.0
-    holder1_on_position_y_offset: 0.0
+    holder1_on_position_y_offset: 0.0005
     holder1_on_position_z_offset: -0.0003
-    sample_holder_on_position_x_offset: 0.001
+    sample_holder_on_position_x_offset: -0.0025
     sample_holder_on_position_y_offset: -0.0005
-    sample_holder_on_position_z_offset: -0.0005
+    sample_holder_on_position_z_offset: 0.0005
     holder_multi_x_offsets: [0.0003, 0.0005, 0.0015, 0.0015, 0.003, 0.003, 0.003,
       0.003, 0.003]
     holder_multi_z_offsets: [0.0, 0.0, 0.0, 0.0002, 0.00025, 0.0003, 0.00035, 0.0004,
