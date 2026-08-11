@@ -15,9 +15,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
-use cspace_collision::{LinkPaddingScale, ParryCollisionEnv, World};
+use cspace_collision::{CollisionRequest, LinkPaddingScale, ParryCollisionEnv, World};
 use cspace_core::geometry::{Isometry3, Shape, Vector3, mesh_from_bytes};
 use cspace_core::kinematics::{CartesianInterpolator, IkContext, MaxEefStep};
+use cspace_core::state::RobotState;
 use cspace_core::trajectory::RobotTrajectory;
 use cspace_core::trajectory::trajectory_tools::apply_totg_time_parameterization;
 use cspace_planning::constraints::utils::construct_goal_joint_constraints;
@@ -524,7 +525,7 @@ impl<'m> Motion<'m> {
             MaxEefStep::new(self.translation_step, self.rotation_step),
         );
         let mut solver = self.model.solver()?;
-        let (states, fraction) = interpolator
+        let (mut states, fraction) = interpolator
             .to_pose(
                 &start_state,
                 &mut solver,
@@ -532,10 +533,28 @@ impl<'m> Motion<'m> {
                 &mut IkContext::default(),
             )
             .map_err(|e| SequencerError(format!("jog: Cartesian interpolation: {e}")))?;
-        if fraction.value() < self.min_fraction {
+
+        // The C++ jog went through move_group's Cartesian-path service,
+        // whose avoid_collisions default validity-checks every
+        // interpolated state and truncates at the first colliding one —
+        // an operator could not jog into the stage. The sequence steps
+        // used the core-layer interpolator with no validity callback, so
+        // only the jog gets this gate.
+        let mut fraction = fraction.value();
+        if let Some(i) = first_collision_index(
+            self.model,
+            &self.scene_assets,
+            &self.allow_collisions_with,
+            &states,
+        )? {
+            let span = (states.len() - 1).max(1) as f64;
+            states.truncate(i);
+            fraction *= i.saturating_sub(1) as f64 / span;
+        }
+        if fraction < self.min_fraction {
             return Err(SequencerError(format!(
                 "TCP Jog: Cartesian path only {:.1}% achieved",
-                fraction.value() * 100.0
+                fraction * 100.0
             )));
         }
         if states.len() < 2 {
@@ -801,41 +820,40 @@ fn scene_with_assets<'m>(
     (scene, env)
 }
 
+/// Index of the first state that collides (self or scene world, ACM
+/// applied), or `None` when the whole path is clear. Used by the jog
+/// gate; see the comment at its call site for the C++ split this
+/// preserves.
+fn first_collision_index(
+    model: &Model,
+    assets: &[SceneAsset],
+    allow_collisions_with: &[String],
+    states: &[RobotState<'_>],
+) -> Result<Option<usize>, SequencerError> {
+    let (mut scene, env) = scene_with_assets(model, assets, allow_collisions_with);
+    let request = CollisionRequest::default();
+    for (i, state) in states.iter().enumerate() {
+        let q = state
+            .joint_group_positions(&model.group)
+            .map_err(|e| SequencerError(format!("jog: state positions: {e}")))?;
+        scene
+            .current_state_mut()
+            .set_joint_group_positions(&model.group, &q)
+            .map_err(|e| SequencerError(format!("jog: scene state: {e}")))?;
+        scene.current_state_mut().update();
+        if scene.check_collision(&env, &request).collision {
+            return Ok(Some(i));
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
-    use cspace_collision::CollisionRequest;
-    use cspace_core::state::RobotState;
-
     use super::*;
     use crate::waypoints::WaypointData;
-
-    /// Test probe: index of the first state that collides (self or scene
-    /// world, ACM applied), or `None` when the whole path is clear.
-    fn first_collision_index(
-        model: &Model,
-        assets: &[SceneAsset],
-        allow_collisions_with: &[String],
-        states: &[RobotState<'_>],
-    ) -> Result<Option<usize>, SequencerError> {
-        let (mut scene, env) = scene_with_assets(model, assets, allow_collisions_with);
-        let request = CollisionRequest::default();
-        for (i, state) in states.iter().enumerate() {
-            let q = state
-                .joint_group_positions(&model.group)
-                .map_err(|e| SequencerError(format!("probe: state positions: {e}")))?;
-            scene
-                .current_state_mut()
-                .set_joint_group_positions(&model.group, &q)
-                .map_err(|e| SequencerError(format!("probe: scene state: {e}")))?;
-            scene.current_state_mut().update();
-            if scene.check_collision(&env, &request).collision {
-                return Ok(Some(i));
-            }
-        }
-        Ok(None)
-    }
 
     fn production_model_and_state() -> (Model, JointMap) {
         let path = Path::new(concat!(
@@ -904,10 +922,10 @@ mod tests {
         }
     }
 
-    /// The collision plumbing `move_planned` builds its scene with must
-    /// SEE a scene mesh: a cube centered on the TCP collides, the same
-    /// cube 3 m away does not (which also proves the taught state itself
-    /// is collision-free, so the hit is the mesh, not the robot).
+    /// The collision plumbing both `move_planned` and the jog gate share
+    /// must SEE a scene mesh: a cube centered on the TCP collides, the
+    /// same cube 3 m away does not (which also proves the taught state
+    /// itself is collision-free, so the hit is the mesh, not the robot).
     #[test]
     fn scene_mesh_collision_is_detected_at_the_tcp() {
         let (model, joints) = production_model_and_state();
