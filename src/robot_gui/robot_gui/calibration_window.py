@@ -524,7 +524,7 @@ class YamlOffsetEditor(qt.QGroupBox):
         layout.addWidget(self.offset_table)
 
     def _load_yaml(self):
-        default_path = os.path.expanduser("~/ws/src/epics_robot/config")
+        default_path = os.path.expanduser("~/ws/config")
         path, _ = qt.QFileDialog.getOpenFileName(
             self, "Load Waypoints YAML", default_path, "YAML Files (*.yaml *.yml)"
         )

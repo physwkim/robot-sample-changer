@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=[2] MoveIt
-Comment=Start MoveIt motion planning (start after UR Driver)
-Icon=utilities-terminal
-Terminal=true
-Exec=/home/bl9b/ws/desktop/scripts/launch_moveit.sh
-Categories=Development;

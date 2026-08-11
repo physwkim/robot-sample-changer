@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=[1] UR Driver
-Comment=Start UR3e robot driver (start first)
-Icon=utilities-terminal
-Terminal=true
-Exec=/home/bl9b/ws/desktop/scripts/launch_ur_driver.sh
-Categories=Development;

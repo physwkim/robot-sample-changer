@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=[3] EPICS Sequence
-Comment=Start EPICS triggered sequence (start after MoveIt)
-Icon=utilities-terminal
-Terminal=true
-Exec=/home/bl9b/ws/desktop/scripts/launch_epics_sequence.sh
-Categories=Development;

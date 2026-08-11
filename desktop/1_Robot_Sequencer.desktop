@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=[1] Robot Sequencer
+Comment=Start the robot sequence daemon (robot_ioc runs via systemd)
+Icon=utilities-terminal
+Terminal=true
+Exec=/home/bl9b/ws/desktop/scripts/launch_robot_sequencer.sh
+Categories=Development;

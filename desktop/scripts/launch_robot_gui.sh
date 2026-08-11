@@ -1,5 +1,5 @@
 #!/bin/bash
-printf '\033]0;[4] Robot GUI - robot_control_gui\007'
+printf '\033]0;[2] Robot GUI - robot_control_gui\007'
 if pgrep -f "[r]obot_gui.main" > /dev/null; then
     echo "Robot GUI is already running."
     read -p "Press Enter to close..."

@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=[4] Robot GUI
-Comment=Start Robot Control GUI (start after EPICS Sequence)
-Icon=utilities-terminal
-Terminal=true
-Exec=/home/bl9b/ws/desktop/scripts/launch_robot_gui.sh
-Categories=Development;

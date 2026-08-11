@@ -1,4 +1,0 @@
-move_group:
-  ros__parameters:
-    # Add MTC executor capability to move_group
-    capabilities: "move_group/ExecuteTaskSolutionCapability"
