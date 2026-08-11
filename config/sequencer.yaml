@@ -1,0 +1,92 @@
+# robot-sequencer configuration.
+#
+# Paths are resolved relative to this file's directory unless absolute.
+# Values mirror the parameters of the replaced ROS node
+# (epics_triggered_sequence) and its production launcher
+# (desktop/scripts/launch_epics_sequence.sh).
+
+robot:
+  ip: "192.168.192.10"           # UR3e; URSim rehearsal: 192.168.56.101
+  urdf: "../model/urdf/ur_with_hande_ur3e.urdf"
+  srdf: "../model/srdf/ur.srdf"
+  mesh_packages:
+    ur_description: "../model/meshes/ur_description"
+    robotiq_hande_description: "../model/meshes/robotiq_hande_description"
+  group: "ur_manipulator"
+  ik_frame: "robotiq_hande_end"
+  script_file: "../resources/urscript/external_control.urscript"
+  output_recipe: "../resources/urscript/rtde_output_recipe.txt"
+  input_recipe: "../resources/urscript/rtde_input_recipe.txt"
+
+# Planning-time joint limit overrides, ported from
+# ur3e_hande_moveit_config/config/joint_limits.yaml. URDF carries no
+# acceleration limits and TOTG requires them. Position overrides
+# (+-pi on the three non-continuous joints) match the MoveIt config;
+# the joints MoveIt marked continuous keep the URDF's +-2pi bounds
+# (documented deviation: a strict subset of "continuous", and every
+# taught waypoint lies inside it).
+joint_limits:
+  max_velocity: 3.14159          # rad/s, all six arm joints
+  max_acceleration: 1.0          # rad/s^2, all six arm joints
+  position_overrides:
+    shoulder_lift_joint: [-3.14159, 3.14159]
+    elbow_joint: [-3.14159, 3.14159]
+    wrist_2_joint: [-3.14159, 3.14159]
+
+epics:
+  trigger_pv: "Robot:Trigger"
+  start_step_pv: "Robot:StartStep"
+  wait_pv: "Robot:Wait"
+  holder_pv: "Robot:Holder"
+  stop_pv: "Robot:Stop"
+  current_step_pv: "Robot:CurrentStep"
+  gripper_pv: "Robot:Gripper"
+  gripper_rbv_pv: "Robot:Gripper_RBV"
+  pause_step_pv: "Robot:PauseStep"
+  calib_mode_pv: "Robot:CalibMode"
+  loaded_pv: "Robot:Loaded"
+  jog_x_pv: "Robot:JogX"
+  jog_y_pv: "Robot:JogY"
+  jog_z_pv: "Robot:JogZ"
+  jog_step_pv: "Robot:JogStep"
+
+sequence:
+  waypoints_yaml: "taught_waypoints.yaml"
+  holder_offset: 0.03            # m between holders in Y
+  velocity_scale: 1.0
+  acceleration_scale: 1.0
+  cartesian_translation_step: 0.005   # m, 5 mm interpolation resolution
+  cartesian_rotation_step: 0.05       # rad
+  cartesian_min_fraction: 0.95        # below this: fall back to planned move
+  jog_velocity_scale: 0.1             # calibration jog runs slow
+
+gripper:
+  # "hande": Robotiq Hand-E over UR tool communication (robot ip:54321).
+  # "simulated": no hardware; position tracks commands instantly
+  # (URSim has no RS485 device behind 54321).
+  mode: "hande"
+  open_position: 0.025           # m, open command
+  close_position: 0.0            # m, close command (production closes via
+                                 # SRDF named target "close" = 0.0; the
+                                 # gripper stalls on a gripped sample)
+  close_settle_target: 0.01      # m, settle-wait target for close
+                                 # (reference gripper_close_position)
+  reach_tolerance: 0.0015        # m
+  settle_timeout: 5.0            # s
+  open_threshold: 0.02           # m, Gripper_RBV open/close boundary
+
+# Static collision scene, replacing stage_scene_utils + setup_stage_acm.
+scene:
+  objects:
+    - id: "stage"
+      stl: "../resources/stage.stl"
+      scale: [0.01, 0.01, 0.01]
+      position: [-0.15, 0.39, -0.002]
+      rpy: [0.0, 0.0, 3.14159]
+  # setup_stage_acm.py allowances: collisions between these links and
+  # every scene object are ignored.
+  allow_collisions_with:
+    - "base_link"
+    - "base_link_inertia"
+    - "base"
+    - "world"

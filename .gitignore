@@ -39,3 +39,6 @@ target/
 
 # procServ / IOC runtime logs
 *.log
+
+# Rust (robot_sequencer)
+src/robot_sequencer/target/
