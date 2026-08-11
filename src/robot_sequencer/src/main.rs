@@ -43,7 +43,10 @@ fn run() -> Result<(), SequencerError> {
     log::info("Loading robot model...");
     let model = Model::load(&config)?;
 
-    let epics = Epics::connect(&config.epics)?;
+    let epics = Epics::connect(
+        &config.epics,
+        config.vision.enabled.then_some(&config.vision),
+    )?;
     // A trigger left at 1 by a crash must not fire a sequence the moment
     // the daemon returns; clearing it is the C++ node's startup behavior.
     epics.write_trigger(0);
@@ -85,6 +88,19 @@ fn run() -> Result<(), SequencerError> {
     log::info("    0=Normal (full sequence)");
     log::info("    1=Holder calibration (0-5, wait, 20-23)");
     log::info("    2=SampleHolder calibration (0-8, wait, 16-23)");
+    if config.vision.enabled {
+        log::info(&format!(
+            "  Vision correction: ENABLED{} (deadband {:.2} mm, limit {:.2} mm, {})",
+            if config.vision.observe_only {
+                " [observe_only]"
+            } else {
+                ""
+            },
+            config.vision.min_correction,
+            config.vision.max_correction,
+            config.vision.req_pv
+        ));
+    }
     log::info("========================================");
 
     Sequencer::new(epics, motion, gripper, &model, &config).run()

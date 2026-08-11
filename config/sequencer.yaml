@@ -90,3 +90,20 @@ scene:
     - "base_link_inertia"
     - "base"
     - "world"
+
+# Vision look-then-move fine correction (doc/vision_camera_setup.md).
+# Off until the wrist camera + vision node are commissioned; when
+# enabled, every Robot:Vision PV must be served and answered, and a
+# failed/invalid/over-limit measurement stops the sequence (resume via
+# StartStep as with any step failure). observe_only is Phase C: measure
+# and log at every hook, never move, never fail.
+vision:
+  enabled: false
+  observe_only: false
+  timeout: 2.0            # s to wait for the vision node's answer
+  min_correction: 0.05    # mm, deadband below which corrections are noise
+  max_correction: 3.0     # mm, larger corrections stop the sequence
+  pick_align: true        # before steps 3 and 14
+  grip_offset: true       # after steps 5 and 16, added to the next place
+  place_align: true       # before steps 9 and 20
+  seating_check: true     # after steps 11 and 22

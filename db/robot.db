@@ -113,3 +113,76 @@ record(ao, "Robot:JogStep")
     field(PREC, "1")
     field(EGU,  "mm")
 }
+record(longout, "Robot:Vision:Req")
+{
+    field(DESC, "Vision request id (sequencer writes)")
+    field(VAL,  "0")
+}
+record(mbbo, "Robot:Vision:Kind")
+{
+    field(DESC, "Vision request kind")
+    field(ZRST, "None")
+    field(ONST, "Pick Align")
+    field(TWST, "Grip Offset")
+    field(THST, "Place Align")
+    field(FRST, "Seating")
+    field(ZRVL, "0")
+    field(ONVL, "1")
+    field(TWVL, "2")
+    field(THVL, "3")
+    field(FRVL, "4")
+    field(VAL,  "0")
+}
+record(longin, "Robot:Vision:Done")
+{
+    field(DESC, "Vision answered request id (node writes)")
+    field(VAL,  "0")
+}
+record(bi, "Robot:Vision:Valid")
+{
+    field(DESC, "Vision measurement verdict")
+    field(ZNAM, "Invalid")
+    field(ONAM, "Valid")
+    field(VAL,  "0")
+}
+record(ao, "Robot:Vision:DX")
+{
+    field(DESC, "TCP-local correction to apply, X")
+    field(VAL,  "0.0")
+    field(PREC, "3")
+    field(EGU,  "mm")
+}
+record(ao, "Robot:Vision:DY")
+{
+    field(DESC, "TCP-local correction to apply, Y")
+    field(VAL,  "0.0")
+    field(PREC, "3")
+    field(EGU,  "mm")
+}
+record(ao, "Robot:Vision:DZ")
+{
+    field(DESC, "TCP-local correction to apply, Z")
+    field(VAL,  "0.0")
+    field(PREC, "3")
+    field(EGU,  "mm")
+}
+record(ao, "Robot:Vision:Quality")
+{
+    field(DESC, "Vision detection quality 0-1")
+    field(VAL,  "0.0")
+    field(PREC, "2")
+}
+record(bi, "Robot:Vision:Seated")
+{
+    field(DESC, "Puck seating verdict (Kind=Seating)")
+    field(ZNAM, "Not Seated")
+    field(ONAM, "Seated")
+    field(VAL,  "0")
+}
+record(ao, "Robot:Vision:Tilt")
+{
+    field(DESC, "Puck top-face tilt (Kind=Seating)")
+    field(VAL,  "0.0")
+    field(PREC, "2")
+    field(EGU,  "deg")
+}

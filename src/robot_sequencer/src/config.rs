@@ -21,6 +21,8 @@ pub struct Config {
     pub sequence: SequenceConfig,
     pub gripper: GripperConfig,
     pub scene: SceneConfig,
+    #[serde(default)]
+    pub vision: VisionConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,6 +119,67 @@ pub struct SceneObject {
     pub rpy: [f64; 3],
 }
 
+/// Vision look-then-move correction (doc/vision_camera_setup.md).
+/// Disabled by default; when enabled every listed PV must connect at
+/// startup and a failed or invalid measurement stops the sequence (the
+/// resume semantics handle it like any other step failure).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct VisionConfig {
+    pub enabled: bool,
+    /// Phase C observation mode: measure and log at every hook, but
+    /// never move and never fail the sequence on the verdict.
+    pub observe_only: bool,
+    /// Seconds to wait for the vision node to answer a request.
+    pub timeout: f64,
+    /// Corrections below this magnitude (mm) are skipped as noise.
+    pub min_correction: f64,
+    /// Corrections above this magnitude (mm) stop the sequence — a
+    /// mis-detection, a wrong slot, or a moved rack, never auto-applied.
+    pub max_correction: f64,
+    /// Per-hook enables (all only meaningful when `enabled`).
+    pub pick_align: bool,
+    pub grip_offset: bool,
+    pub place_align: bool,
+    pub seating_check: bool,
+    pub req_pv: String,
+    pub kind_pv: String,
+    pub done_pv: String,
+    pub valid_pv: String,
+    pub dx_pv: String,
+    pub dy_pv: String,
+    pub dz_pv: String,
+    pub quality_pv: String,
+    pub seated_pv: String,
+    pub tilt_pv: String,
+}
+
+impl Default for VisionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            observe_only: false,
+            timeout: 2.0,
+            min_correction: 0.05,
+            max_correction: 3.0,
+            pick_align: true,
+            grip_offset: true,
+            place_align: true,
+            seating_check: true,
+            req_pv: "Robot:Vision:Req".into(),
+            kind_pv: "Robot:Vision:Kind".into(),
+            done_pv: "Robot:Vision:Done".into(),
+            valid_pv: "Robot:Vision:Valid".into(),
+            dx_pv: "Robot:Vision:DX".into(),
+            dy_pv: "Robot:Vision:DY".into(),
+            dz_pv: "Robot:Vision:DZ".into(),
+            quality_pv: "Robot:Vision:Quality".into(),
+            seated_pv: "Robot:Vision:Seated".into(),
+            tilt_pv: "Robot:Vision:Tilt".into(),
+        }
+    }
+}
+
 impl Config {
     /// Loads the YAML and resolves every relative path against the config
     /// file's directory, so the daemon can be started from anywhere.
@@ -142,6 +205,24 @@ impl Config {
         anchor(&mut config.sequence.waypoints_yaml);
         for object in &mut config.scene.objects {
             anchor(&mut object.stl);
+        }
+        if config.vision.enabled {
+            let v = &config.vision;
+            // Below ~0.002 mm the IK offset helper's epsilon treats the
+            // correction as zero and the strict fallback check misfires.
+            if v.min_correction < 0.002 {
+                return Err(SequencerError(
+                    "vision.min_correction must be >= 0.002 mm".into(),
+                ));
+            }
+            if v.max_correction < v.min_correction {
+                return Err(SequencerError(
+                    "vision.max_correction must be >= vision.min_correction".into(),
+                ));
+            }
+            if v.timeout <= 0.0 {
+                return Err(SequencerError("vision.timeout must be positive".into()));
+            }
         }
         Ok(config)
     }
@@ -178,5 +259,24 @@ mod tests {
         for dir in config.robot.mesh_packages.values() {
             assert!(dir.is_dir(), "missing mesh package dir: {}", dir.display());
         }
+        // Production carries an explicit vision section, disabled.
+        assert!(!config.vision.enabled);
+        assert!(!config.vision.observe_only);
+    }
+
+    /// The URSim config has no vision section: the serde default path
+    /// must yield a disabled feature with the documented thresholds.
+    #[test]
+    fn ursim_config_defaults_vision_off() {
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/sequencer_ursim.yaml"
+        ));
+        let config = Config::load(path).expect("load");
+        let v = &config.vision;
+        assert!(!v.enabled);
+        assert_eq!(v.min_correction, 0.05);
+        assert_eq!(v.max_correction, 3.0);
+        assert_eq!(v.req_pv, "Robot:Vision:Req");
     }
 }

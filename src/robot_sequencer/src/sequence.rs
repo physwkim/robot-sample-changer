@@ -11,7 +11,7 @@
 use std::time::Duration;
 
 use crate::config::Config;
-use crate::epics::{CalibMode, Epics, WaitStatus};
+use crate::epics::{CalibMode, Epics, VisionKind, WaitStatus};
 use crate::error::SequencerError;
 use crate::gripper::Gripper;
 use crate::log;
@@ -55,6 +55,31 @@ pub struct Sequencer<'a> {
     /// read initializes without executing).
     last_gripper_cmd: i32,
     sequence_count: u32,
+    /// Monotonic id for the vision handshake (`Robot:Vision:Req`/`Done`).
+    vision_req_id: i32,
+}
+
+/// A measured correction gated against the configured deadband/limit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Gate {
+    /// Below the deadband: noise, skip the move.
+    Below(f64),
+    /// Within limits: apply this TCP-local correction (mm).
+    Apply([f64; 3]),
+    /// Over the limit: a mis-detection, wrong slot, or moved rack —
+    /// never auto-applied.
+    TooLarge(f64),
+}
+
+fn gate_correction(d: [f64; 3], min_mm: f64, max_mm: f64) -> Gate {
+    let mag = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    if mag < min_mm {
+        Gate::Below(mag)
+    } else if mag <= max_mm {
+        Gate::Apply(d)
+    } else {
+        Gate::TooLarge(mag)
+    }
 }
 
 impl<'a> Sequencer<'a> {
@@ -65,6 +90,9 @@ impl<'a> Sequencer<'a> {
         model: &'a Model,
         config: &'a Config,
     ) -> Self {
+        // Seed the request ids above the persisted Done echo — see
+        // `vision_last_done` for why starting at 0 aliases stale answers.
+        let vision_req_id = epics.vision_last_done();
         Self {
             epics,
             motion,
@@ -73,6 +101,7 @@ impl<'a> Sequencer<'a> {
             config,
             last_gripper_cmd: -1,
             sequence_count: 0,
+            vision_req_id,
         }
     }
 
@@ -149,19 +178,52 @@ impl<'a> Sequencer<'a> {
 
     /// Normal mode, steps 0-23 with the measurement wait after step 12.
     /// Returns whether steps 13-23 were skipped (`Wait` = 2).
+    ///
+    /// The vision hooks (all no-ops unless `vision.enabled`) hang off
+    /// the four above→on descents: measure at the taught above pose,
+    /// fold the gated correction into the descent and the matching
+    /// ascent. Each `measure` condition requires that THIS run executed
+    /// the above step — after a resume that skipped it the arm's pose
+    /// is not the calibrated measurement pose, so no measurement is
+    /// taken. Calibration modes get no hooks: they exist to measure the
+    /// taught error, which a correction would mask.
     fn run_normal(&mut self, w: &RunWaypoints, start: i32) -> Result<bool, SequencerError> {
         self.hand(0, "open_hand", true, start)?;
         self.arm(1, "holder_standby", &w.standby, start)?;
         self.cartesian(2, "holder_above", &w.above, start)?;
-        self.cartesian(3, "holder_on_position", &w.on_pos, start)?;
+
+        let d_pick = self.vision_correction(start <= 2, VisionKind::PickAlign, "pick@rack")?;
+        let above_c = self.corrected(&w.above, d_pick, "holder_above+vision")?;
+        let on_c = self.corrected(&w.on_pos, d_pick, "holder_on_position+vision")?;
+        self.cartesian_via(
+            3,
+            "holder_on_position",
+            d_pick.is_some().then_some(&above_c),
+            &on_c,
+            start,
+        )?;
         self.hand(4, "close_gripper", false, start)?;
-        self.cartesian(5, "holder_above_return", &w.above, start)?;
+        self.cartesian(5, "holder_above_return", &above_c, start)?;
+        let d_grip = self.vision_correction(start <= 5, VisionKind::GripOffset, "grip@rack")?;
         self.cartesian(6, "holder_retreat", &w.retreat, start)?;
         self.arm(7, "sample_holder_standby", &w.sh_standby, start)?;
         self.cartesian(8, "sample_holder_above", &w.sh_above, start)?;
-        self.cartesian(9, "sample_holder_on_position", &w.sh_on_pos, start)?;
+
+        let d_slot =
+            self.vision_correction(start <= 8, VisionKind::PlaceAlign, "place@sample_holder")?;
+        let d_place = self.combine_corrections(d_slot, d_grip, "place@sample_holder")?;
+        let sh_above_c = self.corrected(&w.sh_above, d_place, "sample_holder_above+vision")?;
+        let sh_on_c = self.corrected(&w.sh_on_pos, d_place, "sample_holder_on+vision")?;
+        self.cartesian_via(
+            9,
+            "sample_holder_on_position",
+            d_place.is_some().then_some(&sh_above_c),
+            &sh_on_c,
+            start,
+        )?;
         self.hand(10, "open_gripper", true, start)?;
-        self.cartesian(11, "sample_holder_above_return", &w.sh_above, start)?;
+        self.cartesian(11, "sample_holder_above_return", &sh_above_c, start)?;
+        self.vision_seating_check(start <= 11, "seating@sample_holder")?;
         self.cartesian(12, "sample_holder_standby_return", &w.sh_standby, start)?;
 
         let mut skip_remaining = false;
@@ -179,15 +241,39 @@ impl<'a> Sequencer<'a> {
 
         if !skip_remaining {
             self.cartesian(13, "sample_holder_above_2nd", &w.sh_above, start)?;
-            self.cartesian(14, "sample_holder_on_position_2nd", &w.sh_on_pos, start)?;
+            let d_pick2 =
+                self.vision_correction(start <= 13, VisionKind::PickAlign, "pick@sample_holder")?;
+            let sh_above2_c = self.corrected(&w.sh_above, d_pick2, "sh_above_2nd+vision")?;
+            let sh_on2_c = self.corrected(&w.sh_on_pos, d_pick2, "sh_on_2nd+vision")?;
+            self.cartesian_via(
+                14,
+                "sample_holder_on_position_2nd",
+                d_pick2.is_some().then_some(&sh_above2_c),
+                &sh_on2_c,
+                start,
+            )?;
             self.hand(15, "close_gripper_2nd", false, start)?;
-            self.cartesian(16, "sample_holder_above_2nd_return", &w.sh_above, start)?;
+            self.cartesian(16, "sample_holder_above_2nd_return", &sh_above2_c, start)?;
+            let d_grip2 =
+                self.vision_correction(start <= 16, VisionKind::GripOffset, "grip@sample_holder")?;
             self.cartesian(17, "sample_holder_standby_2nd", &w.sh_standby, start)?;
             self.arm(18, "holder_standby_return", &w.standby, start)?;
             self.cartesian(19, "holder_above_final", &w.above, start)?;
-            self.cartesian(20, "holder_on_position_final", &w.on_pos, start)?;
+            let d_slot2 =
+                self.vision_correction(start <= 19, VisionKind::PlaceAlign, "place@rack")?;
+            let d_place2 = self.combine_corrections(d_slot2, d_grip2, "place@rack")?;
+            let above_f_c = self.corrected(&w.above, d_place2, "holder_above_final+vision")?;
+            let on_f_c = self.corrected(&w.on_pos, d_place2, "holder_on_final+vision")?;
+            self.cartesian_via(
+                20,
+                "holder_on_position_final",
+                d_place2.is_some().then_some(&above_f_c),
+                &on_f_c,
+                start,
+            )?;
             self.hand(21, "open_gripper_final", true, start)?;
-            self.cartesian(22, "holder_above_final_return", &w.above, start)?;
+            self.cartesian(22, "holder_above_final_return", &above_f_c, start)?;
+            self.vision_seating_check(start <= 22, "seating@rack")?;
             self.cartesian(23, "holder_standby_final", &w.standby, start)?;
         }
         Ok(skip_remaining)
@@ -258,6 +344,176 @@ impl<'a> Sequencer<'a> {
         let _ = self.wait_for_trigger(true);
     }
 
+    // ---- vision correction ---------------------------------------------
+
+    /// One correction measurement (the "look" of look-then-move).
+    /// Returns the TCP-local correction in mm to fold into the descent,
+    /// or `None` when vision/the hook is off, this run never reached the
+    /// measurement pose (`measure` false — a resume skipped the above
+    /// step, so a measurement would be taken from an unknown pose), the
+    /// correction is below the deadband, or observe_only.
+    ///
+    /// Outside observe_only a timeout, an invalid verdict, and an
+    /// over-limit correction are all errors: never guess, never
+    /// auto-apply a large jump. In observe_only every failure is logged
+    /// and swallowed — Phase C observation must not affect operation.
+    fn vision_correction(
+        &mut self,
+        measure: bool,
+        kind: VisionKind,
+        label: &str,
+    ) -> Result<Option<[f64; 3]>, SequencerError> {
+        let v = &self.config.vision;
+        let hook_on = match kind {
+            VisionKind::PickAlign => v.pick_align,
+            VisionKind::GripOffset => v.grip_offset,
+            VisionKind::PlaceAlign => v.place_align,
+            VisionKind::Seating => v.seating_check,
+        };
+        if !v.enabled || !hook_on || !measure {
+            return Ok(None);
+        }
+        self.vision_req_id += 1;
+        let answer =
+            self.epics
+                .vision_request(kind, self.vision_req_id, Duration::from_secs_f64(v.timeout));
+        if v.observe_only {
+            match answer {
+                Ok(r) => log::info(&format!(
+                    "{label}: vision observed dx={:.3} dy={:.3} dz={:.3} mm, valid={}, quality={:.2} (observe_only, not applied)",
+                    r.dx, r.dy, r.dz, r.valid as i32, r.quality
+                )),
+                Err(e) => log::warn(&format!("{label}: vision observation failed: {e}")),
+            }
+            return Ok(None);
+        }
+        let r = answer?;
+        if !r.valid {
+            return Err(SequencerError(format!(
+                "{label}: vision verdict UNKNOWN (quality {:.2})",
+                r.quality
+            )));
+        }
+        match gate_correction([r.dx, r.dy, r.dz], v.min_correction, v.max_correction) {
+            Gate::Below(mag) => {
+                log::info(&format!(
+                    "{label}: vision correction {mag:.3} mm below deadband, skipping"
+                ));
+                Ok(None)
+            }
+            Gate::Apply(d) => {
+                log::info(&format!(
+                    "{label}: vision correction dx={:.3} dy={:.3} dz={:.3} mm (quality {:.2})",
+                    d[0], d[1], d[2], r.quality
+                ));
+                Ok(Some(d))
+            }
+            Gate::TooLarge(mag) => Err(SequencerError(format!(
+                "{label}: vision correction {mag:.2} mm exceeds the {:.2} mm limit — not applied",
+                v.max_correction
+            ))),
+        }
+    }
+
+    /// Post-place seating verdict. Errors stop the sequence before the
+    /// arm leaves a badly seated puck behind; observe_only only logs.
+    fn vision_seating_check(&mut self, measure: bool, label: &str) -> Result<(), SequencerError> {
+        let v = &self.config.vision;
+        if !v.enabled || !v.seating_check || !measure {
+            return Ok(());
+        }
+        self.vision_req_id += 1;
+        let answer = self.epics.vision_request(
+            VisionKind::Seating,
+            self.vision_req_id,
+            Duration::from_secs_f64(v.timeout),
+        );
+        if v.observe_only {
+            match answer {
+                Ok(r) => log::info(&format!(
+                    "{label}: vision observed seated={}, tilt={:.2} deg, valid={} (observe_only)",
+                    r.seated as i32, r.tilt, r.valid as i32
+                )),
+                Err(e) => log::warn(&format!("{label}: vision observation failed: {e}")),
+            }
+            return Ok(());
+        }
+        let r = answer?;
+        if !r.valid {
+            return Err(SequencerError(format!(
+                "{label}: seating verdict UNKNOWN (quality {:.2})",
+                r.quality
+            )));
+        }
+        if !r.seated {
+            return Err(SequencerError(format!(
+                "{label}: puck NOT seated (tilt {:.2} deg, quality {:.2})",
+                r.tilt, r.quality
+            )));
+        }
+        log::info(&format!("{label}: seated (tilt {:.2} deg)", r.tilt));
+        Ok(())
+    }
+
+    /// Slot correction plus the stored grip offset. Each factor passed
+    /// its own gate when measured; the sum is re-gated because it can
+    /// still exceed the limit.
+    fn combine_corrections(
+        &self,
+        slot: Option<[f64; 3]>,
+        grip: Option<[f64; 3]>,
+        label: &str,
+    ) -> Result<Option<[f64; 3]>, SequencerError> {
+        let sum = match (slot, grip) {
+            (None, None) => return Ok(None),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (Some(a), Some(b)) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
+        };
+        let v = &self.config.vision;
+        match gate_correction(sum, v.min_correction, v.max_correction) {
+            Gate::Below(_) => Ok(None),
+            Gate::Apply(d) => {
+                if slot.is_some() && grip.is_some() {
+                    log::info(&format!(
+                        "{label}: applying slot+grip correction dx={:.3} dy={:.3} dz={:.3} mm",
+                        d[0], d[1], d[2]
+                    ));
+                }
+                Ok(Some(d))
+            }
+            Gate::TooLarge(mag) => Err(SequencerError(format!(
+                "{label}: combined vision correction {mag:.2} mm exceeds the {:.2} mm limit",
+                v.max_correction
+            ))),
+        }
+    }
+
+    /// `base` shifted by a vision correction (mm, TCP-local), with
+    /// `apply_cartesian_offset`'s fallback-to-original escape hatch
+    /// closed: a correction the arm cannot realize must stop the
+    /// sequence, not silently descend uncorrected.
+    fn corrected(
+        &self,
+        base: &JointMap,
+        d: Option<[f64; 3]>,
+        label: &str,
+    ) -> Result<JointMap, SequencerError> {
+        let Some(d) = d else {
+            return Ok(base.clone());
+        };
+        let offset = [d[0] / 1000.0, d[1] / 1000.0, d[2] / 1000.0];
+        let shifted = self
+            .model
+            .apply_cartesian_offset(base, offset, false, label)?;
+        if shifted == *base {
+            return Err(SequencerError(format!(
+                "{label}: IK cannot realize the vision correction"
+            )));
+        }
+        Ok(shifted)
+    }
+
     // ---- step executors ------------------------------------------------
 
     /// Shared prologue: resume-skip, then block while `Stop` is set.
@@ -307,8 +563,31 @@ impl<'a> Sequencer<'a> {
         goal: &JointMap,
         start: i32,
     ) -> Result<(), SequencerError> {
+        self.cartesian_via(step, name, None, goal, start)
+    }
+
+    /// A Cartesian step with an optional pre-alignment: an active vision
+    /// correction first aligns laterally at the corrected above pose so
+    /// the descent stays vertical, then descends — both inside the one
+    /// operator-visible step number (no renumbering, resume-compatible).
+    fn cartesian_via(
+        &mut self,
+        step: i32,
+        name: &str,
+        via: Option<&JointMap>,
+        goal: &JointMap,
+        start: i32,
+    ) -> Result<(), SequencerError> {
         if !self.step_prologue(step, name, start) {
             return Ok(());
+        }
+        if let Some(via) = via {
+            self.motion.move_cartesian(
+                via,
+                self.config.sequence.velocity_scale,
+                self.config.sequence.acceleration_scale,
+                name,
+            )?;
         }
         self.motion.move_cartesian(
             goal,
@@ -622,5 +901,44 @@ impl<'a> Sequencer<'a> {
             sh_above: base.sample_holder_above.clone(),
             sh_on_pos: base.sample_holder_on.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Boundary cases of the correction gate: `< min` is noise, `[min,
+    /// max]` applies, `> max` refuses. The measure is the 3-D norm, not
+    /// a per-axis check.
+    #[test]
+    fn gate_boundaries() {
+        let (min, max) = (0.05, 3.0);
+        assert!(matches!(
+            gate_correction([0.04, 0.0, 0.0], min, max),
+            Gate::Below(_)
+        ));
+        assert!(matches!(
+            gate_correction([0.05, 0.0, 0.0], min, max),
+            Gate::Apply(_)
+        ));
+        assert_eq!(
+            gate_correction([0.6, -0.8, 0.0], min, max),
+            Gate::Apply([0.6, -0.8, 0.0])
+        );
+        assert!(matches!(
+            gate_correction([3.0, 0.0, 0.0], min, max),
+            Gate::Apply(_)
+        ));
+        assert!(matches!(
+            gate_correction([3.01, 0.0, 0.0], min, max),
+            Gate::TooLarge(_)
+        ));
+        // Per-axis components under the limit whose norm exceeds it
+        // must still refuse: 1.9-2.4-1.0 has norm ~3.22.
+        assert!(matches!(
+            gate_correction([1.9, 2.4, 1.0], min, max),
+            Gate::TooLarge(_)
+        ));
     }
 }

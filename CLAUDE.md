@@ -126,11 +126,33 @@ ws/
 | Robot:Loaded | bi | 샘플 로드 상태 (0=Not Loaded, 1=Loaded) |
 | Robot:JogX/Y/Z | longout | TCP jog 방향 (-1/0/+1, 캘리브레이션 hold 중) |
 | Robot:JogStep | ao | jog 스텝 크기 (mm) |
+| Robot:Vision:Req | longout | 비전 측정 요청 id (시퀀서가 씀) |
+| Robot:Vision:Kind | mbbo | 요청 종류 (0=None, 1=Pick Align, 2=Grip Offset, 3=Place Align, 4=Seating) |
+| Robot:Vision:Done | longin | 응답 완료 id 에코 (비전 노드가 씀) |
+| Robot:Vision:Valid | bi | 측정 유효 (0=Invalid, 1=Valid) |
+| Robot:Vision:DX/DY/DZ | ao | 적용할 TCP-로컬 보정 (mm, 비전 노드가 씀) |
+| Robot:Vision:Quality | ao | 검출 품질 0-1 |
+| Robot:Vision:Seated | bi | 안착 판정 (0=Not Seated, 1=Seated) |
+| Robot:Vision:Tilt | ao | 퍽 상면 기울기 (deg) |
 
 ### Robot:Loaded PV
 
 측정 프로그램 연동용. Step 12 완료 후 measurement wait 시작 시 `Loaded=1`,
 wait 종료(1=continue, 2=skip) 시 `Loaded=0`.
+
+### Vision 미세 보정 (기본 off)
+
+`sequencer.yaml`의 `vision.enabled: true`면 Normal 모드의 4개 하강
+(스텝 3/9/14/20) 직전에 look-then-move 보정이 걸립니다: 시퀀서가
+Req(id)/Kind로 측정을 요청하고, 비전 노드가 DX/DY/DZ(mm, TCP-로컬)를
+쓰고 Done에 id를 에코. deadband(`min_correction`) 미만은 무시,
+`max_correction` 초과·Valid=0·타임아웃은 시퀀스 정지(StartStep 재개는
+기존과 동일). 스텝 5/16 후 파지 편차(Grip Offset)를 측정해 다음 놓기
+보정에 합산하고, 스텝 11/22 후 안착 검사(Seated/Tilt) — 불합격이면 정지.
+`observe_only: true`는 Phase C 관찰 모드(측정·로그만, 이동/정지 없음).
+캘리브레이션 모드에는 훅이 없습니다(티칭 오차를 가리므로). 카메라 없는
+리허설은 `vision_sim` 바이너리가 비전 노드를 대신합니다
+(`vision_sim --dx 0.8 --grip-dx 0.3` 등, src/bin/vision_sim.rs).
 
 ## 그리퍼 통신
 
