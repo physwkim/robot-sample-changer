@@ -1,0 +1,68 @@
+# robot-sequencer configuration for the URSim rehearsal (no hardware).
+#
+# Differences from sequencer.yaml: URSim's IP and ur5e model, simulated
+# gripper (URSim has no RS485 tool device behind 54321), and no stage
+# collision scene (the stage mesh models the beamline cell around the
+# ur3e, not URSim's empty cell — with the longer ur5e it would produce
+# spurious collisions at the taught joint targets).
+
+robot:
+  ip: "192.168.56.101"
+  urdf: "../model/urdf/ur_with_hande_ur5e.urdf"
+  srdf: "../model/srdf/ur.srdf"
+  mesh_packages:
+    ur_description: "../model/meshes/ur_description"
+    robotiq_hande_description: "../model/meshes/robotiq_hande_description"
+  group: "ur_manipulator"
+  ik_frame: "robotiq_hande_end"
+  script_file: "../resources/urscript/external_control.urscript"
+  output_recipe: "../resources/urscript/rtde_output_recipe.txt"
+  input_recipe: "../resources/urscript/rtde_input_recipe.txt"
+
+joint_limits:
+  max_velocity: 3.14159
+  max_acceleration: 1.0
+  position_overrides:
+    shoulder_lift_joint: [-3.14159, 3.14159]
+    elbow_joint: [-3.14159, 3.14159]
+    wrist_2_joint: [-3.14159, 3.14159]
+
+epics:
+  trigger_pv: "Robot:Trigger"
+  start_step_pv: "Robot:StartStep"
+  wait_pv: "Robot:Wait"
+  holder_pv: "Robot:Holder"
+  stop_pv: "Robot:Stop"
+  current_step_pv: "Robot:CurrentStep"
+  gripper_pv: "Robot:Gripper"
+  gripper_rbv_pv: "Robot:Gripper_RBV"
+  pause_step_pv: "Robot:PauseStep"
+  calib_mode_pv: "Robot:CalibMode"
+  loaded_pv: "Robot:Loaded"
+  jog_x_pv: "Robot:JogX"
+  jog_y_pv: "Robot:JogY"
+  jog_z_pv: "Robot:JogZ"
+  jog_step_pv: "Robot:JogStep"
+
+sequence:
+  waypoints_yaml: "taught_waypoints.yaml"
+  holder_offset: 0.03
+  velocity_scale: 1.0
+  acceleration_scale: 1.0
+  cartesian_translation_step: 0.005
+  cartesian_rotation_step: 0.05
+  cartesian_min_fraction: 0.95
+  jog_velocity_scale: 0.1
+
+gripper:
+  mode: "simulated"
+  open_position: 0.025
+  close_position: 0.0
+  close_settle_target: 0.01
+  reach_tolerance: 0.0015
+  settle_timeout: 5.0
+  open_threshold: 0.02
+
+scene:
+  objects: []
+  allow_collisions_with: []
