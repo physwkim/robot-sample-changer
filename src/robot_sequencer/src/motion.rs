@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
-use cspace_collision::ParryCollisionEnv;
+use cspace_collision::{LinkPaddingScale, ParryCollisionEnv, World};
 use cspace_core::geometry::{Isometry3, Shape, Vector3, mesh_from_bytes};
 use cspace_core::kinematics::{CartesianInterpolator, IkContext, MaxEefStep};
 use cspace_core::trajectory::RobotTrajectory;
@@ -368,22 +368,13 @@ impl<'m> Motion<'m> {
             return Ok(());
         }
 
-        let mut scene = PlanningScene::new(&self.model.robot, &self.model.srdf);
+        let (mut scene, env) =
+            scene_with_assets(self.model, &self.scene_assets, &self.allow_collisions_with);
         scene
             .current_state_mut()
             .set_joint_group_positions(&self.model.group, &start)
             .map_err(|e| SequencerError(format!("{label}: cannot set start state: {e}")))?;
         scene.current_state_mut().update();
-        for asset in &self.scene_assets {
-            scene.add_shape(&asset.id, Arc::clone(&asset.shape), asset.pose);
-        }
-        let acm = scene.allowed_collision_matrix_mut();
-        for asset in &self.scene_assets {
-            for name in &self.allow_collisions_with {
-                acm.set_entry(&asset.id, name, true);
-            }
-        }
-        let env = ParryCollisionEnv::default();
 
         let mut goal_state = self.model.state_with_joints(goal)?;
         let goal_constraints = construct_goal_joint_constraints(
@@ -784,4 +775,185 @@ fn load_scene_assets(config: &Config) -> Result<Vec<SceneAsset>, SequencerError>
         });
     }
     Ok(assets)
+}
+
+/// Planning scene (SRDF ACM + configured allowances) and the collision
+/// backend that carries the scene objects. The WORLD lives in the env —
+/// `ParryCollisionEnv` is built over a `World`, and shapes added to the
+/// `PlanningScene` alone are never collision-checked (its world is not
+/// the backend's). The ACM entries still key on the object ids. The
+/// caller sets the robot state on the scene.
+fn scene_with_assets<'m>(
+    model: &'m Model,
+    assets: &[SceneAsset],
+    allow_collisions_with: &[String],
+) -> (PlanningScene<'m>, ParryCollisionEnv) {
+    let mut scene = PlanningScene::new(&model.robot, &model.srdf);
+    let acm = scene.allowed_collision_matrix_mut();
+    let mut world = World::new();
+    for asset in assets {
+        world.add_shape(&asset.id, Arc::clone(&asset.shape), asset.pose);
+        for name in allow_collisions_with {
+            acm.set_entry(&asset.id, name, true);
+        }
+    }
+    let env = ParryCollisionEnv::new(world, LinkPaddingScale::default());
+    (scene, env)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use cspace_collision::CollisionRequest;
+    use cspace_core::state::RobotState;
+
+    use super::*;
+    use crate::waypoints::WaypointData;
+
+    /// Test probe: index of the first state that collides (self or scene
+    /// world, ACM applied), or `None` when the whole path is clear.
+    fn first_collision_index(
+        model: &Model,
+        assets: &[SceneAsset],
+        allow_collisions_with: &[String],
+        states: &[RobotState<'_>],
+    ) -> Result<Option<usize>, SequencerError> {
+        let (mut scene, env) = scene_with_assets(model, assets, allow_collisions_with);
+        let request = CollisionRequest::default();
+        for (i, state) in states.iter().enumerate() {
+            let q = state
+                .joint_group_positions(&model.group)
+                .map_err(|e| SequencerError(format!("probe: state positions: {e}")))?;
+            scene
+                .current_state_mut()
+                .set_joint_group_positions(&model.group, &q)
+                .map_err(|e| SequencerError(format!("probe: scene state: {e}")))?;
+            scene.current_state_mut().update();
+            if scene.check_collision(&env, &request).collision {
+                return Ok(Some(i));
+            }
+        }
+        Ok(None)
+    }
+
+    fn production_model_and_state() -> (Model, JointMap) {
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/sequencer.yaml"
+        ));
+        let config = Config::load(path).expect("load config");
+        let model = Model::load(&config).expect("load model");
+        let waypoints = WaypointData::load(&config.sequence.waypoints_yaml).expect("waypoints");
+        let joints: JointMap = WaypointData::arm_joints(&waypoints.holder1_standby)
+            .into_iter()
+            .collect();
+        (model, joints)
+    }
+
+    /// Closed axis-aligned cube (12 triangles) as binary STL bytes,
+    /// centered at the origin with half-extent `half` meters. Normals are
+    /// irrelevant to the collision mesh, so they are left zeroed.
+    fn cube_stl(half: f32) -> Vec<u8> {
+        let h = half;
+        let v = [
+            [-h, -h, -h],
+            [h, -h, -h],
+            [h, h, -h],
+            [-h, h, -h],
+            [-h, -h, h],
+            [h, -h, h],
+            [h, h, h],
+            [-h, h, h],
+        ];
+        // Two triangles per face, vertex indices into `v`.
+        let faces: [[usize; 3]; 12] = [
+            [0, 1, 2],
+            [0, 2, 3],
+            [4, 6, 5],
+            [4, 7, 6],
+            [0, 4, 5],
+            [0, 5, 1],
+            [3, 2, 6],
+            [3, 6, 7],
+            [0, 3, 7],
+            [0, 7, 4],
+            [1, 5, 6],
+            [1, 6, 2],
+        ];
+        let mut bytes = vec![0u8; 80];
+        bytes.extend_from_slice(&(faces.len() as u32).to_le_bytes());
+        for face in faces {
+            bytes.extend_from_slice(&[0u8; 12]); // normal
+            for idx in face {
+                for coord in v[idx] {
+                    bytes.extend_from_slice(&coord.to_le_bytes());
+                }
+            }
+            bytes.extend_from_slice(&[0u8; 2]); // attribute byte count
+        }
+        bytes
+    }
+
+    fn cube_asset(id: &str, center: Isometry3) -> SceneAsset {
+        let mesh = mesh_from_bytes(&cube_stl(0.05), Vector3::new(1.0, 1.0, 1.0)).expect("cube");
+        SceneAsset {
+            id: id.into(),
+            shape: Arc::new(Shape::Mesh(mesh)),
+            pose: center,
+        }
+    }
+
+    /// The collision plumbing `move_planned` builds its scene with must
+    /// SEE a scene mesh: a cube centered on the TCP collides, the same
+    /// cube 3 m away does not (which also proves the taught state itself
+    /// is collision-free, so the hit is the mesh, not the robot).
+    #[test]
+    fn scene_mesh_collision_is_detected_at_the_tcp() {
+        let (model, joints) = production_model_and_state();
+        let mut state = model.state_with_joints(&joints).expect("state");
+        let tcp = state
+            .update()
+            .global_link_transform(&model.ik_frame)
+            .expect("fk");
+
+        let at_tcp = cube_asset("box", Isometry3::from_parts(tcp.translation, tcp.rotation));
+        let states = [model.state_with_joints(&joints).expect("state")];
+        assert_eq!(
+            first_collision_index(&model, &[at_tcp], &[], &states).expect("check"),
+            Some(0),
+            "cube at the TCP must collide"
+        );
+
+        let far = cube_asset(
+            "box",
+            Isometry3::from_parts(Translation3::new(3.0, 3.0, 3.0), tcp.rotation),
+        );
+        assert_eq!(
+            first_collision_index(&model, &[far], &[], &states).expect("check"),
+            None,
+            "cube 3 m away must not collide"
+        );
+    }
+
+    /// The ACM allowances from the config must suppress a hit: the same
+    /// TCP cube with every arm link allowed reports clear.
+    #[test]
+    fn acm_allowance_suppresses_the_scene_hit() {
+        let (model, joints) = production_model_and_state();
+        let mut state = model.state_with_joints(&joints).expect("state");
+        let tcp = state
+            .update()
+            .global_link_transform(&model.ik_frame)
+            .expect("fk");
+        let at_tcp = cube_asset("box", Isometry3::from_parts(tcp.translation, tcp.rotation));
+
+        let all_links: Vec<String> = model.robot.link_names().to_vec();
+        let states = [model.state_with_joints(&joints).expect("state")];
+        assert_eq!(
+            first_collision_index(&model, &[at_tcp], &all_links, &states).expect("check"),
+            None,
+            "allowing every link must suppress the cube hit"
+        );
+    }
 }
