@@ -1,0 +1,30 @@
+[package]
+name = "robot-sequencer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+# Standalone workspace (not part of any parent). Path deps follow the
+# sibling-checkout convention: ../../../ resolves to the directory that
+# holds this repo, so the dep repos must be checked out next to it —
+# ~/work/{ur-rs,cspace,epics-rs} on the dev machine, /home/bl9b/{...}
+# on the robot host (whose checkout lives at ~/ws).
+[workspace]
+
+[dependencies]
+ur-driver = { path = "../../../ur-rs/crates/ur-driver" }
+robotiq-hande = { path = "../../../ur-rs/crates/robotiq-hande" }
+cspace-core = { path = "../../../cspace/crates/cspace-core" }
+cspace-collision = { path = "../../../cspace/crates/cspace-collision" }
+cspace-planning = { path = "../../../cspace/crates/cspace-planning" }
+cspace-planners = { path = "../../../cspace/crates/cspace-planners" }
+epics-ca-rs = { path = "../../../epics-rs/crates/epics-ca-rs" }
+
+urdf-rs = "0.9"
+nalgebra = "0.35"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
