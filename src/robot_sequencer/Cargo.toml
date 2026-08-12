@@ -8,13 +8,13 @@ publish = false
 # Standalone workspace (not part of any parent). Path deps follow the
 # sibling-checkout convention: ../../../ resolves to the directory that
 # holds this repo, so the dep repos must be checked out next to it —
-# ~/work/{ur-rs,cspace,epics-rs} on the dev machine, /home/bl9b/{...}
+# ~/work/{ur-driver,cspace,epics-rs} on the dev machine, /home/bl9b/{...}
 # on the robot host (whose checkout lives at ~/ws).
 [workspace]
 
 [dependencies]
-ur-driver = { path = "../../../ur-rs/crates/ur-driver" }
-robotiq-hande = { path = "../../../ur-rs/crates/robotiq-hande" }
+ur-driver = { path = "../../../ur-driver/crates/ur-driver" }
+robotiq-hande = { path = "../../../ur-driver/crates/robotiq-hande" }
 cspace-core = { path = "../../../cspace/crates/cspace-core" }
 cspace-collision = { path = "../../../cspace/crates/cspace-collision" }
 cspace-planning = { path = "../../../cspace/crates/cspace-planning" }

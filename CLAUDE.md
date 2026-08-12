@@ -13,7 +13,7 @@ MoveIt + C++ 노드)은 `ros-free` 브랜치에서 제거됐습니다.
 
 | 크레이트 | 경로 (bl9b) | 경로 (개발머신) |
 |----------|-------------|----------------|
-| ur-driver, robotiq-hande | `/home/bl9b/ur-rs` | `~/work/ur-rs` |
+| ur-driver, robotiq-hande | `/home/bl9b/ur-driver` | `~/work/ur-driver` |
 | cspace-{core,collision,planning,planners} | `/home/bl9b/cspace` | `~/work/cspace` |
 | epics-ca-rs | `/home/bl9b/epics-rs` | `~/work/epics-rs` |
 

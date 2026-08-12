@@ -20,7 +20,7 @@ ROS2/MoveIt/colcon은 더 이상 필요 없습니다.
 --------------------------------------------------------------------------------
 - Ubuntu 22.04
 - Rust toolchain (cargo)
-- sibling 체크아웃: ~/ur-rs, ~/cspace, ~/epics-rs (robot_sequencer 빌드용)
+- sibling 체크아웃: ~/ur-driver, ~/cspace, ~/epics-rs (robot_sequencer 빌드용)
 - UR 로봇 IP: 192.168.192.10
 - 로봇은 Remote Control 모드 (펜던트 프로그램 실행 불필요 — 데몬이
   headless로 external control 프로그램을 전송)
