@@ -314,8 +314,11 @@ robot_ioc(systemd): sudo systemctl stop robot-ioc
 문제: PV가 보이지 않음 (caget 실패)
 해결:
   1. robot_ioc 실행 확인 (telnet localhost 20001)
-  2. 멀티홈 환경이면: export EPICS_CA_AUTO_ADDR_LIST=NO
-     EPICS_CA_ADDR_LIST=127.0.0.1
+  2. 이 호스트에는 5064를 공유하는 CA 서버가 여럿 있습니다(d435i-ioc 등).
+     ss -ulnp | grep 5064 로 확인. 로컬 고정이 필요하면
+     export EPICS_CA_NAME_SERVERS=127.0.0.1:5064 를 쓰고,
+     EPICS_CA_ADDR_LIST=127.0.0.1 은 쓰지 마세요 — search가
+     유니캐스트가 되어 엉뚱한 IOC로만 배달됩니다(CLAUDE.md 참고).
 
 문제: "no answer to request N ... within X s" 에러로 정지 (vision 켠 경우)
 해결:

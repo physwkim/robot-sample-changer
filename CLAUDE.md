@@ -77,8 +77,17 @@ python -m pip install silx PyQt6 pyepics numpy pyyaml
 RTDE receive만 로드, `Robot:UR:` prefix (조인트/TCP/안전 상태).
 control/io/jog/gripper 포트는 시퀀서와 배타적이라 제외. procServ 20002.
 
-멀티홈 환경에서 CA 경고가 거슬리면:
-`export EPICS_CA_AUTO_ADDR_LIST=NO EPICS_CA_ADDR_LIST=127.0.0.1`
+멀티홈 환경에서 CA 경고("Identical process variable names on multiple
+servers" — 같은 IOC가 두 인터페이스로 답해서 뜨는 무해한 경고)가 거슬리면:
+`export EPICS_CA_NAME_SERVERS=127.0.0.1:5064`
+
+**`EPICS_CA_ADDR_LIST=127.0.0.1`(+`AUTO_ADDR_LIST=NO`)는 쓰지 마세요.**
+search가 유니캐스트로 바뀌는데, 이 호스트에는 5064를 공유하는 CA 서버가
+robot_ioc 말고도 있습니다(d435i-ioc 등). 브로드캐스트 search는 커널이
+바인딩된 모든 소켓에 사본을 주지만, 유니캐스트는 그중 하나에만 배달되므로
+엉뚱한 IOC가 받으면 `Robot:*`를 못 찾고 5초 뒤 "PV is not connected"로
+데몬이 죽습니다. `NAME_SERVERS`는 TCP로 특정 서버에 직접 질의해서 로컬
+고정과 정상 동작을 둘 다 얻습니다.
 
 ## 충돌/크래시 후 재개 (resume-after-crash)
 
