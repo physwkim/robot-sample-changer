@@ -22,6 +22,10 @@ use cspace_core::state::RobotState;
 use cspace_core::trajectory::RobotTrajectory;
 use cspace_core::trajectory::trajectory_tools::apply_totg_time_parameterization;
 use cspace_planning::constraints::utils::construct_goal_joint_constraints;
+use cspace_planning::constraints::{
+    Constraint, KinematicConstraintSet, OrientationConstraint, OrientationTolerance,
+};
+use cspace_core::geometry::Transforms;
 use cspace_planning::planner_registry::resolve_planner;
 use cspace_planning::scene::PlanningScene;
 use cspace_planning::{PlannerConfigurationMap, PlanningRequest, generate_plan};
@@ -71,6 +75,11 @@ const ALREADY_THERE_TOLERANCE: f64 = 1e-3;
 /// declares the execution hung.
 const EXECUTE_TIMEOUT_MARGIN: Duration = Duration::from_secs(10);
 
+/// Packages [`Motion::fresh_q`] discards before taking its sample, so
+/// the joint values are current rather than whatever was in flight when
+/// the stream was last paused.
+const DRAIN_PACKAGES: usize = 3;
+
 struct SceneAsset {
     id: String,
     shape: Arc<Shape>,
@@ -96,6 +105,9 @@ pub struct Motion<'m> {
     last_result: Arc<AtomicI32>,
     scene_assets: Vec<SceneAsset>,
     allow_collisions_with: Vec<String>,
+    /// `None` when the constraint is disabled, so the request keeps the
+    /// unconstrained `path_constraints: None` it had before.
+    level_tool: Option<LevelToolConstraint>,
     translation_step: f64,
     rotation_step: f64,
     min_fraction: f64,
@@ -186,7 +198,7 @@ impl<'m> Motion<'m> {
             30004,
             read_recipe(&config.robot.output_recipe)?,
             read_recipe(&config.robot.input_recipe)?,
-            500.0,
+            config.robot.rtde_frequency_hz,
         )
         .map_err(|e| SequencerError(format!("RTDE connect: {e}")))?;
         rtde.init()
@@ -273,6 +285,12 @@ impl<'m> Motion<'m> {
             last_result,
             scene_assets,
             allow_collisions_with: config.scene.allow_collisions_with.clone(),
+            level_tool: config.sequence.level_tool.enabled.then(|| {
+                LevelToolConstraint::new(
+                    &config.robot.ik_frame,
+                    config.sequence.level_tool.tolerance_deg,
+                )
+            }),
             translation_step: config.sequence.cartesian_translation_step,
             rotation_step: config.sequence.cartesian_rotation_step,
             min_fraction: config.sequence.cartesian_min_fraction,
@@ -370,12 +388,25 @@ impl<'m> Motion<'m> {
     /// Current joint positions, drained so the sample reflects the present
     /// rather than the backlog accumulated while this daemon was planning
     /// or idling.
+    ///
+    /// Leaves the stream paused. Every caller plans next, and planning
+    /// reads nothing: measured on the robot, 500 Hz of unread packages
+    /// fills the 131 KB socket buffer in half a second and URControl
+    /// drops the connection, so a plan that takes any real time killed
+    /// the daemon at the following `execute`. `execute` starts the
+    /// stream again itself.
     fn fresh_q(&mut self) -> Result<Vector6D, SequencerError> {
         self.ensure_streaming()?;
-        for _ in 0..100 {
+        // Was 100, from when the stream ran through planning and idling
+        // and the backlog to skip was hundreds of packages deep. It is
+        // paused across both now, so this only has to clear what was
+        // still in flight when `pause` took effect — and at 50 Hz a
+        // 100-deep drain would cost two seconds per motion step.
+        for _ in 0..DRAIN_PACKAGES {
             self.read_package()?;
         }
         let pkg = self.read_package()?;
+        self.pause_streaming();
         match pkg.get("actual_q") {
             Some(RtdeValue::V6D(q)) => Ok(*q),
             other => Err(SequencerError(format!(
@@ -418,17 +449,30 @@ impl<'m> Motion<'m> {
         )
         .map_err(|e| SequencerError(format!("{label}: goal constraints: {e}")))?;
 
+        let path_constraints = self
+            .level_tool
+            .as_ref()
+            .map(|c| c.build(self.model, scene.transforms()))
+            .transpose()
+            .map_err(|e| SequencerError(format!("{label}: level-tool constraint: {e}")))?;
+
         let request = PlanningRequest {
             group_name: self.model.group.clone(),
             goal_constraints: vec![goal_constraints],
+            path_constraints,
             max_velocity_scaling_factor: velocity_scale,
             max_acceleration_scaling_factor: acceleration_scale,
             ..PlanningRequest::default()
         };
         let planner = resolve_planner("rrt_connect", &PlannerConfigurationMap::new())
             .map_err(|e| SequencerError(format!("rrt_connect not registered: {e}")))?;
+        // Timed separately from execution: the step duration in the log
+        // is plan + motion, which is not enough to tell a slow planner
+        // from a slow move.
+        let planning_started = Instant::now();
         let response = generate_plan(&mut scene, &env, &[], &[planner], &[], request)
             .map_err(|e| SequencerError(format!("{label}: planning failed: {e}")))?;
+        let planned_in = planning_started.elapsed();
         let mut trajectory = response.trajectory;
         apply_totg_time_parameterization(
             &mut trajectory,
@@ -439,6 +483,11 @@ impl<'m> Motion<'m> {
             0.001,
         )
         .map_err(|e| SequencerError(format!("{label}: TOTG failed: {e}")))?;
+        log::info(&format!(
+            "  Planned in {:.2} s, TOTG {:.2} s",
+            planned_in.as_secs_f64(),
+            (planning_started.elapsed() - planned_in).as_secs_f64(),
+        ));
 
         self.execute(&trajectory, label)
     }
@@ -804,6 +853,76 @@ fn clear_protective_stop(dashboard: &mut DashboardClient) -> Result<(), Sequence
     Ok(())
 }
 
+/// The level-tool path constraint, resolved once at connect.
+///
+/// The reference is [`LEVEL_TOOL_REFERENCE`]: a -90-degree rotation
+/// about world X, which is level in the `ik_frame`'s own convention —
+/// that frame's Y axis points straight down, and its Z axis (the
+/// approach direction) lies in the horizontal plane. So "the tool stays
+/// level" is "the deviation from this reference is a rotation about Y",
+/// which is what leaving the Y tolerance wide and pinching X and Z says.
+///
+/// Take the sign seriously. The UR's `actual_TCP_pose` reports the same
+/// physical poses with the vertical axis inverted relative to the URDF
+/// link, and a reference derived from RTDE instead of the model is 180
+/// degrees off about X — which reads as a violation at every taught
+/// pose and fails planning with "no goal state satisfying the goal
+/// constraints". `taught_poses_are_level` pins the model's convention.
+///
+/// `RotationVector` over `XyzEuler` because the deviation here runs to
+/// +-90 degrees about one axis, which is exactly where the Euler
+/// decomposition's pitch singularity sits.
+pub struct LevelToolConstraint {
+    link_name: String,
+    tolerance_rad: f64,
+}
+
+/// The level `ik_frame` orientation: see [`LevelToolConstraint`].
+fn level_tool_reference() -> UnitQuaternion<f64> {
+    UnitQuaternion::from_axis_angle(
+        &nalgebra::Vector3::x_axis(),
+        -std::f64::consts::FRAC_PI_2,
+    )
+}
+
+impl LevelToolConstraint {
+    fn new(link_name: &str, tolerance_deg: f64) -> Self {
+        Self {
+            link_name: link_name.to_string(),
+            tolerance_rad: tolerance_deg.to_radians(),
+        }
+    }
+
+    fn build(
+        &self,
+        model: &Model,
+        tf: &Transforms,
+    ) -> Result<KinematicConstraintSet, cspace_core::error::Error> {
+        let constraint = OrientationConstraint::new(
+            &model.robot,
+            tf,
+            &self.link_name,
+            model.robot.model_frame(),
+            level_tool_reference(),
+            OrientationTolerance::RotationVector {
+                x: self.tolerance_rad,
+                y: self.tolerance_rad,
+                // Free: the world vertical. `decide()` maps the deviation
+                // back through `desired_r_in_frame_id` before comparing
+                // (orientation.rs, the RotationVector arm), so these
+                // tolerances are on world axes, not on the reference
+                // frame's. Tilt is therefore x and y, and the 91-degree
+                // holder-to-stage turn lands entirely on z.
+                z: std::f64::consts::PI,
+            },
+            1.0,
+        )?;
+        let mut set = KinematicConstraintSet::new();
+        set.push(Constraint::Orientation(constraint));
+        Ok(set)
+    }
+}
+
 fn load_scene_assets(config: &Config) -> Result<Vec<SceneAsset>, SequencerError> {
     let mut assets = Vec::new();
     for object in &config.scene.objects {
@@ -898,6 +1017,52 @@ mod tests {
             .into_iter()
             .collect();
         (model, joints)
+    }
+
+    /// Every taught pose the joint-space steps plan to must satisfy the
+    /// level-tool constraint, or the goal is unreachable under it and
+    /// planning fails outright with "no goal state satisfying the goal
+    /// constraints" — which is exactly what a reference taken from the
+    /// UR's `actual_TCP_pose` produces, that frame being inverted about
+    /// X relative to the `ik_frame`. This also catches teaching drift:
+    /// re-teaching a pose off level silently disables the steps that
+    /// plan to it.
+    #[test]
+    fn taught_poses_are_level() {
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/sequencer.yaml"
+        ));
+        let config = Config::load(path).expect("load config");
+        let model = Model::load(&config).expect("load model");
+        let waypoints = WaypointData::load(&config.sequence.waypoints_yaml).expect("waypoints");
+        let tolerance = config.sequence.level_tool.tolerance_deg.to_radians();
+
+        for (label, taught) in [
+            ("holder1_standby", &waypoints.holder1_standby),
+            ("sample_holder_standby", &waypoints.sample_holder_standby),
+        ] {
+            let joints: JointMap = WaypointData::arm_joints(taught).into_iter().collect();
+            let pose = model.fk(&joints).expect("fk");
+            // Mirrors OrientationConstraint::decide's RotationVector arm:
+            // the deviation's rotation vector mapped back through the
+            // reference, which puts the per-axis tolerances on world
+            // axes. Comparing the deviation in the reference frame
+            // instead — the natural-looking reading — points at the
+            // wrong free axis and passes while planning fails.
+            let reference = level_tool_reference();
+            let deviation = (reference.inverse() * pose.rotation).scaled_axis();
+            let world = reference.to_rotation_matrix() * deviation;
+            assert!(
+                world.x.abs() <= tolerance && world.y.abs() <= tolerance,
+                "{label} is not level: tilt [{:.2}, {:.2}] deg about world x/y, tolerance \
+                 {:.2} deg (z, the vertical, is free at {:.2} deg)",
+                world.x.to_degrees(),
+                world.y.to_degrees(),
+                tolerance.to_degrees(),
+                world.z.to_degrees(),
+            );
+        }
     }
 
     /// Closed axis-aligned cube (12 triangles) as binary STL bytes,

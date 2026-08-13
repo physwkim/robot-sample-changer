@@ -37,6 +37,24 @@ pub struct RobotConfig {
     pub script_file: PathBuf,
     pub output_recipe: PathBuf,
     pub input_recipe: PathBuf,
+    /// RTDE output stream rate.
+    ///
+    /// Nothing here needs the controller's 500 Hz: trajectories go out
+    /// over the trajectory interface, and RTDE is read only for a joint
+    /// sample before planning and for the execution wait loop. What the
+    /// rate does set is how fast unread packages fill the 131 KB socket
+    /// buffer — at 500 Hz that is half a second, and URControl drops a
+    /// client that lets it fill.
+    ///
+    /// Independent of the servoj control period, which
+    /// `Motion::connect` takes from `max_frequency()` — the
+    /// controller's own rate, not this request.
+    #[serde(default = "default_rtde_frequency_hz")]
+    pub rtde_frequency_hz: f64,
+}
+
+fn default_rtde_frequency_hz() -> f64 {
+    50.0
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,6 +86,32 @@ pub struct EpicsConfig {
     pub jog_step_pv: String,
 }
 
+/// The level-tool path constraint (see [`SequenceConfig::level_tool`]).
+///
+/// The constraint is "the tool's approach axis stays in the horizontal
+/// plane", not "the tool keeps one fixed orientation": the taught poses
+/// approach the holder along -Y and the stage along +X, 92 degrees
+/// apart, so a fixed orientation would make the stage unreachable.
+/// Rotation within the horizontal plane is therefore left free.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LevelToolConfig {
+    pub enabled: bool,
+    /// How far the approach axis may leave horizontal, in degrees. The
+    /// taught poses are themselves 1.64 and 0.84 degrees off level, so
+    /// anything below ~2 makes them unreachable.
+    pub tolerance_deg: f64,
+}
+
+impl Default for LevelToolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            tolerance_deg: 3.0,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SequenceConfig {
@@ -78,6 +122,15 @@ pub struct SequenceConfig {
     pub cartesian_translation_step: f64,
     pub cartesian_rotation_step: f64,
     pub cartesian_min_fraction: f64,
+    /// Keep the gripper level through joint-space plans.
+    ///
+    /// Joint-space planning only constrains the goal, so RRT-Connect is
+    /// free to roll the tool over on the way there — measured on the
+    /// real robot, the 63-degree move between the holder and the stage
+    /// swung the gripper to vertical mid-path. Cartesian steps already
+    /// interpolate the pose and are unaffected.
+    #[serde(default)]
+    pub level_tool: LevelToolConfig,
     pub jog_velocity_scale: f64,
 }
 

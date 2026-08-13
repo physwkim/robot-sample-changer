@@ -18,6 +18,12 @@ robot:
   script_file: "../resources/urscript/external_control.urscript"
   output_recipe: "../resources/urscript/rtde_output_recipe.txt"
   input_recipe: "../resources/urscript/rtde_input_recipe.txt"
+  rtde_frequency_hz: 50.0        # state reads only; trajectories go out
+                                 # over the trajectory interface. Lower is
+                                 # safer: unread packages fill the 131 KB
+                                 # socket buffer in 0.5 s at 500 Hz and
+                                 # URControl drops the client. Does not
+                                 # change the servoj period.
 
 joint_limits:
   max_velocity: 3.14159

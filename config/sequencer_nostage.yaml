@@ -103,14 +103,18 @@ gripper:
 
 # Static collision scene, replacing stage_scene_utils + setup_stage_acm.
 scene:
-  objects:
-    - id: "stage"
-      stl: "../resources/stage.stl"
-      scale: [0.01, 0.01, 0.01]
-      position: [-0.15, 0.39, -0.002]
-      rpy: [0.0, 0.0, 3.14159]
-  # setup_stage_acm.py allowances: collisions between these links and
-  # every scene object are ignored.
+  # STAGE MESH DELIBERATELY OMITTED — bring-up only, NOT for production.
+  #
+  # config/sequencer.yaml carries resources/stage.stl (231,812 triangles,
+  # 12 MB): ~90 s of parsing and BVH build at every start. Empty here so
+  # bring-up is seconds while the RTDE bring-up path is being debugged.
+  #
+  # The cost is real: with no stage in the collision environment, cspace
+  # will happily plan a path straight through it. The taught waypoints
+  # are unchanged and were reachable before, so the risk is the path
+  # BETWEEN them, not the endpoints. Watch the robot, keep the e-stop in
+  # reach, and switch back to sequencer.yaml for any unattended run.
+  objects: []
   allow_collisions_with:
     - "base_link"
     - "base_link_inertia"
