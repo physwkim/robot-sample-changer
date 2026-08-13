@@ -1,0 +1,11 @@
+[package]
+name = "stage-collision"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone: this is an asset build step, not part of the daemon.
+[workspace]
+
+[dependencies]
+parry3d-f64 = "0.30"

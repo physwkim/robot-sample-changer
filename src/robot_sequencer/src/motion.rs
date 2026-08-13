@@ -1065,6 +1065,81 @@ mod tests {
         }
     }
 
+
+    /// The committed stage parts must never be more permissive than the
+    /// CAD mesh they approximate. `compute_exact_convex_hulls` takes the
+    /// hull of each partition of the original geometry and a hull
+    /// contains its set, so the union of parts contains the mesh and
+    /// this holds by construction — but the parts are a committed
+    /// artifact, and regenerating them with looser settings, or against
+    /// a re-exported mesh, would not announce itself. Missing a
+    /// collision is the failure that ends with the arm inside the stage.
+    #[test]
+    #[ignore = "loads the 231k-triangle CAD mesh; ~4 minutes"]
+    fn stage_parts_are_never_more_permissive_than_the_cad_mesh() {
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/sequencer.yaml"
+        ));
+        let mut config = Config::load(path).expect("config");
+        let model = Model::load(&config).expect("model");
+        let placement = &config.scene.objects[0];
+        let (scale, position, rpy) = (placement.scale, placement.position, placement.rpy);
+
+        let parts = load_scene_assets(&config).expect("parts");
+        config.scene.objects = vec![crate::config::SceneObject {
+            id: "stage".into(),
+            stl: Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/stage.stl"))
+                .to_path_buf(),
+            scale,
+            position,
+            rpy,
+        }];
+        let cad = load_scene_assets(&config).expect("cad mesh");
+
+        let hit = |assets: &[SceneAsset], q: &[f64; 6]| {
+            let (mut scene, env) =
+                scene_with_assets(&model, assets, &config.scene.allow_collisions_with);
+            scene
+                .current_state_mut()
+                .set_joint_group_positions(&model.group, q)
+                .expect("set joints");
+            scene.current_state_mut().update();
+            scene
+                .check_collision(&env, &CollisionRequest::default())
+                .collision
+        };
+
+        // Sweep the three joints that carry the arm across the stage,
+        // wrist held at the attitude every taught pose shares.
+        let mut missed = Vec::new();
+        let mut checked = 0;
+        for a in (-8..=8).step_by(2) {
+            for b in (-6..=0).step_by(2) {
+                for c in (-6..=6).step_by(3) {
+                    let q = [
+                        f64::from(a) * 0.2,
+                        f64::from(b) * 0.25,
+                        f64::from(c) * 0.25,
+                        -3.4,
+                        -1.2,
+                        0.0,
+                    ];
+                    checked += 1;
+                    if hit(&cad, &q) && !hit(&parts, &q) {
+                        missed.push(q);
+                    }
+                }
+            }
+        }
+        assert!(
+            missed.is_empty(),
+            "stage parts missed {} of {checked} collisions the CAD mesh reports, e.g. {:?}",
+            missed.len(),
+            missed.first(),
+        );
+    }
+
     /// Closed axis-aligned cube (12 triangles) as binary STL bytes,
     /// centered at the origin with half-extent `half` meters. Normals are
     /// irrelevant to the collision mesh, so they are left zeroed.

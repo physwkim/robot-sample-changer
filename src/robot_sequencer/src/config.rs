@@ -307,7 +307,11 @@ mod tests {
         assert_eq!(config.robot.ik_frame, "robotiq_hande_end");
         assert_eq!(config.gripper.mode, GripperMode::Hande);
         assert_eq!(config.joint_limits.position_overrides.len(), 3);
-        assert_eq!(config.scene.objects.len(), 1);
+        // The stage ships as an approximate convex decomposition (see
+        // the scene comment in sequencer.yaml), so this is a part count,
+        // not a single mesh — but an empty scene would mean the daemon
+        // plans with no stage at all, which must not pass silently.
+        assert!(!config.scene.objects.is_empty());
         // Every anchored path must exist in the checkout.
         for path in [
             &config.robot.urdf,
@@ -316,9 +320,15 @@ mod tests {
             &config.robot.output_recipe,
             &config.robot.input_recipe,
             &config.sequence.waypoints_yaml,
-            &config.scene.objects[0].stl,
         ] {
             assert!(path.exists(), "missing: {}", path.display());
+        }
+        for object in &config.scene.objects {
+            assert!(
+                object.stl.exists(),
+                "missing scene mesh: {}",
+                object.stl.display()
+            );
         }
         for dir in config.robot.mesh_packages.values() {
             assert!(dir.is_dir(), "missing mesh package dir: {}", dir.display());

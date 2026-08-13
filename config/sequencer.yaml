@@ -102,13 +102,100 @@ gripper:
                                  # The driver also retries a lost one.
 
 # Static collision scene, replacing stage_scene_utils + setup_stage_acm.
+#
+# The stage is an approximate convex decomposition of resources/stage.stl,
+# built by tools/stage_collision (see its module doc). The CAD mesh has
+# 231,812 triangles and cost ~150 s of BVH build per daemon start and
+# ~930 ms per joint-space plan; these 40 convex parts cost neither
+# measurably. They contain the original shape, so they can only report
+# more collisions than it, never fewer — the price is that thin
+# concavities fill in, and holder1_on_position now reads as a collision.
+# Nothing plans into it (the steps that reach it are Cartesian), but a
+# joint-space plan into a slot would fail. Regenerate with:
+#   cargo run --release --manifest-path ../tools/stage_collision/Cargo.toml \
+#     -- ../resources/stage.stl ../resources/stage_parts
 scene:
   objects:
-    - id: "stage"
-      stl: "../resources/stage.stl"
-      scale: [0.01, 0.01, 0.01]
-      position: [-0.15, 0.39, -0.002]
-      rpy: [0.0, 0.0, 3.14159]
+    - { id: "stage0", stl: "../resources/stage_parts/stage_part00.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage1", stl: "../resources/stage_parts/stage_part01.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage2", stl: "../resources/stage_parts/stage_part02.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage3", stl: "../resources/stage_parts/stage_part03.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage4", stl: "../resources/stage_parts/stage_part04.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage5", stl: "../resources/stage_parts/stage_part05.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage6", stl: "../resources/stage_parts/stage_part06.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage7", stl: "../resources/stage_parts/stage_part07.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage8", stl: "../resources/stage_parts/stage_part08.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage9", stl: "../resources/stage_parts/stage_part09.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage10", stl: "../resources/stage_parts/stage_part10.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage11", stl: "../resources/stage_parts/stage_part11.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage12", stl: "../resources/stage_parts/stage_part12.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage13", stl: "../resources/stage_parts/stage_part13.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage14", stl: "../resources/stage_parts/stage_part14.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage15", stl: "../resources/stage_parts/stage_part15.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage16", stl: "../resources/stage_parts/stage_part16.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage17", stl: "../resources/stage_parts/stage_part17.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage18", stl: "../resources/stage_parts/stage_part18.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage19", stl: "../resources/stage_parts/stage_part19.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage20", stl: "../resources/stage_parts/stage_part20.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage21", stl: "../resources/stage_parts/stage_part21.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage22", stl: "../resources/stage_parts/stage_part22.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage23", stl: "../resources/stage_parts/stage_part23.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage24", stl: "../resources/stage_parts/stage_part24.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage25", stl: "../resources/stage_parts/stage_part25.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage26", stl: "../resources/stage_parts/stage_part26.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage27", stl: "../resources/stage_parts/stage_part27.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage28", stl: "../resources/stage_parts/stage_part28.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage29", stl: "../resources/stage_parts/stage_part29.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage30", stl: "../resources/stage_parts/stage_part30.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage31", stl: "../resources/stage_parts/stage_part31.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage32", stl: "../resources/stage_parts/stage_part32.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage33", stl: "../resources/stage_parts/stage_part33.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage34", stl: "../resources/stage_parts/stage_part34.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage35", stl: "../resources/stage_parts/stage_part35.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage36", stl: "../resources/stage_parts/stage_part36.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage37", stl: "../resources/stage_parts/stage_part37.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage38", stl: "../resources/stage_parts/stage_part38.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
+    - { id: "stage39", stl: "../resources/stage_parts/stage_part39.stl",
+        scale: [0.01, 0.01, 0.01], position: [-0.15, 0.39, -0.002], rpy: [0.0, 0.0, 3.14159] }
   # setup_stage_acm.py allowances: collisions between these links and
   # every scene object are ignored.
   allow_collisions_with:
