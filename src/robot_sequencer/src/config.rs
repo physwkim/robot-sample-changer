@@ -91,6 +91,17 @@ pub struct GripperConfig {
     pub reach_tolerance: f64,
     pub settle_timeout: f64,
     pub open_threshold: f64,
+    /// Hand-E background communication rate. Every cycle is two Modbus
+    /// transactions, and the tool-communication bridge drops roughly one
+    /// transaction in a few thousand, so halving the rate halves how
+    /// often that costs anything. 20 ms between position samples is well
+    /// inside what the settle wait needs.
+    #[serde(default = "default_gripper_poll_hz")]
+    pub poll_hz: u32,
+}
+
+fn default_gripper_poll_hz() -> u32 {
+    50
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

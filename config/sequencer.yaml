@@ -74,6 +74,11 @@ gripper:
   reach_tolerance: 0.0015        # m
   settle_timeout: 5.0            # s
   open_threshold: 0.02           # m, Gripper_RBV open/close boundary
+  poll_hz: 50                    # Hand-E background comm rate. The tool-
+                                 # comm bridge drops ~1 transaction in a
+                                 # few thousand (measured); each cycle is
+                                 # two, so a lower rate means fewer stalls.
+                                 # The driver also retries a lost one.
 
 # Static collision scene, replacing stage_scene_utils + setup_stage_acm.
 scene:

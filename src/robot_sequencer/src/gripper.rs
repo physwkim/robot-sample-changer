@@ -50,6 +50,7 @@ impl Gripper {
                 let mut driver_config = HandeDriverConfig::new(config.robot.ip.clone());
                 driver_config.position_min = 0.0;
                 driver_config.position_max = g.open_position;
+                driver_config.frequency_hz = g.poll_hz;
                 let mut driver = HandeDriver::connect(driver_config)
                     .map_err(|e| SequencerError(format!("Hand-E connect: {e}")))?;
                 driver
