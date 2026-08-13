@@ -87,6 +87,10 @@ pub struct Motion<'m> {
     _primary: TcpStream,
     rtde: RtdeClient,
     streaming: bool,
+    /// Set when a pause failed, i.e. URControl had already dropped the
+    /// RTDE connection. Only decorates the next `start()` error message —
+    /// re-establishing the connection needs a daemon restart.
+    stream_lost: bool,
     program_running: Arc<AtomicBool>,
     trajectory_done: Arc<AtomicBool>,
     last_result: Arc<AtomicI32>,
@@ -263,6 +267,7 @@ impl<'m> Motion<'m> {
             _primary: primary,
             rtde,
             streaming: false,
+            stream_lost: false,
             program_running,
             trajectory_done,
             last_result,
@@ -302,6 +307,14 @@ impl<'m> Motion<'m> {
             }
         }
 
+        // Hand off with the stream paused. The caller's next act is the
+        // Hand-E activation (~1.4 s) and then the idle trigger loop, and
+        // nothing reads RTDE in either: 500 Hz of unread packages fills
+        // the socket buffer and URControl drops the connection, which
+        // surfaces much later as an EOF on the first pause or read.
+        // `ensure_streaming` restarts it at every motion entry point.
+        motion.pause_streaming();
+
         log::info("Robot connected (program running, speed slider at 1.0)");
         Ok(motion)
     }
@@ -310,10 +323,19 @@ impl<'m> Motion<'m> {
     /// calls this, so pausing at idle is always safe.
     fn ensure_streaming(&mut self) -> Result<(), SequencerError> {
         if !self.streaming {
-            self.rtde
-                .start()
-                .map_err(|e| SequencerError(format!("RTDE start: {e}")))?;
+            self.rtde.start().map_err(|e| {
+                SequencerError(format!(
+                    "RTDE start: {e}{}",
+                    if self.stream_lost {
+                        " (the RTDE connection was lost earlier; \
+                         restart the daemon to re-establish it)"
+                    } else {
+                        ""
+                    }
+                ))
+            })?;
             self.streaming = true;
+            self.stream_lost = false;
         }
         Ok(())
     }
@@ -321,12 +343,21 @@ impl<'m> Motion<'m> {
     /// Pauses RTDE output streaming. Called when the sequence enters a
     /// long PV-polling wait (idle trigger loop, measurement wait) so the
     /// unread 500 Hz stream does not accumulate in socket buffers.
+    ///
+    /// A failed pause means the connection is already gone (URControl
+    /// drops a client that stops reading). Clearing `streaming` anyway is
+    /// what keeps that recoverable: leaving it set makes
+    /// `ensure_streaming` a no-op, so every later read fails against a
+    /// dead socket with no path back. Cleared, the next motion entry
+    /// point retries `start()` and reports a connection error naming the
+    /// cause instead.
     pub fn pause_streaming(&mut self) {
         if self.streaming {
-            match self.rtde.pause() {
-                Ok(()) => self.streaming = false,
-                Err(e) => log::warn(&format!("RTDE pause failed: {e}")),
+            if let Err(e) = self.rtde.pause() {
+                log::warn(&format!("RTDE pause failed: {e}"));
+                self.stream_lost = true;
             }
+            self.streaming = false;
         }
     }
 
