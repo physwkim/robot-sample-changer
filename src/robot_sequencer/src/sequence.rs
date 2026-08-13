@@ -628,7 +628,6 @@ impl<'a> Sequencer<'a> {
         log::info("========================================");
         log::info("Waiting for EPICS trigger...");
         log::info("========================================");
-        self.motion.pause_streaming();
         loop {
             let value = self.epics.read_trigger();
             if value > 0 {
@@ -658,7 +657,6 @@ impl<'a> Sequencer<'a> {
             return;
         }
         log::info("STOPPED - Waiting for Stop PV to become 0...");
-        self.motion.pause_streaming();
         loop {
             if self.epics.read_stop() == 0 {
                 log::info("Stop cleared, resuming execution...");
@@ -676,7 +674,6 @@ impl<'a> Sequencer<'a> {
         log::info(&format!(
             "PAUSED at step {current_step} - Waiting for PauseStep to change..."
         ));
-        self.motion.pause_streaming();
         loop {
             let pause_step = self.epics.read_pause_step();
             if pause_step != current_step {
@@ -694,7 +691,6 @@ impl<'a> Sequencer<'a> {
         log::info("Waiting for measurement to complete...");
         log::info("  Wait PV: 0=keep waiting, 1=continue, 2=skip remaining");
         log::info("========================================");
-        self.motion.pause_streaming();
         loop {
             match self.epics.read_wait() {
                 WaitStatus::Continue => {
@@ -761,7 +757,6 @@ impl<'a> Sequencer<'a> {
             Err(e) => log::error(&format!("TCP Jog failed: {e}")),
         }
         // Back to the hold loop's no-reader state.
-        self.motion.pause_streaming();
     }
 
     // ---- waypoint computation ------------------------------------------

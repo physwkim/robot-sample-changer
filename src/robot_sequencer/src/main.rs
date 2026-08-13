@@ -20,6 +20,7 @@ mod log;
 mod model;
 mod motion;
 mod sequence;
+mod stream;
 mod waypoints;
 
 use std::path::PathBuf;
