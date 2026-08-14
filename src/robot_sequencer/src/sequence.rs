@@ -179,14 +179,35 @@ impl<'a> Sequencer<'a> {
                     continue;
                 }
             };
-            let base = self.compute_base_waypoints(&waypoints)?;
-            let run = self.compute_run_waypoints(&waypoints, &base, holder_number)?;
+            let attempt = self
+                .compute_base_waypoints(&waypoints)
+                .and_then(|base| self.compute_run_waypoints(&waypoints, &base, holder_number))
+                .and_then(|run| match calib_mode {
+                    CalibMode::Holder => self.run_calib_holder(&run, start_from_step),
+                    CalibMode::SampleHolder => self.run_calib_sample_holder(&run, start_from_step),
+                    CalibMode::HandEye => self.run_handeye(),
+                    CalibMode::Normal => self.run_normal(&run, start_from_step),
+                });
 
-            let outcome = match calib_mode {
-                CalibMode::Holder => self.run_calib_holder(&run, start_from_step)?,
-                CalibMode::SampleHolder => self.run_calib_sample_holder(&run, start_from_step)?,
-                CalibMode::HandEye => self.run_handeye()?,
-                CalibMode::Normal => self.run_normal(&run, start_from_step)?,
+            // A failed step used to end the process. The arm is stopped
+            // either way, but exiting drops the RTDE stream and runs the
+            // Hand-E driver's shutdown, which deactivates the gripper —
+            // and a gripper that comes up deactivated takes its
+            // calibration stroke on the next start, opening the fingers
+            // on whatever they were holding. So the failure stops here:
+            // the daemon keeps the stream, keeps the gripper exactly as
+            // the failure left it, and waits. `CurrentStep` is left
+            // alone, which is the resume point the invariant promises.
+            let outcome = match attempt {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    log::error(&format!("Sequence #{} failed: {e}", self.sequence_count));
+                    log::error(
+                        "Arm stopped, gripper untouched, CurrentStep kept as the resume point. \
+                         Set StartStep and trigger to resume, or CalibMode=4 to return to standby.",
+                    );
+                    continue;
+                }
             };
 
             log::info("========================================");
@@ -211,8 +232,8 @@ impl<'a> Sequencer<'a> {
             self.epics.write_current_step(0);
             // StartStep is a one-shot resume override; a completed (or
             // skipped) run clears it so the next trigger starts from the
-            // top. A failed run never gets here — the daemon has exited
-            // with CurrentStep preserved.
+            // top. A failed run never gets here — it took the `continue`
+            // above, leaving both PVs as the resume point.
             if self.epics.write_start_step(0) {
                 log::info("Reset StartStep to 0 (next run starts from the beginning)");
             }
