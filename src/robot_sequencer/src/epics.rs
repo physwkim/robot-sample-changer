@@ -32,7 +32,7 @@ pub enum WaitStatus {
 }
 
 /// `Robot:CalibMode` states (mbbo: 0=Normal, 1=Holder, 2=Sample Holder,
-/// 3=Hand-Eye).
+/// 3=Hand-Eye, 4=Recover).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CalibMode {
     Normal,
@@ -42,6 +42,12 @@ pub enum CalibMode {
     /// touches no holder and no gripper — it rotates the tool in place to
     /// give `cv2.calibrateHandEye` its rotational diversity.
     HandEye,
+    /// Put the arm back at the holder standby after a run stopped part
+    /// way. Not a calibration; it shares the PV because "pick a mode,
+    /// then trigger" is the entry every non-Normal behavior already
+    /// uses, and a recovery the operator has to remember a second
+    /// mechanism for is one they will not reach for.
+    Recover,
 }
 
 /// `Robot:Vision:Kind` request codes (mbbo).
@@ -271,6 +277,7 @@ impl Epics {
             Some(1) => CalibMode::Holder,
             Some(2) => CalibMode::SampleHolder,
             Some(3) => CalibMode::HandEye,
+            Some(4) => CalibMode::Recover,
             _ => CalibMode::Normal,
         }
     }

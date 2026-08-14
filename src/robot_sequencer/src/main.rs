@@ -96,6 +96,7 @@ fn run() -> Result<(), SequencerError> {
         config.handeye.angle_deg,
         config.handeye.out_dir.display()
     ));
+    log::info("    4=Recover (return the arm to holder standby; gripper untouched)");
     if config.vision.enabled {
         log::info(&format!(
             "  Vision correction: ENABLED{} (deadband {:.2} mm, limit {:.2} mm, {})",

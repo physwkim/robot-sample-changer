@@ -1,12 +1,15 @@
 //! The trigger-driven sequence state machine, a faithful port of
 //! `epics_triggered_sequence.cpp`'s main loop.
 //!
-//! Failure semantics are the resume design and must not be "improved":
-//! any step failure exits the daemon, leaving `CurrentStep` at the last
-//! completed step so the operator can resume via `StartStep` +
-//! `Trigger` after clearing the fault (the IOC preserves the PVs; see
-//! CLAUDE.md "충돌/크래시 후 재개"). Only a completed or skipped run
-//! resets `CurrentStep` and `StartStep` to 0.
+//! Failure semantics are the resume design. A step failure stops the run
+//! and leaves `CurrentStep` at the last completed step, so the operator
+//! can resume via `StartStep` + `Trigger` after clearing the fault (the
+//! IOC preserves the PVs; see CLAUDE.md "충돌/크래시 후 재개"). What it
+//! must not do is end the daemon: the process leaving takes the RTDE
+//! stream and the gripper's activation with it, and the next start opens
+//! the fingers on whatever was being held. `CalibMode = 4` walks the arm
+//! back to standby instead. Only a completed or skipped run resets
+//! `CurrentStep` and `StartStep` to 0 — a recovery resets neither.
 
 use std::time::Duration;
 
@@ -144,9 +147,9 @@ impl<'a> Sequencer<'a> {
         }
     }
 
-    /// The main trigger loop. Returns only on error (step failure or a
-    /// structural fault), which exits the daemon with `CurrentStep`
-    /// preserved.
+    /// The main trigger loop. A failed run is logged and waited out, not
+    /// returned; the `Result` is for faults that leave nothing to wait
+    /// for.
     pub fn run(&mut self) -> Result<(), SequencerError> {
         loop {
             let start_from_step = self.wait_for_trigger(false);
@@ -158,6 +161,7 @@ impl<'a> Sequencer<'a> {
                 CalibMode::Holder => "Holder",
                 CalibMode::SampleHolder => "SampleHolder",
                 CalibMode::HandEye => "HandEye",
+                CalibMode::Recover => "Recover",
                 CalibMode::Normal => "Normal",
             };
             log::info("========================================");
@@ -186,6 +190,7 @@ impl<'a> Sequencer<'a> {
                     CalibMode::Holder => self.run_calib_holder(&run, start_from_step),
                     CalibMode::SampleHolder => self.run_calib_sample_holder(&run, start_from_step),
                     CalibMode::HandEye => self.run_handeye(),
+                    CalibMode::Recover => self.run_recover(&run),
                     CalibMode::Normal => self.run_normal(&run, start_from_step),
                 });
 
@@ -226,8 +231,22 @@ impl<'a> Sequencer<'a> {
                     "Sequence #{} completed successfully!",
                     self.sequence_count
                 )),
+                (CalibMode::Recover, _) => log::info("Arm returned to holder standby"),
             }
             log::info("========================================");
+
+            // Recover moved the arm; it did not finish the run that
+            // stopped. Zeroing here would erase the step the operator
+            // still has to act on, and it would claim idle while the
+            // gripper may still be holding a sample, which is the one
+            // state where `CurrentStep = 0` is a lie worth avoiding.
+            if calib_mode == CalibMode::Recover {
+                log::info(
+                    "CurrentStep left as it was: the interrupted run is still the resume \
+                     point, and the gripper still holds whatever it held.",
+                );
+                continue;
+            }
 
             self.epics.write_current_step(0);
             // StartStep is a one-shot resume override; a completed (or
@@ -341,6 +360,51 @@ impl<'a> Sequencer<'a> {
             self.cartesian(23, "holder_standby_final", &w.standby, start)?;
         }
         Ok(skip_remaining)
+    }
+
+    /// Puts the arm back at the holder standby after a run stopped part
+    /// way, without ending the daemon and without touching the gripper.
+    ///
+    /// Two routes, tried in order, because the planner cannot start from
+    /// every pose the sequence can stop in. `holder_above` is the case
+    /// that forced this: RRT rejects it as an invalid start state, while
+    /// the straight line from it to `holder_retreat` is the move step 6
+    /// makes every cycle. So plan to standby, and when the planner
+    /// refuses, take the interpolated line to retreat — a pose steps 7
+    /// and 18 already plan from — and try again from there.
+    ///
+    /// The gripper is deliberately left alone. Opening it here would
+    /// drop the very sample this exists to protect, and where that
+    /// sample should go is a decision for the operator, not for a
+    /// recovery move.
+    fn run_recover(&mut self, w: &RunWaypoints) -> Result<bool, SequencerError> {
+        log::info(">>> RECOVER MODE: returning to holder standby <<<");
+        let v = self.config.sequence.velocity_scale;
+        let a = self.config.sequence.acceleration_scale;
+        match self
+            .motion
+            .move_planned(&w.standby, v, a, "recover_standby")
+        {
+            Ok(()) => return Ok(false),
+            Err(e) => log::warn(&format!(
+                "recover: cannot plan to standby from here ({e}); \
+                 trying by way of holder_retreat"
+            )),
+        }
+        let here = self.motion.current_joints()?;
+        if !self.motion.direct_path_is_clear(&here, &w.retreat)? {
+            return Err(SequencerError(
+                "recover: the straight line to holder_retreat is blocked and the \
+                 planner will not start from here. Freedrive the arm to a taught \
+                 pose before triggering again."
+                    .into(),
+            ));
+        }
+        self.motion
+            .move_direct(&w.retreat, v, a, "recover_retreat")?;
+        self.motion
+            .move_planned(&w.standby, v, a, "recover_standby")
+            .map(|()| false)
     }
 
     /// Holder calibration: pick and hold above the holder (0-5), let the
