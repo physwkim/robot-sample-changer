@@ -1,0 +1,60 @@
+T_ee_cam:
+  translation_m:
+  - -0.005555123476614368
+  - -0.05232771775460441
+  - -0.051895365236347926
+  rotation_matrix:
+  - - 0.99626399824859
+    - -0.02847570472712522
+    - 0.08153023999735977
+  - - 0.01036557955244386
+    - 0.9766783718071975
+    - 0.21445725169502577
+  - - -0.0857356434295297
+    - -0.21281093083846808
+    - 0.9733246668822224
+  rotation_vector:
+  - -0.21556809002191787
+  - 0.08439005872696075
+  - 0.01959645442470711
+  translation_sigma_mm:
+  - 0.4266364109641063
+  - 0.4132422302695927
+  - 0.48754808653509996
+camera_matrix:
+- 396.9934303511462
+- 0.0
+- 325.7477509700277
+- 0.0
+- 395.79839563085744
+- 254.6365706567212
+- 0.0
+- 0.0
+- 1.0
+dist_coeffs:
+- -0.0779381158456033
+- 0.16313658860038704
+- 0.005987318051741272
+- 0.004097888390340366
+- -0.11974170208268205
+fx_sigma_px: 0.8569709045162414
+tag_size_m: 0.09858470546289617
+tag_size_sigma_mm: 0.09814813961719271
+tag_size_note: recovered chord, -1.42 % against the 100 mm the sheet was drawn at.
+  A scaled print and a sheet that is not flat both read short here and this fit cannot
+  tell them apart; measure the sheet's own 100 mm rule to decide.
+base_T_tag:
+  translation_m:
+  - -0.02212457004360689
+  - 0.33135945936027367
+  - -0.009428311565981302
+  rotation_vector:
+  - -0.005193985492639848
+  - -0.01663101644871092
+  - -1.5863720136416501
+samples: /home/bl9b/work/robot-sample-changer/handeye_samples/samples.yaml
+views: 42
+used_depth: true
+corner_rms_px: 0.8873143360854666
+chi2_per_dof: 4.453095963034902
+leave_one_out_mean_px: null
