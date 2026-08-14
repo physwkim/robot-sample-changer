@@ -140,11 +140,18 @@ vision:
   max_correction: 3.0     # mm, larger corrections stop the sequence
   # Each hook observes from a standby pose, where the target is near the
   # middle of the frame, and the correction is applied to the above/on
-  # pair that follows. grip_offset is the exception and the weak one: it
-  # looks at the puck in the fingers, which rides 33 deg off the optical
-  # axis with only its near rim inside the frame, and no measurement has
-  # been taken there yet.
+  # pair that follows.
+  #
+  # The two that are off are off because tools/vision/vision_node.py does
+  # not measure them and answers Valid=0 rather than zeros — zeros would
+  # read as "aligned" and "seated" and be indistinguishable from a real
+  # answer. grip_offset looks at the puck in the fingers, which rides
+  # 33 deg off the optical axis with only its near rim inside the frame;
+  # seating needs a tilt, and depth on this metal is 1.83 mm biased and
+  # 8.48 mm spread. Turning either on without teaching the node how to
+  # answer it stops the sequence every cycle, which is the correct
+  # failure and not a reason to make the node invent a number.
   pick_align: true        # at steps 1 and 12, applied to 2/3 and 13/14
-  grip_offset: true       # at steps 5 and 16, added to the next place
+  grip_offset: false      # at steps 5 and 16 — not measured (§13.2)
   place_align: true       # at steps 7 and 18, applied to 8/9 and 19/20
-  seating_check: true     # at steps 12 and 23, after the puck is released
+  seating_check: false    # at steps 12 and 23 — not measured (§12.1)

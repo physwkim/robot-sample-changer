@@ -46,3 +46,6 @@ src/robot_sequencer/target/
 # Hand-eye capture output (handeye.out_dir). The measurements are a
 # record of one session on one machine; T_ee_cam is what gets committed.
 handeye_samples/
+
+# Taught vision reference frames — site-specific captures, not source.
+vision_refs/

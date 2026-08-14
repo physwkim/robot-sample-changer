@@ -43,89 +43,21 @@ import time
 
 os.environ.setdefault("EPICS_CA_MAX_ARRAY_BYTES", "20000000")
 
-import cv2
 import numpy as np
 from epics import PV
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from estimator import DEFAULT_GATE, Camera, build_roi, ecc_shift
+
 PREFIX = os.environ.get("VISION_CAM_PREFIX", "RS405:")
-WIDTH, HEIGHT = 640, 480
 
-# Holder 3's window in the standby view (h3_overlay.png) and the depth band
-# that isolates the stack: everything else in the frame sits beyond 675 mm.
+# Holder 3's window in the standby view (h3_overlay.png). The node derives its
+# window from the gate instead; this one is fixed so the §14 numbers stay
+# reproducible against the exact pixels they were measured on.
 DEFAULT_WINDOW = (285, 380, 260, 360)  # y0, y1, x0, x1
-DEFAULT_GATE = (0.050, 0.250)  # m
-# 136.0 mm optical working distance at standby / fx 393.284.
+# 136.0 mm optical working distance at standby / fx 393.284. Fixed for the
+# same reason — the node scales by the gate's own median range per frame.
 MM_PER_PX = 0.346
-
-
-def fresh(data, counter, timeout=5.0, advance=2):
-    """A frame the camera produced after this call, not one from the cache.
-
-    `advance=2` because the areaDetector plugin counter moves in twos here;
-    waiting for a strict advance is what caught the pyepics cache bug that
-    once made this measurement look perfectly repeatable.
-    """
-    start = counter.get(use_monitor=False)
-    if start is None:
-        return None
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        now = counter.get(use_monitor=False)
-        if now is not None and now >= start + advance:
-            return data.get(timeout=timeout, use_monitor=False)
-        time.sleep(0.01)
-    return None
-
-
-class Camera:
-    def __init__(self):
-        self.mono = PV(PREFIX + "image1:ArrayData", auto_monitor=False)
-        self.mono_c = PV(PREFIX + "image1:ArrayCounter_RBV", auto_monitor=False)
-        self.depth = PV(PREFIX + "image2:ArrayData", auto_monitor=False)
-        self.depth_c = PV(PREFIX + "image2:ArrayCounter_RBV", auto_monitor=False)
-        for pv in (self.mono, self.mono_c, self.depth, self.depth_c):
-            if not pv.wait_for_connection(5):
-                raise SystemExit(f"{pv.pvname} did not connect")
-
-    def grab(self):
-        """One mono frame and its depth map, or `None` if the stream stalled."""
-        m = fresh(self.mono, self.mono_c)
-        d = fresh(self.depth, self.depth_c)
-        if m is None or d is None:
-            return None
-        n = WIDTH * HEIGHT
-        img = np.asarray(m, np.uint8)[:n].reshape(HEIGHT, WIDTH).astype(np.float32)
-        z = np.asarray(d, np.float64)[:n].reshape(HEIGHT, WIDTH) * 1e-4
-        return img, z
-
-
-def build_roi(z, window, gate):
-    """The depth gate, closed and dilated into a mask over the window."""
-    y0, y1, x0, x1 = window
-    near, far = gate
-    mask = ((z > near) & (z < far)).astype(np.uint8)
-    k9, k5 = np.ones((9, 9), np.uint8), np.ones((5, 5), np.uint8)
-    grown = cv2.dilate(cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k9), k5)
-    return grown[y0:y1, x0:x1], int(mask[y0:y1, x0:x1].sum())
-
-
-def ecc_shift(ref, cur, roi):
-    """Translation of `cur` relative to `ref`, in pixels, or None if ECC failed."""
-    warp = np.eye(2, 3, dtype=np.float32)
-    try:
-        cc, warp = cv2.findTransformECC(
-            ref,
-            cur,
-            warp,
-            cv2.MOTION_TRANSLATION,
-            (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 200, 1e-7),
-            roi,
-            5,
-        )
-    except cv2.error as exc:
-        print(f"  ECC did not converge: {exc}", file=sys.stderr)
-        return None
-    return float(warp[0, 2]), float(warp[1, 2]), float(cc)
 
 
 def ref_path(out):
@@ -137,7 +69,7 @@ def csv_path(out):
 
 
 def cmd_ref(args):
-    cam = Camera()
+    cam = Camera(prefix=PREFIX)
     frame = cam.grab()
     if frame is None:
         raise SystemExit("no fresh frame; is the camera IOC streaming?")
@@ -223,14 +155,14 @@ def take_sample(cam, out, ref, roi, window, gate, stamp):
 
 
 def cmd_sample(args):
-    cam = Camera()
+    cam = Camera(prefix=PREFIX)
     ref, roi, window, gate = load_ref(args.out)
     take_sample(cam, args.out, ref, roi, window, gate, time.time())
 
 
 def cmd_watch(args):
     """Sample once per arrival at `--step`, until `--n` samples or Ctrl-C."""
-    cam = Camera()
+    cam = Camera(prefix=PREFIX)
     ref, roi, window, gate = load_ref(args.out)
     step = PV("Robot:CurrentStep", auto_monitor=False)
     if not step.wait_for_connection(5):
@@ -331,7 +263,7 @@ def cmd_cycles(args):
     `CurrentStep` as the resume point, and this stops rather than trigger over
     it.
     """
-    cam = Camera()
+    cam = Camera(prefix=PREFIX)
     ref, roi, window, gate = load_ref(args.out)
     bot = Robot()
 
@@ -378,7 +310,7 @@ def cmd_cycles(args):
 
 def cmd_stationary(args):
     """The §12.3 control: the arm does not move, so this is the estimator alone."""
-    cam = Camera()
+    cam = Camera(prefix=PREFIX)
     frames, gates = [], []
     for i in range(args.n):
         frame = cam.grab()
