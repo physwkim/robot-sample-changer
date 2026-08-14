@@ -120,6 +120,10 @@ MIN_TARGET_ECC = 0.90
 # without, so the target is simply what changes between them.
 POSE_PAIRS = ((1, 18), (7, 12))
 STEP_KIND = {step: kind for step, kind in TEACH_STOPS}
+# The other step at the same pose, and therefore the same seat in the opposite
+# state. It is what makes occupancy a choice between two taught hypotheses
+# rather than a threshold on one correlation.
+PAIR_OF = {a: b for pair in POSE_PAIRS for a, b in (pair, pair[::-1])}
 # A frame-to-frame difference in DN that is the puck leaving rather than the
 # sensor's 1.41 DN pixel noise (§12.3), and the smallest blob worth calling
 # part of the target.
@@ -175,6 +179,17 @@ def ref_key(kind, step, holder):
     if step in RACK_STEPS:
         return f"k{kind}_s{step}_h{holder}"
     return f"k{kind}_s{step}"
+
+
+def seat_state(kind):
+    """What the seat has to hold for this step to be the step it thinks it is.
+
+    Not a table to maintain: you pick from a seat that is loaded and place into
+    one that is empty, so the kind already says it. Every reference this node
+    stores was taught in its step's state, which is what lets the pose's other
+    reference stand as the opposite hypothesis.
+    """
+    return "loaded" if kind == 1 else "empty"
 
 
 def target_box(fa, za, fb, zb, gate):
@@ -246,8 +261,8 @@ class Node:
 
     # ---- measurement ---------------------------------------------------
 
-    def observe(self, key):
-        """Measure against the stored reference for `key`, in two stages.
+    def observe(self, kind, step, holder):
+        """Measure against the stored reference for this stop, in two stages.
 
         The stages exist because one window cannot do both jobs (§15.9).
         Identity needs the whole column — the holders are nominally identical
@@ -263,10 +278,25 @@ class Node:
         turns an invalid answer into a stopped run and the log is what tells
         the operator which of the several reasons it was.
         """
+        key = ref_key(kind, step, holder)
+        other_step = PAIR_OF.get(step)
+        if other_step is None:
+            return None, 0.0, (
+                f"step {step} is not an observation pose — the four in TEACH_STOPS are "
+                "the only ones taught in a known seat state"
+            )
+        other_key = ref_key(STEP_KIND[other_step], other_step, holder)
         path = os.path.join(self.args.refs, key + ".npz")
+        other_path = os.path.join(self.args.refs, other_key + ".npz")
         if not os.path.exists(path):
             return None, 0.0, f"no reference taught for {key}"
+        if not os.path.exists(other_path):
+            return None, 0.0, (
+                f"{key} has no {other_key} beside it — that reference is this seat in "
+                "the opposite state, and without it occupancy cannot be decided"
+            )
         stored = np.load(path)
+        counter = np.load(other_path)
         if "target" not in stored:
             return None, 0.0, (
                 f"{key} carries no target window — it was taught before its pose pair "
@@ -291,13 +321,15 @@ class Node:
         if ident is None:
             return None, 0.0, "the identity correlation did not converge"
         cc_id = ident[2]
-        if cc_id < MIN_IDENTITY_ECC:
-            return None, float(cc_id), (
-                f"identity correlation {cc_id:.4f} below {MIN_IDENTITY_ECC} — this is not "
-                "the scene the reference was taught in"
-            )
 
-        # Stage 2 — the measurement, over the target alone.
+        # Stage 2 — the target alone, asked two questions: is the seat in the
+        # state this step needs, and how far has it moved.
+        #
+        # Occupancy is not a threshold on one correlation but the better of two
+        # taught hypotheses, because the pose's other reference is this same
+        # seat at this same pose in the opposite state. That is what separates
+        # "the rack is misloaded" from "the reference has aged" (§14.2) — both
+        # score under the floor, and they call for opposite actions.
         troi, tarea = build_roi(z, target, gate)
         if tarea < MIN_GATE_PX:
             return None, float(cc_id), (
@@ -307,25 +339,60 @@ class Node:
         if depth is None:
             return None, float(cc_id), "the target's gate is empty; no range to scale by"
         ty0, ty1, tx0, tx1 = target
-        shift = ecc_shift(
-            stored["frame"][ty0:ty1, tx0:tx1].astype(np.float32),
-            img[ty0:ty1, tx0:tx1],
-            troi,
+        cur = img[ty0:ty1, tx0:tx1]
+        mine = ecc_shift(stored["frame"][ty0:ty1, tx0:tx1].astype(np.float32), cur, troi)
+        rival = ecc_shift(counter["frame"][ty0:ty1, tx0:tx1].astype(np.float32), cur, troi)
+        # Both hypotheses are scored before either stage refuses. A reference
+        # the scene has diverged from far enough stops converging at all, and
+        # that is evidence against it rather than a separate kind of failure —
+        # holder 1's empty sample holder did not converge against the loaded
+        # reference and scored 0.9986 against the empty one.
+        cc = mine[2] if mine is not None else -1.0
+        cc_rival = rival[2] if rival is not None else -1.0
+        want, found = seat_state(kind), seat_state(STEP_KIND[other_step])
+        misseated = cc_rival > cc
+        seat_note = (
+            f"the target matches {other_key} at {cc_rival:.4f} against {key}'s {cc:.4f}, "
+            f"so the seat is {found} where step {step} needs it {want}"
         )
-        if shift is None:
-            return None, float(cc_id), "the target correlation did not converge"
-        du, dv, cc = shift
+
+        # Identity keeps its priority: at the wrong holder the target window is
+        # showing a different seat, and a confident verdict about that one is
+        # worse than none. But the seat evidence still goes in the message,
+        # because on some holders swapping the load alone drops identity under
+        # the floor (h2 measured 0.6713), and an operator told only "the
+        # reference does not match" may re-teach it — over a misloaded rack.
+        if cc_id < MIN_IDENTITY_ECC:
+            aside = f". Also: {seat_note} — check the rack before re-teaching"
+            return None, float(cc_id), (
+                f"identity correlation {cc_id:.4f} below {MIN_IDENTITY_ECC} — this is not "
+                "the scene the reference was taught in" + (aside if misseated else "")
+            )
+        if misseated:
+            why = (
+                "placing here would drive the puck in the fingers into the one already "
+                "seated" if want == "empty" else "there is nothing here to pick up"
+            )
+            return None, max(0.0, float(cc)), f"{seat_note} — {why}"
+        if mine is None:
+            return None, 0.0, (
+                "the target correlation converged against neither reference — the "
+                "target window holds something that is not this seat in either state"
+            )
+        du, dv, _ = mine
         if cc < MIN_TARGET_ECC:
             return None, float(cc), (
                 f"target correlation {cc:.4f} below {MIN_TARGET_ECC} (identity "
-                f"{cc_id:.4f} passed) — the scene is right but the target is not"
+                f"{cc_id:.4f} passed, and the seat is {want} — {other_key} scores only "
+                f"{cc_rival:.4f}) — the scene is right but the target is not"
             )
 
         d_cam = np.array([du * depth / self.fx, dv * depth / self.fy, 0.0])
         d_mm = (self.rot @ d_cam) * 1000.0
         note = (
             f"du={du:+.4f} dv={dv:+.4f} px, Z={depth * 1000:.1f} mm, "
-            f"ECC={cc:.4f} on {tarea} px (identity {cc_id:.4f} on {area} px)"
+            f"ECC={cc:.4f} on {tarea} px (identity {cc_id:.4f} on {area} px, "
+            f"seat {want} by {cc:.4f} over {cc_rival:.4f})"
         )
         return d_mm, float(cc), note
 
@@ -486,7 +553,7 @@ class Node:
                     if teach:
                         self.teach(kind, step, holder)
                     else:
-                        d, quality, note = self.observe(key)
+                        d, quality, note = self.observe(kind, step, holder)
                         if d is None:
                             raise SystemExit(note)
                         print(
@@ -556,7 +623,7 @@ class Node:
         kind = self.args.kind if self.args.kind is not None else int(self.get("Vision:Kind"))
         key = ref_key(kind, step, holder)
         print(f"would answer {KINDS.get(kind, kind)} at step {step} as {key}:")
-        d, quality, note = self.observe(key)
+        d, quality, note = self.observe(kind, step, holder)
         if d is None:
             print(f"  INVALID — {note}")
             return
@@ -574,7 +641,7 @@ class Node:
             )
             d, quality = None, 0.0
         else:
-            d, quality, note = self.observe(ref_key(kind, step, holder))
+            d, quality, note = self.observe(kind, step, holder)
             verdict = "INVALID — " + note if d is None else note
             print(f"request {req} ({label}) at step {step}: {verdict}", flush=True)
 
