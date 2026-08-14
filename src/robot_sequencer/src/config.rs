@@ -262,7 +262,8 @@ pub struct HandEyeConfig {
     pub solve_python: PathBuf,
     /// The AprilTag detector driven over stdin/stdout.
     pub detector: PathBuf,
-    /// Directory `samples.yaml` is written to.
+    /// Directory each capture's `samples_<timestamp>.yaml` is written to,
+    /// alongside the one `aim_pose.yaml` they share.
     pub out_dir: PathBuf,
     /// Largest tool rotation in the schedule (deg). The tag must stay in
     /// frame at the extremes, so this is bounded by how near the image

@@ -228,7 +228,9 @@ vision:
 # is logged once a second, the second starts the capture from wherever
 # the arm then is. The arm rotates the tool about its own axes, samples
 # the tag at each stop, and returns to where it started. Solve with:
-#   <solve_python> tools/handeye/solve_joint.py <out_dir>/samples.yaml
+#   <solve_python> tools/handeye/solve_joint.py <out_dir>/samples_<timestamp>.yaml
+# (the capture logs the exact path it wrote; each one gets its own name so
+# a second capture cannot quietly replace the first)
 handeye:
   # Two interpreters because no one environment here has both halves: the
   # detector needs pyepics to reach the camera's PVs, the solver needs

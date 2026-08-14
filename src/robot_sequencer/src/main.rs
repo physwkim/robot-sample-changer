@@ -92,7 +92,7 @@ fn run() -> Result<(), SequencerError> {
     log::info("    2=SampleHolder calibration (0-8, wait, 16-23)");
     log::info("    3=Hand-eye calibration (trigger, jog to aim, trigger again; tool rotations");
     log::info(&format!(
-        "      ±{:.0} deg in place -> {}/samples.yaml)",
+        "      ±{:.0} deg in place -> {}/samples_<timestamp>.yaml)",
         config.handeye.angle_deg,
         config.handeye.out_dir.display()
     ));

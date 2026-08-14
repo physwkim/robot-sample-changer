@@ -206,6 +206,5 @@ fx σ 1.98 → 0.86, t_z σ 1.25 → 0.49로 조인다. `calibrateHandEye`에서
 - [ ] 10 mm 홀더 태그·근거리(70~150 mm) 외삽 검증. 보정은 100 mm 태그·294 mm
       에서 했다
 - [ ] URDF에 카메라 링크 추가(`vision_correction_plan.md:299`)
-- [ ] `out_dir`이 고정이라 캡처마다 `samples.yaml`을 덮어쓴다
 - [ ] 축별 축퇴 게이트 없음
 - [ ] UR3e 절대 정확도 0.59 mm — 기구학 보정은 별개 작업

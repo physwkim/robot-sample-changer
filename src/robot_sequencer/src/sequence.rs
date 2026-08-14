@@ -734,7 +734,16 @@ impl<'a> Sequencer<'a> {
             ));
             return Ok(None);
         }
-        let path = out_dir.join("samples.yaml");
+        // Timestamped, never a fixed name: a second capture used to
+        // overwrite the first without saying so, and did — the poses the
+        // calibration of record was fitted to were nearly lost that way.
+        // The aim pose keeps its fixed path beside it, because "the last
+        // aim worth returning to" is exactly one thing and a capture
+        // replacing it is the intent.
+        let path = out_dir.join(format!(
+            "samples_{}.yaml",
+            chrono::Local::now().format("%Y%m%d_%H%M%S")
+        ));
         handeye::write_samples(&path, &samples, angle_deg, detector.intrinsics())?;
         // Saved from here, not from the aiming hold: this is the pose the
         // capture actually ran from and the tag was demonstrably visible

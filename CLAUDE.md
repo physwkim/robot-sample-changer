@@ -182,7 +182,7 @@ caput Robot:Trigger 1     # 1회차: aiming hold 진입, 검출기 기동
 # "not detected from here"가 계속 뜨면 여기서 멈추는 게 맞습니다.
 caput Robot:Trigger 1     # 2회차: 현재 자세를 home으로 잡고 수집 시작
 # 끝나면
-<handeye.python> tools/handeye/solve.py <out_dir>/samples.yaml
+<handeye.solve_python> tools/handeye/solve_joint.py <out_dir>/samples_<timestamp>.yaml
 ```
 
 2회차 트리거 시점의 자세를 home으로 잡고 툴 x/y/z축 둘레 12자세를 돌며(축 3개는

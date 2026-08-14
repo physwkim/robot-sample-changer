@@ -2,7 +2,7 @@
 //!
 //! What lives here is everything the daemon needs to turn a pose into a
 //! sample — the pose schedule, the AprilTag detector child, and the
-//! `samples.yaml` writer. The motion loop that drives it stays in
+//! samples writer. The motion loop that drives it stays in
 //! [`crate::sequence`], where `Stop` and the trigger loop already have an
 //! owner.
 //!

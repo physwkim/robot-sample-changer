@@ -241,7 +241,7 @@ standby 자세이고 거기서 jog를 허용하면 시퀀스의 시작점이 움
 
 자세마다 home으로 복귀하므로 검출 실패가 누적되지 않고, 모든 이동은
 시퀀스와 같은 충돌 씬을 통과하는 계획 이동이다. 결과는
-`handeye.out_dir/samples.yaml`.
+`handeye.out_dir/samples_<timestamp>.yaml` (캡처마다 새 이름).
 
 **공전(orbit)이 아니라 제자리 회전인 이유.** `calibrateHandEye`가 원하는
 것은 회전 다양성이지 병진이 아니고, 셀이 좁다. 290 mm에서 100 mm 태그는
