@@ -20,8 +20,11 @@ NAMES = {
     RS2_NONE: "NONE",
     RS2_MODIFIED_BC: "MODIFIED_BROWN_CONRADY",
     RS2_INVERSE_BC: "INVERSE_BROWN_CONRADY  <- IOC가 보고하는 모델",
+    RS2_FTHETA: "FTHETA",
     RS2_BC: "BROWN_CONRADY",
+    RS2_KB4: "KANNALA_BRANDT4",
 }
+COMPARED = (RS2_NONE, RS2_MODIFIED_BC, RS2_INVERSE_BC, RS2_BC)
 
 
 class RS2Intrinsics(ctypes.Structure):
@@ -103,9 +106,11 @@ cvp = cv_project(GRID)
 print(f"intrinsics fx={FX} fy={FY} cx={PPX} cy={PPY}, z={Z * 1000:.0f} mm")
 print(f"coeffs     {COEFFS}\n")
 
-for model in (RS2_NONE, RS2_MODIFIED_BC, RS2_INVERSE_BC, RS2_BC):
+worst = {}
+for model in COMPARED:
     rsp = rs_project(model, GRID)
     d = np.linalg.norm(rsp - cvp, axis=1)
+    worst[model] = d.max()
     print(f"{NAMES[model]}")
     for lab, a, b, e in zip(LABELS, rsp, cvp, d):
         print(
@@ -114,11 +119,31 @@ for model in (RS2_NONE, RS2_MODIFIED_BC, RS2_INVERSE_BC, RS2_BC):
         )
     print(f"   -> max diff vs cv2.projectPoints: {d.max():.4f} px\n")
 
-# What it costs to get it wrong: the same undistorted ray, projected under
-# the two candidate conventions, differs by this much in pixels -- and a
-# tag corner misplaced by that lands directly in solvePnP's answer.
+# Stated here rather than left to the reader: this script is cited as the
+# authority for passing the coefficients to cv2 unchanged, and a caller
+# paraphrasing a table is how an explanation nobody measured gets attached
+# to it. Whatever it prints is what the citing comments should say.
+best = min(worst, key=worst.get)
+print(f"결론: cv2.projectPoints와 일치하는 librealsense 모델은 {NAMES[best].split()[0]}")
+print(f"  최대 불일치 {worst[best]:.4f} px.")
+tie = [
+    NAMES[m].split()[0]
+    for m in COMPARED
+    if m not in (best, RS2_INVERSE_BC) and worst[m] == worst[RS2_INVERSE_BC]
+]
+print(
+    f"  IOC가 보고하는 INVERSE_BROWN_CONRADY는 {worst[RS2_INVERSE_BC]:.4f} px 차이며,\n"
+    f"  librealsense 안에서 {', '.join(tie)}와 같은 값을 낸다 — 즉 이 잔차는\n"
+    "  librealsense의 분기 차이지 OpenCV와의 규약 차이가 아니다. 어느 쪽이든\n"
+    "  계수는 그대로 넘기면 되고 오차는 위 값이 상한이다.\n"
+)
+
+# What it costs to get it wrong: the same undistorted ray, projected with
+# and without the coefficients, differs by this much in pixels -- and a
+# tag corner misplaced by that lands directly in solvePnP's answer. Uses
+# the model that matched cv2, since that is the one actually in effect.
 none_px = rs_project(RS2_NONE, GRID)
-inv_px = rs_project(RS2_INVERSE_BC, GRID)
+inv_px = rs_project(best, GRID)
 gap = np.linalg.norm(none_px - inv_px, axis=1)
 print("왜곡 무시 vs 적용 (같은 광선, 픽셀 차):")
 for lab, e in zip(LABELS, gap):

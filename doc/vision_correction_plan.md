@@ -461,12 +461,15 @@ Phase 3까지가 사용자가 요청한 "카메라로 보정"이다. Phase 4/5�
   (사양값 87°는 **틀렸다**)
 - 왜곡 모델 규약: IOC가 보고하는 `BrownConradyInverse`는 **OpenCV 정방향
   Brown-Conrady와 같다**. 이름으로 추정하지 않고 `librealsense2.so`에 직접
-  물었다 — 같은 계수로 `rs2_project_point_to_pixel`
-  (`RS2_DISTORTION_INVERSE_BROWN_CONRADY`)과 `cv2.projectPoints`가 프레임
-  모서리에서 **0.022 px** 이내로 일치한다(잔차는 librealsense의 접선항 적용
-  순서 차이). "Inverse"는 OpenCV 기준이 아니라 `MODIFIED_BROWN_CONRADY`의
+  물었다 — 같은 계수로 `rs2_project_point_to_pixel`이 `cv2.projectPoints`를
+  `RS2_DISTORTION_BROWN_CONRADY`에서 **정확히(0.0000 px)** 재현하고,
+  `INVERSE_BROWN_CONRADY`에서는 **0.0223 px** 차이가 난다. 그 0.0223 px는
+  librealsense가 INVERSE를 `MODIFIED_BROWN_CONRADY`와 **동일하게** 투영하기
+  때문에 생기는 librealsense 내부 분기 차이지, OpenCV와의 규약 차이가 아니다
+  (이전 판은 "접선항 적용 순서 차이"라고 적었으나 그건 측정된 바 없는
+  추정이었다). "Inverse"는 OpenCV 기준이 아니라 `MODIFIED_BROWN_CONRADY`의
   역투영 기준 이름이다. 따라서 계수를 그대로 solvePnP에 넣는 것이 맞고,
-  버리면 모서리에서 5.8 px = 290 mm에서 4.2 mm가 틀어진다.
+  버리면 모서리에서 5.8 px = 290 mm에서 4.3 mm가 틀어진다.
   재현: `tools/handeye/check_distortion_model.py`
 - 검출 재현성: 정지 태그 20회 연속 검출에서 σ = (0.015, 0.008, 0.056) mm,
   20/20 서로 다른 프레임. 단 이는 아래 두 버그를 고친 뒤의 값이다 —

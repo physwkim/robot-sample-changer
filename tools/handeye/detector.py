@@ -60,15 +60,17 @@ MIN_PLANE_PX = 500
 # holder tag and must not be mistaken for the calibration target.
 TAG_ID = int(os.environ.get("HANDEYE_TAG_ID", "0"))
 # RSDistModel reports BrownConradyInverse, which reads like the opposite
-# of the forward Brown-Conrady model solvePnP assumes. It is not: asking
-# librealsense2.so itself, rs2_project_point_to_pixel under
-# RS2_DISTORTION_INVERSE_BROWN_CONRADY agrees with cv2.projectPoints on
-# the same coefficients to 0.022 px at the frame corners (the residue is
-# librealsense applying the tangential terms in a different order).
-# "Inverse" names the direction relative to MODIFIED_BROWN_CONRADY's
-# deprojection, not relative to OpenCV. So the coefficients go in as-is;
-# dropping them would move a corner by 5.8 px, 4.2 mm at 290 mm.
-# tools/handeye/check_distortion_model.py reproduces the comparison.
+# of the forward Brown-Conrady model solvePnP assumes. It is not. Asking
+# librealsense2.so itself, rs2_project_point_to_pixel on these same
+# coefficients reproduces cv2.projectPoints exactly (0.0000 px over the
+# frame) under RS2_DISTORTION_BROWN_CONRADY, and to 0.0223 px under
+# INVERSE_BROWN_CONRADY -- which librealsense projects identically to
+# MODIFIED_BROWN_CONRADY, so that residue is a branch difference inside
+# librealsense and not a disagreement with OpenCV. "Inverse" names the
+# direction relative to MODIFIED_BROWN_CONRADY's deprojection, not
+# relative to OpenCV. So the coefficients go in as-is; dropping them
+# would move a corner by 5.8 px, 4.3 mm at 290 mm.
+# tools/handeye/check_distortion_model.py prints all of this.
 
 
 def reply(**kw):
