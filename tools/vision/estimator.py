@@ -21,9 +21,19 @@ import cv2
 import numpy as np
 from epics import PV
 
-# Everything the D405 shows at a standby pose is either the holder stack
-# (~75 mm) or the room (675 mm and beyond). The gate keeps the near side.
-DEFAULT_GATE = (0.050, 0.250)  # m
+# The band that holds the target and nothing else: not the room, and not what
+# the tool is carrying.
+#
+# The far edge separates the holder stack from the room, 675 mm and beyond.
+# The near edge is what keeps the correction's sign meaningful. At the two
+# PlaceAlign poses the gripper holds the puck, and a puck that is gripped
+# 0.15 mm off has to be answered by moving the tool *back* by 0.15 mm, the
+# opposite of what an equal shift of the target asks for. Both objects are in
+# the frame; only depth tells them apart, and it does so cleanly — measured
+# over the four taught poses, the gripped puck never reaches past 75.6 mm and
+# no world-fixed pixel comes nearer than 109.5 mm, with 80-105 mm empty in
+# every one of them.
+DEFAULT_GATE = (0.090, 0.250)  # m
 # The IOC reports depth in units of 0.0001 m (D405-specific).
 DEPTH_UNIT_M = 1e-4
 
