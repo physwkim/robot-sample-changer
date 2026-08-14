@@ -14,7 +14,10 @@ What this node measures, and does not:
   standby pose (§13), the holder stack fills the depth gate, and the estimator
   in `estimator.py` recovers how far the scene has slid since a taught
   reference. Its floor is 0.0010 mm against an arm that repeats to 0.022 mm
-  (§14) — the measurement is not what limits this.
+  (§14) — the measurement is not what limits this. The answer comes out of two
+  correlations rather than one: the whole column says *whether this is the
+  right scene*, the target alone says *how far it moved*. §15.9 measured why
+  neither window can do both.
 - **Grip Offset** (kind 2) and **Seating** (kind 4). Not measured, and this
   node says so: it answers `Valid = 0` rather than zeros. Zeros would read as
   "perfectly aligned" and "seated", pass the deadband, and be indistinguishable
@@ -93,12 +96,39 @@ TEACH_STOPS = ((1, 1), (7, 3), (12, 1), (18, 3))
 # Below this the target is not in the gate at all, and the answer is not a
 # small correction but "the arm is not where the reference was taught".
 MIN_GATE_PX = 500
-# ECC correlation below this is not a shifted view of the reference scene.
-# The 20-cycle campaign ran 0.9723..0.9981 with the arm doing real work.
-MIN_ECC = 0.90
 # Grown around the target's bounding box so the correlation has context and
 # a shifted feature does not leave the crop.
 CROP_MARGIN_PX = 24
+
+# The two correlation floors, one per stage (§15.9). They are different
+# numbers because the stages answer different questions of the same frame.
+#
+# Identity, over the whole column: is this the scene the reference was taught
+# in? Wrong holder correlates at 0.481..0.681 — the holders are nominally
+# identical, and it is the *neighbours* that tell them apart, so this stage
+# needs the wide window. One neighbouring slot changing its load costs 0.868,
+# and 0.78 sits in that valley: a rack whose loadout moved on still passes,
+# a reference from another holder does not.
+MIN_IDENTITY_ECC = 0.78
+# Measurement, over the target alone: the arm's own re-approach ran
+# 0.9723..0.9997 with the arm doing real work, so anything near the identity
+# floor here means the target itself is not what was taught.
+MIN_TARGET_ECC = 0.90
+
+# How the target window is found. Not a tuned rectangle — the pose pairs
+# below visit the same standby twice, once with the puck present and once
+# without, so the target is simply what changes between them.
+POSE_PAIRS = ((1, 18), (7, 12))
+STEP_KIND = {step: kind for step, kind in TEACH_STOPS}
+# A frame-to-frame difference in DN that is the puck leaving rather than the
+# sensor's 1.41 DN pixel noise (§12.3), and the smallest blob worth calling
+# part of the target.
+TARGET_DIFF_DN = 40
+MIN_TARGET_PX = 100
+# Room for the correlation to slide without pulling a neighbour in. The
+# measurement stage wants the target and little else — that immunity to the
+# neighbours is the whole point of splitting the stages.
+TARGET_MARGIN_PX = 8
 
 
 def load_transform(path):
@@ -147,6 +177,42 @@ def ref_key(kind, step, holder):
     return f"k{kind}_s{step}"
 
 
+def target_box(fa, za, fb, zb, gate):
+    """Where the puck is, from a full frame and an empty one of the same pose.
+
+    Both frames have to be gated in for a pixel to count. The puck the gripper
+    is carrying is out of the gate in one of them and world-fixed geometry
+    stands behind it in the other, so without that intersection the biggest
+    "change" in the frame is the occlusion rather than the target.
+    """
+    _, ga = gate_mask(za, gate)
+    _, gb = gate_mask(zb, gate)
+    both = ((ga > 0) & (gb > 0)).astype(np.uint8)
+    diff = np.abs(fa.astype(np.int16) - fb.astype(np.int16)).astype(np.uint8)
+    diff = cv2.GaussianBlur(diff, (9, 9), 0) * both
+    mask = cv2.morphologyEx(
+        (diff > TARGET_DIFF_DN).astype(np.uint8), cv2.MORPH_OPEN, np.ones((5, 5), np.uint8)
+    )
+    count, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    keep = [i for i in range(1, count) if stats[i, cv2.CC_STAT_AREA] >= MIN_TARGET_PX]
+    if not keep:
+        return None, 0
+    # The union, not the largest: the rim and the seat come out as separate
+    # blobs on some holders and both belong to the same target.
+    y0 = min(int(stats[i, cv2.CC_STAT_TOP]) for i in keep)
+    y1 = max(int(stats[i, cv2.CC_STAT_TOP] + stats[i, cv2.CC_STAT_HEIGHT]) for i in keep)
+    x0 = min(int(stats[i, cv2.CC_STAT_LEFT]) for i in keep)
+    x1 = max(int(stats[i, cv2.CC_STAT_LEFT] + stats[i, cv2.CC_STAT_WIDTH]) for i in keep)
+    m = TARGET_MARGIN_PX
+    box = (
+        max(0, y0 - m),
+        min(fa.shape[0], y1 + m),
+        max(0, x0 - m),
+        min(fa.shape[1], x1 + m),
+    )
+    return box, sum(int(stats[i, cv2.CC_STAT_AREA]) for i in keep)
+
+
 class Node:
     NAMES = (
         "Vision:Req",
@@ -181,7 +247,16 @@ class Node:
     # ---- measurement ---------------------------------------------------
 
     def observe(self, key):
-        """Measure against the stored reference for `key`.
+        """Measure against the stored reference for `key`, in two stages.
+
+        The stages exist because one window cannot do both jobs (§15.9).
+        Identity needs the whole column — the holders are nominally identical
+        and only their neighbours distinguish them, so a target-sized window
+        correlates 0.92..0.96 against the wrong holder and would answer it.
+        Measurement wants the opposite: the target alone, so that a neighbour
+        being loaded or emptied between teaching and running does not move the
+        number. Widen the measurement and it picks up the neighbours;
+        narrow the identity check and it stops being one.
 
         Returns `(d_mm, quality, note)` with `d_mm = None` when there is no
         answer to give. Every `None` carries a note, because the sequencer
@@ -192,33 +267,65 @@ class Node:
         if not os.path.exists(path):
             return None, 0.0, f"no reference taught for {key}"
         stored = np.load(path)
+        if "target" not in stored:
+            return None, 0.0, (
+                f"{key} carries no target window — it was taught before its pose pair "
+                "existed; re-run teach-run"
+            )
         window = tuple(int(v) for v in stored["window"])
+        target = tuple(int(v) for v in stored["target"])
         gate = tuple(float(v) for v in stored["gate"])
 
         frame = self.cam.grab()
         if frame is None:
             return None, 0.0, "no fresh frame from the camera"
         img, z = frame
+
+        # Stage 1 — identity, over the wide window. Nothing is measured here;
+        # the shift it recovers is thrown away.
         roi, area = build_roi(z, window, gate)
         if area < MIN_GATE_PX:
             return None, 0.0, f"gate holds {area} px in the taught window (< {MIN_GATE_PX})"
-        depth = gate_depth_m(z, window, gate)
-        if depth is None:
-            return None, 0.0, "the gate is empty; no range to scale the shift by"
-
         y0, y1, x0, x1 = window
-        shift = ecc_shift(stored["ref"], img[y0:y1, x0:x1], roi)
+        ident = ecc_shift(stored["ref"], img[y0:y1, x0:x1], roi)
+        if ident is None:
+            return None, 0.0, "the identity correlation did not converge"
+        cc_id = ident[2]
+        if cc_id < MIN_IDENTITY_ECC:
+            return None, float(cc_id), (
+                f"identity correlation {cc_id:.4f} below {MIN_IDENTITY_ECC} — this is not "
+                "the scene the reference was taught in"
+            )
+
+        # Stage 2 — the measurement, over the target alone.
+        troi, tarea = build_roi(z, target, gate)
+        if tarea < MIN_GATE_PX:
+            return None, float(cc_id), (
+                f"gate holds {tarea} px on the target (< {MIN_GATE_PX})"
+            )
+        depth = gate_depth_m(z, target, gate)
+        if depth is None:
+            return None, float(cc_id), "the target's gate is empty; no range to scale by"
+        ty0, ty1, tx0, tx1 = target
+        shift = ecc_shift(
+            stored["frame"][ty0:ty1, tx0:tx1].astype(np.float32),
+            img[ty0:ty1, tx0:tx1],
+            troi,
+        )
         if shift is None:
-            return None, 0.0, "ECC did not converge"
+            return None, float(cc_id), "the target correlation did not converge"
         du, dv, cc = shift
-        if cc < MIN_ECC:
-            return None, float(cc), f"ECC correlation {cc:.4f} below {MIN_ECC}"
+        if cc < MIN_TARGET_ECC:
+            return None, float(cc), (
+                f"target correlation {cc:.4f} below {MIN_TARGET_ECC} (identity "
+                f"{cc_id:.4f} passed) — the scene is right but the target is not"
+            )
 
         d_cam = np.array([du * depth / self.fx, dv * depth / self.fy, 0.0])
         d_mm = (self.rot @ d_cam) * 1000.0
         note = (
             f"du={du:+.4f} dv={dv:+.4f} px, Z={depth * 1000:.1f} mm, "
-            f"ECC={cc:.4f}, gate={area} px"
+            f"ECC={cc:.4f} on {tarea} px (identity {cc_id:.4f} on {area} px)"
         )
         return d_mm, float(cc), note
 
@@ -227,7 +334,11 @@ class Node:
     def cmd_teach(self):
         if self.args.kind is None:
             raise SystemExit("--kind is required: 1=PickAlign, 3=PlaceAlign")
-        self.teach(self.args.kind, int(self.get("CurrentStep")), int(self.get("Holder")))
+        holder = int(self.get("Holder"))
+        self.teach(self.args.kind, int(self.get("CurrentStep")), holder)
+        # A single pose is half of a pair; this completes the target window if
+        # the other half is already on disk, and says so plainly if it is not.
+        self.pair_targets(holder)
 
     def teach(self, kind, step, holder):
         """Capture the reference for one observation pose, from the frame now.
@@ -281,6 +392,47 @@ class Node:
             + (f", holder {holder}" if step in RACK_STEPS else "")
         )
         print(f"  window {window}, gate {area} px, range {depth * 1000:.1f} mm")
+
+    def pair_targets(self, holder):
+        """Give every reference its target window, from the pose it shares.
+
+        A pose is visited twice per cycle with the puck on either side of the
+        gripper — the rack at steps 1 and 18, the sample holder at 7 and 12 —
+        so the target does not have to be described. It is what changed. This
+        runs over the stored frames once the cycle is done; it needs neither
+        the camera nor the arm, and running it again is harmless.
+        """
+        for a_step, b_step in POSE_PAIRS:
+            keys = [ref_key(STEP_KIND[s], s, holder) for s in (a_step, b_step)]
+            paths = [os.path.join(self.args.refs, k + ".npz") for k in keys]
+            missing = [k for k, p in zip(keys, paths) if not os.path.exists(p)]
+            if missing:
+                print(f"cannot pair steps {a_step}/{b_step}: {', '.join(missing)} missing")
+                continue
+            a, b = (np.load(p) for p in paths)
+            box, changed = target_box(
+                a["frame"],
+                a["depth_map"].astype(float),
+                b["frame"],
+                b["depth_map"].astype(float),
+                tuple(float(v) for v in a["gate"]),
+            )
+            if box is None:
+                print(
+                    f"cannot pair steps {a_step}/{b_step}: nothing changed between the "
+                    "two frames — was the puck actually moved?"
+                )
+                continue
+            for key, path in zip(keys, paths):
+                stored = dict(np.load(path))
+                stored["target"] = np.array(box)
+                np.savez(path, **stored)
+            _, area = build_roi(a["depth_map"].astype(float), box,
+                                tuple(float(v) for v in a["gate"]))
+            print(
+                f"paired {keys[0]} + {keys[1]}: target {box}, "
+                f"{changed} px changed, gate {area} px"
+            )
 
     def cmd_check_run(self):
         """Drive one cycle and answer at each stop without teaching.
@@ -357,6 +509,10 @@ class Node:
             raise SystemExit(f"{len(done)} done before the interrupt")
         bot.put("PauseStep", 0)
         bot.put("Wait", 0)
+
+        if teach:
+            print()
+            self.pair_targets(holder)
 
         print(f"\n{len(done)}/{len(TEACH_STOPS)} ok: {', '.join(done)}")
         if failed:
