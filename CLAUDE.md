@@ -151,13 +151,21 @@ wait 종료(1=continue, 2=skip) 시 `Loaded=0`.
 
 ### Vision 미세 보정 (기본 off)
 
-`sequencer.yaml`의 `vision.enabled: true`면 Normal 모드의 4개 하강
-(스텝 3/9/14/20) 직전에 look-then-move 보정이 걸립니다: 시퀀서가
-Req(id)/Kind로 측정을 요청하고, 비전 노드가 DX/DY/DZ(mm, TCP-로컬)를
-쓰고 Done에 id를 에코. deadband(`min_correction`) 미만은 무시,
-`max_correction` 초과·Valid=0·타임아웃은 시퀀스 정지(StartStep 재개는
-기존과 동일). 스텝 5/16 후 파지 편차(Grip Offset)를 측정해 다음 놓기
-보정에 합산하고, 스텝 11/22 후 안착 검사(Seated/Tilt) — 불합격이면 정지.
+`sequencer.yaml`의 `vision.enabled: true`면 Normal 모드에 look-then-move
+보정이 걸립니다: 시퀀서가 Req(id)/Kind로 측정을 요청하고, 비전 노드가
+DX/DY/DZ(mm, TCP-로컬)를 쓰고 Done에 id를 에코. deadband(`min_correction`)
+미만은 무시, `max_correction` 초과·Valid=0·타임아웃은 시퀀스 정지(StartStep
+재개는 기존과 동일).
+
+측정은 **standby 자세**에서 합니다 — 스텝 1/12 후 픽 정렬, 스텝 7/18 후
+플레이스 정렬. 보정은 뒤따르는 above/on 쌍(2·3, 8·9, 13·14, 19·20)에
+적용됩니다. above에서 재지 않는 이유는 거기서 파지점이 480행 화면보다
+55행 아래로 투영되고 화면 중앙이 한 칸 위 홀더이기 때문입니다
+(doc/vision_correction_plan.md §12.4). 측정 자세와 적용 자세가 달라서
+보정량은 관측 자세의 툴 프레임을 달고 다니며(`Correction`), 적용 시
+대상 자세의 툴 프레임으로 회전됩니다. 스텝 5/16 후 파지 편차(Grip
+Offset)를 측정해 다음 놓기 보정에 합산하고, 스텝 12/23 후 안착
+검사(Seated/Tilt) — 불합격이면 정지.
 `observe_only: true`는 Phase C 관찰 모드(측정·로그만, 이동/정지 없음).
 캘리브레이션 모드에는 훅이 없습니다(티칭 오차를 가리므로). 카메라 없는
 리허설은 `vision_sim` 바이너리가 비전 노드를 대신합니다

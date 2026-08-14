@@ -272,6 +272,166 @@ mod tests {
         assert!(after.rotation.angle_to(&expected.rotation) < 1e-3);
     }
 
+    /// The wrist camera as calibrated: `T_ee_cam` plus the intrinsics,
+    /// enough to ask where a point in the tool frame lands in the image.
+    struct Camera {
+        r: nalgebra::Rotation3<f64>,
+        t: nalgebra::Vector3<f64>,
+        fx: f64,
+        fy: f64,
+        cx: f64,
+        cy: f64,
+    }
+
+    /// The IOC's current frame size. The 1280x720 switch is still a
+    /// proposal; if it lands, the margins below only grow.
+    const FRAME: (f64, f64) = (640.0, 480.0);
+
+    impl Camera {
+        fn load() -> Self {
+            let text = std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../T_ee_cam.yaml"
+            ))
+            .expect("T_ee_cam.yaml");
+            let v: serde_yaml::Value = serde_yaml::from_str(&text).expect("parse T_ee_cam");
+            let nums = |val: &serde_yaml::Value| -> Vec<f64> {
+                val.as_sequence()
+                    .expect("sequence")
+                    .iter()
+                    .map(|x| x.as_f64().expect("number"))
+                    .collect()
+            };
+            let ee_cam = &v["T_ee_cam"];
+            let t = nums(&ee_cam["translation_m"]);
+            let rows: Vec<Vec<f64>> = ee_cam["rotation_matrix"]
+                .as_sequence()
+                .expect("rotation_matrix")
+                .iter()
+                .map(nums)
+                .collect();
+            let k = nums(&v["camera_matrix"]);
+            Self {
+                r: nalgebra::Rotation3::from_matrix_unchecked(nalgebra::Matrix3::new(
+                    rows[0][0], rows[0][1], rows[0][2], rows[1][0], rows[1][1], rows[1][2],
+                    rows[2][0], rows[2][1], rows[2][2],
+                )),
+                t: nalgebra::Vector3::new(t[0], t[1], t[2]),
+                fx: k[0],
+                cx: k[2],
+                fy: k[4],
+                cy: k[5],
+            }
+        }
+
+        /// Pixel coordinates of a point given in the tool frame of the
+        /// pose the picture is taken from, or `None` behind the camera.
+        fn project(&self, p_tool: nalgebra::Vector3<f64>) -> Option<(f64, f64)> {
+            let p = self.r.inverse() * (p_tool - self.t);
+            (p.z > 0.0).then(|| (self.fx * p.x / p.z + self.cx, self.fy * p.y / p.z + self.cy))
+        }
+
+        fn in_frame(&self, p_tool: nalgebra::Vector3<f64>) -> bool {
+            self.project(p_tool)
+                .is_some_and(|(u, v)| (0.0..FRAME.0).contains(&u) && (0.0..FRAME.1).contains(&v))
+        }
+    }
+
+    /// Every vision hook must observe from a pose that has the target in
+    /// the picture. The hooks used to fire at the above poses, where the
+    /// grasp point projects below the bottom of the frame and the disc
+    /// filling the middle belongs to the next holder up — a detector
+    /// would lock onto the wrong holder with confidence. Moving them to
+    /// the standby poses is what this test pins: the target in frame
+    /// from standby, and still out of frame from above so the old
+    /// placement cannot quietly come back.
+    #[test]
+    fn the_hooks_observe_from_poses_that_see_the_target() {
+        let (model, config) = production_model();
+        let w = WaypointData::load(&config.sequence.waypoints_yaml).expect("waypoints");
+        let cam = Camera::load();
+        let local = |from: &JointMap, to: &JointMap| -> nalgebra::Vector3<f64> {
+            let (a, b) = (model.fk(from).unwrap(), model.fk(to).unwrap());
+            a.inverse_transform_point(&nalgebra::Point3::from(b.translation.vector))
+                .coords
+        };
+        for (tag, standby, on, above) in observation_poses(&model, &config, &w) {
+            assert!(
+                cam.in_frame(local(&standby, &on)),
+                "{tag}: the grasp point is not in the picture from standby"
+            );
+            assert!(
+                !cam.in_frame(local(&above, &on)),
+                "{tag}: the grasp point is in the picture from above — if the camera \
+                 or the above offset changed, the hooks can move back"
+            );
+        }
+    }
+
+    /// `(tag, standby, on_position, above)` for each pose pair a vision
+    /// hook fires at, built the way `compute_run_waypoints` builds them.
+    fn observation_poses(
+        model: &Model,
+        config: &Config,
+        w: &WaypointData,
+    ) -> Vec<(String, JointMap, JointMap, JointMap)> {
+        let taught = |v: &[f64]| -> JointMap { WaypointData::arm_joints(v).into_iter().collect() };
+        let ho = [
+            w.holder1_on_x_offset,
+            w.holder1_on_y_offset,
+            w.holder1_on_z_offset,
+        ];
+        let sho = [
+            w.sample_holder_on_x_offset,
+            w.sample_holder_on_y_offset,
+            w.sample_holder_on_z_offset,
+        ];
+        let h_standby0 = model
+            .apply_cartesian_offset(&taught(&w.holder1_standby), ho, false, "s")
+            .unwrap();
+        let h_on0 = model
+            .apply_cartesian_offset(&taught(&w.holder1_on_position), ho, false, "o")
+            .unwrap();
+        let sh_standby = taught(&w.sample_holder_standby);
+        let sh_on = model
+            .apply_cartesian_offset(&taught(&w.sample_holder_on_position), sho, false, "sho")
+            .unwrap();
+        let sh_above = model
+            .apply_cartesian_offset(&sh_on, [0.0, w.above_y_offset, 0.0], false, "sha")
+            .unwrap();
+
+        // Holders 1 and 10 are the rail ends and 3 is a middle one; if
+        // the framing survives the ends it survives what lies between.
+        let mut out = vec![("sample_holder".to_string(), sh_standby, sh_on, sh_above)];
+        for holder in [1, 3, 10] {
+            let y = f64::from(holder - 1) * config.sequence.holder_offset;
+            let (mut x, mut z) = (0.0, 0.0);
+            if (2..=10).contains(&holder) {
+                let i = (holder - 2) as usize;
+                x = w.holder_multi_x_offsets.get(i).copied().unwrap_or(0.0);
+                z = w.holder_multi_z_offsets.get(i).copied().unwrap_or(0.0);
+            }
+            let base = if holder == 10 {
+                model
+                    .apply_cartesian_offset(&h_standby0, [0.0, -0.005, 0.0], false, "s10")
+                    .unwrap()
+            } else {
+                h_standby0.clone()
+            };
+            let standby = model
+                .apply_cartesian_offset(&base, [x, y, z], false, "sb")
+                .unwrap();
+            let on = model
+                .apply_cartesian_offset(&h_on0, [x, y, z], false, "on")
+                .unwrap();
+            let above = model
+                .apply_cartesian_offset(&on, [0.0, w.above_y_offset, 0.0], false, "ab")
+                .unwrap();
+            out.push((format!("holder {holder}"), standby, on, above));
+        }
+        out
+    }
+
     /// Zero offset must return the input unchanged without invoking IK.
     #[test]
     fn zero_offset_is_identity() {

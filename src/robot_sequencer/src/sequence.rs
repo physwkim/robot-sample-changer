@@ -47,6 +47,33 @@ struct BaseWaypoints {
     sample_holder_above: JointMap,
 }
 
+/// One vision measurement: how far the target sits from where the taught
+/// waypoint puts it, in mm.
+///
+/// The three numbers are meaningless without the pose they were measured
+/// from. The camera rides the tool, so the vision node can only answer in
+/// the tool frame of wherever the arm was standing — and since the hooks
+/// observe at a standby pose and correct an above pose, that is no longer
+/// the frame being corrected. Carrying the observation frame here is what
+/// stops the two from being confused; the numbers alone cannot say which
+/// they belong to.
+#[derive(Debug, Clone, Copy)]
+struct Correction {
+    /// mm, in `frame`'s tool frame.
+    d: [f64; 3],
+    /// Tool orientation at the observation pose, in the model frame.
+    frame: nalgebra::UnitQuaternion<f64>,
+}
+
+impl Correction {
+    /// The same physical displacement, in `target`'s tool frame.
+    fn in_frame(&self, target: &nalgebra::UnitQuaternion<f64>) -> [f64; 3] {
+        let world = self.frame * nalgebra::Vector3::new(self.d[0], self.d[1], self.d[2]);
+        let local = target.inverse_transform_vector(&world);
+        [local.x, local.y, local.z]
+    }
+}
+
 /// The per-trigger waypoint set the step tables index into.
 struct RunWaypoints {
     standby: JointMap,
@@ -262,52 +289,58 @@ impl<'a> Sequencer<'a> {
     /// Normal mode, steps 0-23 with the measurement wait after step 12.
     /// Returns whether steps 13-23 were skipped (`Wait` = 2).
     ///
-    /// The vision hooks (all no-ops unless `vision.enabled`) hang off
-    /// the four above→on descents: measure at the taught above pose,
-    /// fold the gated correction into the descent and the matching
-    /// ascent. Each `measure` condition requires that THIS run executed
-    /// the above step — after a resume that skipped it the arm's pose
-    /// is not the calibrated measurement pose, so no measurement is
-    /// taken. Calibration modes get no hooks: they exist to measure the
-    /// taught error, which a correction would mask.
+    /// The vision hooks (all no-ops unless `vision.enabled`) observe from
+    /// the standby poses, not from above. Above is where the correction
+    /// is applied and it was where the measurement used to be taken, but
+    /// the target is not in the picture there: the grasp point projects
+    /// 55 rows below a 480-row frame and what fills the middle is the
+    /// next holder up (doc/vision_correction_plan.md §12.4). From
+    /// standby the same point sits at (306, 330), 11 deg off axis, and
+    /// the sample-holder seat at (313, 277) — both near the centre.
+    ///
+    /// Applying at a different pose than it was measured from is why a
+    /// correction travels as a [`Correction`] with its frame attached.
+    /// It also removes the lateral via: the shift now happens on the way
+    /// to above, so every descent is straight down again.
+    ///
+    /// Each `measure` condition requires that THIS run executed the step
+    /// that parks the arm at the observation pose — after a resume that
+    /// skipped it the arm is somewhere else, so no measurement is taken.
+    /// Calibration modes get no hooks: they exist to measure the taught
+    /// error, which a correction would mask.
     fn run_normal(&mut self, w: &RunWaypoints, start: i32) -> Result<bool, SequencerError> {
         self.hand(0, "open_hand", true, start)?;
         self.arm(1, "holder_standby", &w.standby, start)?;
-        self.cartesian(2, "holder_above", &w.above, start)?;
 
-        let d_pick = self.vision_correction(start <= 2, VisionKind::PickAlign, "pick@rack")?;
+        let d_pick =
+            self.vision_correction(start <= 1, &w.standby, VisionKind::PickAlign, "pick@rack")?;
         let above_c = self.corrected(&w.above, d_pick, "holder_above+vision")?;
         let on_c = self.corrected(&w.on_pos, d_pick, "holder_on_position+vision")?;
-        self.cartesian_via(
-            3,
-            "holder_on_position",
-            d_pick.is_some().then_some(&above_c),
-            &on_c,
-            start,
-        )?;
+        self.cartesian(2, "holder_above", &above_c, start)?;
+        self.cartesian(3, "holder_on_position", &on_c, start)?;
         self.hand(4, "close_gripper", false, start)?;
         self.cartesian(5, "holder_above_return", &above_c, start)?;
-        let d_grip = self.vision_correction(start <= 5, VisionKind::GripOffset, "grip@rack")?;
+        let d_grip =
+            self.vision_correction(start <= 5, &above_c, VisionKind::GripOffset, "grip@rack")?;
         self.cartesian(6, "holder_retreat", &w.retreat, start)?;
         self.arm(7, "sample_holder_standby", &w.sh_standby, start)?;
-        self.cartesian(8, "sample_holder_above", &w.sh_above, start)?;
 
-        let d_slot =
-            self.vision_correction(start <= 8, VisionKind::PlaceAlign, "place@sample_holder")?;
-        let d_place = self.combine_corrections(d_slot, d_grip, "place@sample_holder")?;
+        let d_slot = self.vision_correction(
+            start <= 7,
+            &w.sh_standby,
+            VisionKind::PlaceAlign,
+            "place@sample_holder",
+        )?;
+        let d_place =
+            self.combine_corrections(d_slot, d_grip, &w.sh_on_pos, "place@sample_holder")?;
         let sh_above_c = self.corrected(&w.sh_above, d_place, "sample_holder_above+vision")?;
         let sh_on_c = self.corrected(&w.sh_on_pos, d_place, "sample_holder_on+vision")?;
-        self.cartesian_via(
-            9,
-            "sample_holder_on_position",
-            d_place.is_some().then_some(&sh_above_c),
-            &sh_on_c,
-            start,
-        )?;
+        self.cartesian(8, "sample_holder_above", &sh_above_c, start)?;
+        self.cartesian(9, "sample_holder_on_position", &sh_on_c, start)?;
         self.hand(10, "open_gripper", true, start)?;
         self.cartesian(11, "sample_holder_above_return", &sh_above_c, start)?;
-        self.vision_seating_check(start <= 11, "seating@sample_holder")?;
         self.cartesian(12, "sample_holder_standby_return", &w.sh_standby, start)?;
+        self.vision_seating_check(start <= 12, "seating@sample_holder")?;
 
         let mut skip_remaining = false;
         if start <= 12 {
@@ -323,41 +356,45 @@ impl<'a> Sequencer<'a> {
         }
 
         if !skip_remaining {
-            self.cartesian(13, "sample_holder_above_2nd", &w.sh_above, start)?;
-            let d_pick2 =
-                self.vision_correction(start <= 13, VisionKind::PickAlign, "pick@sample_holder")?;
+            // The arm has stood at sh_standby since step 12, through the
+            // measurement wait, so that is the pose this observation is
+            // taken from — the wait does not move it.
+            let d_pick2 = self.vision_correction(
+                start <= 12,
+                &w.sh_standby,
+                VisionKind::PickAlign,
+                "pick@sample_holder",
+            )?;
             let sh_above2_c = self.corrected(&w.sh_above, d_pick2, "sh_above_2nd+vision")?;
             let sh_on2_c = self.corrected(&w.sh_on_pos, d_pick2, "sh_on_2nd+vision")?;
-            self.cartesian_via(
-                14,
-                "sample_holder_on_position_2nd",
-                d_pick2.is_some().then_some(&sh_above2_c),
-                &sh_on2_c,
-                start,
-            )?;
+            self.cartesian(13, "sample_holder_above_2nd", &sh_above2_c, start)?;
+            self.cartesian(14, "sample_holder_on_position_2nd", &sh_on2_c, start)?;
             self.hand(15, "close_gripper_2nd", false, start)?;
             self.cartesian(16, "sample_holder_above_2nd_return", &sh_above2_c, start)?;
-            let d_grip2 =
-                self.vision_correction(start <= 16, VisionKind::GripOffset, "grip@sample_holder")?;
+            let d_grip2 = self.vision_correction(
+                start <= 16,
+                &sh_above2_c,
+                VisionKind::GripOffset,
+                "grip@sample_holder",
+            )?;
             self.cartesian(17, "sample_holder_standby_2nd", &w.sh_standby, start)?;
             self.arm(18, "holder_standby_return", &w.standby, start)?;
-            self.cartesian(19, "holder_above_final", &w.above, start)?;
-            let d_slot2 =
-                self.vision_correction(start <= 19, VisionKind::PlaceAlign, "place@rack")?;
-            let d_place2 = self.combine_corrections(d_slot2, d_grip2, "place@rack")?;
+
+            let d_slot2 = self.vision_correction(
+                start <= 18,
+                &w.standby,
+                VisionKind::PlaceAlign,
+                "place@rack",
+            )?;
+            let d_place2 = self.combine_corrections(d_slot2, d_grip2, &w.on_pos, "place@rack")?;
             let above_f_c = self.corrected(&w.above, d_place2, "holder_above_final+vision")?;
             let on_f_c = self.corrected(&w.on_pos, d_place2, "holder_on_final+vision")?;
-            self.cartesian_via(
-                20,
-                "holder_on_position_final",
-                d_place2.is_some().then_some(&above_f_c),
-                &on_f_c,
-                start,
-            )?;
+            self.cartesian(19, "holder_above_final", &above_f_c, start)?;
+            self.cartesian(20, "holder_on_position_final", &on_f_c, start)?;
             self.hand(21, "open_gripper_final", true, start)?;
             self.cartesian(22, "holder_above_final_return", &above_f_c, start)?;
-            self.vision_seating_check(start <= 22, "seating@rack")?;
             self.cartesian(23, "holder_standby_final", &w.standby, start)?;
+            self.vision_seating_check(start <= 23, "seating@rack")?;
         }
         Ok(skip_remaining)
     }
@@ -871,11 +908,17 @@ impl<'a> Sequencer<'a> {
     // ---- vision correction ---------------------------------------------
 
     /// One correction measurement (the "look" of look-then-move).
-    /// Returns the TCP-local correction in mm to fold into the descent,
-    /// or `None` when vision/the hook is off, this run never reached the
-    /// measurement pose (`measure` false — a resume skipped the above
-    /// step, so a measurement would be taken from an unknown pose), the
-    /// correction is below the deadband, or observe_only.
+    /// Returns the correction tagged with the tool frame of `obs`, the
+    /// pose the arm is standing at while the picture is taken, or `None`
+    /// when vision/the hook is off, this run never reached the
+    /// observation pose (`measure` false — a resume skipped the step
+    /// that parks there, so the picture would be taken from an unknown
+    /// pose), the correction is below the deadband, or observe_only.
+    ///
+    /// `obs` is the waypoint the caller has just moved to, not the
+    /// arm's live joints: the two agree when the step ran, and reading
+    /// the waypoint keeps the frame exact rather than picking up
+    /// whatever settling error the servo left behind.
     ///
     /// Outside observe_only a timeout, an invalid verdict, and an
     /// over-limit correction are all errors: never guess, never
@@ -884,9 +927,10 @@ impl<'a> Sequencer<'a> {
     fn vision_correction(
         &mut self,
         measure: bool,
+        obs: &JointMap,
         kind: VisionKind,
         label: &str,
-    ) -> Result<Option<[f64; 3]>, SequencerError> {
+    ) -> Result<Option<Correction>, SequencerError> {
         let v = &self.config.vision;
         let hook_on = match kind {
             VisionKind::PickAlign => v.pick_align,
@@ -930,7 +974,10 @@ impl<'a> Sequencer<'a> {
                     "{label}: vision correction dx={:.3} dy={:.3} dz={:.3} mm (quality {:.2})",
                     d[0], d[1], d[2], r.quality
                 ));
-                Ok(Some(d))
+                Ok(Some(Correction {
+                    d,
+                    frame: self.model.fk(obs)?.rotation,
+                }))
             }
             Gate::TooLarge(mag) => Err(SequencerError(format!(
                 "{label}: vision correction {mag:.2} mm exceeds the {:.2} mm limit — not applied",
@@ -982,18 +1029,28 @@ impl<'a> Sequencer<'a> {
     /// Slot correction plus the stored grip offset. Each factor passed
     /// its own gate when measured; the sum is re-gated because it can
     /// still exceed the limit.
+    ///
+    /// The two are no longer measured from the same pose — the slot from
+    /// a standby, the grip offset from the above the arm rose to after
+    /// closing — so both are brought into `target`'s tool frame before
+    /// they are added. Summing them as raw triples would add two vectors
+    /// that live in different frames.
     fn combine_corrections(
         &self,
-        slot: Option<[f64; 3]>,
-        grip: Option<[f64; 3]>,
+        slot: Option<Correction>,
+        grip: Option<Correction>,
+        target: &JointMap,
         label: &str,
-    ) -> Result<Option<[f64; 3]>, SequencerError> {
-        let sum = match (slot, grip) {
-            (None, None) => return Ok(None),
-            (Some(a), None) => a,
-            (None, Some(b)) => b,
-            (Some(a), Some(b)) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
-        };
+    ) -> Result<Option<Correction>, SequencerError> {
+        if slot.is_none() && grip.is_none() {
+            return Ok(None);
+        }
+        let frame = self.model.fk(target)?.rotation;
+        let mut sum = [0.0; 3];
+        for c in [slot, grip].into_iter().flatten() {
+            let d = c.in_frame(&frame);
+            sum = [sum[0] + d[0], sum[1] + d[1], sum[2] + d[2]];
+        }
         let v = &self.config.vision;
         match gate_correction(sum, v.min_correction, v.max_correction) {
             Gate::Below(_) => Ok(None),
@@ -1004,7 +1061,7 @@ impl<'a> Sequencer<'a> {
                         d[0], d[1], d[2]
                     ));
                 }
-                Ok(Some(d))
+                Ok(Some(Correction { d, frame }))
             }
             Gate::TooLarge(mag) => Err(SequencerError(format!(
                 "{label}: combined vision correction {mag:.2} mm exceeds the {:.2} mm limit",
@@ -1013,19 +1070,26 @@ impl<'a> Sequencer<'a> {
         }
     }
 
-    /// `base` shifted by a vision correction (mm, TCP-local), with
+    /// `base` shifted by a vision correction, with
     /// `apply_cartesian_offset`'s fallback-to-original escape hatch
     /// closed: a correction the arm cannot realize must stop the
     /// sequence, not silently descend uncorrected.
+    ///
+    /// The correction arrives in the observation pose's tool frame and
+    /// `apply_cartesian_offset` wants it in `base`'s, so it is rotated
+    /// here. Across the taught poses the two frames differ by 0.79 deg
+    /// at the rack and 0.21 deg at the sample holder, which at the 3 mm
+    /// limit is 41 um — small, and not a reason to assume it away.
     fn corrected(
         &self,
         base: &JointMap,
-        d: Option<[f64; 3]>,
+        c: Option<Correction>,
         label: &str,
     ) -> Result<JointMap, SequencerError> {
-        let Some(d) = d else {
+        let Some(c) = c else {
             return Ok(base.clone());
         };
+        let d = c.in_frame(&self.model.fk(base)?.rotation);
         let offset = [d[0] / 1000.0, d[1] / 1000.0, d[2] / 1000.0];
         let shifted = self
             .model
@@ -1080,6 +1144,10 @@ impl<'a> Sequencer<'a> {
         self.step_epilogue(step)
     }
 
+    /// A Cartesian step. This used to take an optional via point so a
+    /// correction measured at above could be reached laterally before
+    /// the descent; measuring at standby instead folds that shift into
+    /// the move to above, and the via is gone with it.
     fn cartesian(
         &mut self,
         step: i32,
@@ -1087,31 +1155,8 @@ impl<'a> Sequencer<'a> {
         goal: &JointMap,
         start: i32,
     ) -> Result<(), SequencerError> {
-        self.cartesian_via(step, name, None, goal, start)
-    }
-
-    /// A Cartesian step with an optional pre-alignment: an active vision
-    /// correction first aligns laterally at the corrected above pose so
-    /// the descent stays vertical, then descends — both inside the one
-    /// operator-visible step number (no renumbering, resume-compatible).
-    fn cartesian_via(
-        &mut self,
-        step: i32,
-        name: &str,
-        via: Option<&JointMap>,
-        goal: &JointMap,
-        start: i32,
-    ) -> Result<(), SequencerError> {
         if !self.step_prologue(step, name, start) {
             return Ok(());
-        }
-        if let Some(via) = via {
-            self.motion.move_cartesian(
-                via,
-                self.config.sequence.velocity_scale,
-                self.config.sequence.acceleration_scale,
-                name,
-            )?;
         }
         self.motion.move_cartesian(
             goal,
@@ -1427,6 +1472,37 @@ impl<'a> Sequencer<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A correction is a physical displacement, so re-expressing it in
+    /// another tool frame must rotate it. The boundaries that matter are
+    /// the frames themselves: same frame changes nothing, a quarter turn
+    /// swaps the axes, and going out and back is the identity.
+    #[test]
+    fn a_correction_rotates_into_the_frame_it_is_applied_in() {
+        use nalgebra::{UnitQuaternion, Vector3};
+        let quarter_turn =
+            UnitQuaternion::from_axis_angle(&Vector3::z_axis(), std::f64::consts::FRAC_PI_2);
+        let c = Correction {
+            d: [1.0, 0.0, 0.0],
+            frame: quarter_turn,
+        };
+
+        let same = c.in_frame(&quarter_turn);
+        assert!((same[0] - 1.0).abs() < 1e-12 && same[1].abs() < 1e-12);
+
+        // Measured along the observation frame's x, which the quarter
+        // turn about z has pointed along the model frame's y.
+        let world = c.in_frame(&UnitQuaternion::identity());
+        assert!(world[0].abs() < 1e-12, "x {}", world[0]);
+        assert!((world[1] - 1.0).abs() < 1e-12, "y {}", world[1]);
+
+        let back = Correction {
+            d: world,
+            frame: UnitQuaternion::identity(),
+        }
+        .in_frame(&quarter_turn);
+        assert!((back[0] - c.d[0]).abs() < 1e-12 && (back[1] - c.d[1]).abs() < 1e-12);
+    }
 
     /// Boundary cases of the correction gate: `< min` is noise, `[min,
     /// max]` applies, `> max` refuses. The measure is the 3-D norm, not

@@ -133,7 +133,13 @@ vision:
   timeout: 2.0            # s to wait for the vision node's answer
   min_correction: 0.05    # mm, deadband below which corrections are noise
   max_correction: 3.0     # mm, larger corrections stop the sequence
-  pick_align: true        # before steps 3 and 14
-  grip_offset: true       # after steps 5 and 16, added to the next place
-  place_align: true       # before steps 9 and 20
-  seating_check: true     # after steps 11 and 22
+  # Each hook observes from a standby pose, where the target is near the
+  # middle of the frame, and the correction is applied to the above/on
+  # pair that follows. grip_offset is the exception and the weak one: it
+  # looks at the puck in the fingers, which rides 33 deg off the optical
+  # axis with only its near rim inside the frame, and no measurement has
+  # been taken there yet.
+  pick_align: true        # at steps 1 and 12, applied to 2/3 and 13/14
+  grip_offset: true       # at steps 5 and 16, added to the next place
+  place_align: true       # at steps 7 and 18, applied to 8/9 and 19/20
+  seating_check: true     # at steps 12 and 23, after the puck is released
