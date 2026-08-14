@@ -40,6 +40,11 @@ SIGMA_PX = 0.30
 # conservatively, and --sigma-depth exists because the answer's movement
 # with it is the honest measure of how much depth is really deciding.
 SIGMA_DEPTH_MM = 1.0
+# Ceiling for a per-axis t_ee_cam sigma before `gate` calls that axis
+# undetermined; `vision.max_correction` in config/sequencer.yaml, the
+# largest correction the sequencer will apply. Override with
+# --max-sigma-mm.
+MAX_SIGMA_MM = 3.0
 
 
 def rt(rvec, t):
@@ -300,6 +305,42 @@ def main():
     out = args[args.index("--out") + 1] if "--out" in args else "T_ee_cam.yaml"
     write_result(out, best, views, loo, path)
     print(f"\nwrote {out}")
+    return gate(best, args)
+
+
+def gate(best, args):
+    """Per-axis verdict on `t_ee_cam`, as an exit code.
+
+    A low corner residual does not mean the camera's position was
+    determined: AX = XB says nothing about `t_X` along an axis every
+    rotation shares, and pure translations say nothing about it at all --
+    the sweep views on their own put the camera at +-3000 mm while
+    fitting their own corners to 0.63 px. That failure is per-axis and
+    invisible in any whole-fit number, so it needs its own check.
+
+    The limit is the largest correction the sequencer will ever apply
+    (`vision.max_correction`): an axis the fit cannot pin down to better
+    than that cannot inform a correction along it. Absolute rather than a
+    worst/best ratio, because an anisotropic fit that is small on every
+    axis is still usable and a uniformly bad one still is not. A NaN
+    sigma -- a singular J'J, which is degeneracy in its exact form --
+    fails the comparison and so fails the gate.
+    """
+    limit = MAX_SIGMA_MM
+    if "--max-sigma-mm" in args:
+        limit = float(args[args.index("--max-sigma-mm") + 1])
+    se, _ = best[1]
+    sigmas = [float(v * 1000) for v in se[3:6]]
+    print(f"\nper-axis gate on t_ee_cam (limit {limit:.2f} mm):")
+    ok = True
+    for axis, s in zip("xyz", sigmas):
+        passed = s < limit  # NaN compares False, which is the answer here
+        ok &= passed
+        note = "" if passed else "  <- not determined; add rotations about another axis"
+        print(f"  t_{axis}  sigma {s:8.3f} mm   {'ok' if passed else 'DEGENERATE'}{note}")
+    if not ok:
+        print("VERDICT: NOT usable — one or more axes are undetermined")
+    return 0 if ok else 2
 
 
 def write_result(path, best, views, loo, path_of_samples):
@@ -356,4 +397,4 @@ def write_result(path, best, views, loo, path_of_samples):
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
