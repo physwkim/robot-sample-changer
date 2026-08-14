@@ -79,6 +79,7 @@ const MIN_PROBE_INDEPENDENCE: f64 = 0.5;
 /// A plane rather than a depth per corner: see `tag_plane` in the
 /// detector for why the alignment between the two streams makes the
 /// plane the trustworthy form.
+#[derive(Clone)]
 pub struct DepthPlane {
     /// Unit normal, pointing away from the camera.
     pub normal: [f64; 3],
@@ -93,6 +94,7 @@ pub struct DepthPlane {
 }
 
 /// What the camera saw at one pose.
+#[derive(Clone)]
 pub struct Detection {
     /// Tag pose in the camera frame, from the detector's solvePnP.
     pub cam_t_tag: Isometry3<f64>,

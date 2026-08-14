@@ -548,12 +548,23 @@ impl<'a> Sequencer<'a> {
     /// returns an empty sweep and lets the rotation set run alone. The
     /// sweep improves the lens model; it is not what makes a capture
     /// valid, so it must not be able to stop one.
+    ///
+    /// Each probe that saw the tag is also pushed onto `samples`. These
+    /// two poses are a 20 mm pure translation from home at an unchanged
+    /// orientation, which the rotation schedule contains nothing like,
+    /// and that is the geometry a look-then-move correction actually
+    /// executes — so the calibration was being fitted without ever
+    /// sampling it. They land in `samples` rather than in the return
+    /// value because every early return above discards the sweep, and a
+    /// probe that succeeded before a later one failed is still a good
+    /// observation.
     fn handeye_probe_frame(
         &mut self,
         detector: &mut handeye::Detector,
         home: &JointMap,
         home_pose: &nalgebra::Isometry3<f64>,
         at_home: &handeye::Detection,
+        samples: &mut Vec<handeye::Sample>,
     ) -> Result<Vec<(String, [f64; 2])>, SequencerError> {
         let velocity = self.config.handeye.velocity_scale;
         let mut probes = Vec::new();
@@ -577,16 +588,26 @@ impl<'a> Sequencer<'a> {
                 return Ok(Vec::new());
             }
             self.motion.move_direct(&goal, velocity, velocity, label)?;
+            // Read before the detection and before homing, as the capture
+            // loop does: it is the pose the tag was seen from that pairs
+            // with the observation, not the pose the arm ends at.
+            let observed = self.motion.current_joints()?;
             let seen = detector.detect();
             self.motion.move_direct(home, velocity, velocity, "home")?;
             match seen {
-                Ok(Some(seen)) => probes.push((
-                    step,
-                    [
+                Ok(Some(seen)) => {
+                    let shift = [
                         seen.center_px[0] - at_home.center_px[0],
                         seen.center_px[1] - at_home.center_px[1],
-                    ],
-                )),
+                    ];
+                    samples.push(handeye::Sample {
+                        label: label.into(),
+                        base_t_ee: self.model.fk(&observed)?,
+                        joints: observed,
+                        seen,
+                    });
+                    probes.push((step, shift));
+                }
                 Ok(None) => {
                     log::warn(&format!(
                         "{label}: tag not detected — skipping the frame sweep"
@@ -645,7 +666,14 @@ impl<'a> Sequencer<'a> {
         };
         log::info(&format!("Tag at home: {}", at_home.summary()));
 
-        let sweep = self.handeye_probe_frame(detector, &home, &home_pose, &at_home)?;
+        let mut samples = vec![handeye::Sample {
+            label: "home".into(),
+            joints: home.clone(),
+            base_t_ee: home_pose,
+            seen: at_home.clone(),
+        }];
+        let sweep =
+            self.handeye_probe_frame(detector, &home, &home_pose, &at_home, &mut samples)?;
         let schedule = handeye::schedule(
             self.model,
             &home,
@@ -670,12 +698,6 @@ impl<'a> Sequencer<'a> {
         std::fs::create_dir_all(&out_dir)
             .map_err(|e| SequencerError(format!("cannot create {}: {e}", out_dir.display())))?;
 
-        let mut samples = vec![handeye::Sample {
-            label: "home".into(),
-            joints: home.clone(),
-            base_t_ee: home_pose,
-            seen: at_home,
-        }];
         let mut missed = Vec::new();
 
         // Interpolated, not planned: every pose here is the home pose with
