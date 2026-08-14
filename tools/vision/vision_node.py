@@ -42,7 +42,7 @@ so an image-plane shift genuinely moves the tool in z. `T_ee_cam.yaml` carries
 `R_ee_cam` and the intrinsics it was solved under, and those intrinsics — not
 the IOC's — are the ones to use, because the hand-eye fit refined them.
 
-    vision_node.py teach-run      drive one cycle and teach all four references
+    vision_node.py teach-run      drive one cycle and teach the missing references
     vision_node.py check-run      drive one cycle and answer at each, teaching nothing
     vision_node.py teach          teach the reference for the pose the arm is at
     vision_node.py probe          answer once from the current frame, write nothing
@@ -55,7 +55,9 @@ run finds them in, and those differ — the rack is full at step 1 and empty at
 four in order. `teach-run` moves the robot; every other mode only reads.
 
 A reference is keyed by `(Kind, CurrentStep)`, plus `Holder` at the two rack
-poses, because `Kind` alone cannot tell step 1 from step 12.
+poses, because `Kind` alone cannot tell step 1 from step 12. Every holder the
+sequence will use therefore needs its own `teach-run`, and those runs are
+additive: a reference already taught is kept unless `--force` says otherwise.
 """
 
 import argparse
@@ -228,8 +230,19 @@ class Node:
         self.teach(self.args.kind, int(self.get("CurrentStep")), int(self.get("Holder")))
 
     def teach(self, kind, step, holder):
-        """Capture the reference for one observation pose, from the frame now."""
+        """Capture the reference for one observation pose, from the frame now.
+
+        An existing reference is kept, not replaced. Teaching a second holder
+        drives a whole cycle and therefore passes through steps 7 and 12, whose
+        references do not depend on the holder — replacing those would throw
+        away captures that a `check-run` has already stood behind, for nothing.
+        Re-teaching is a decision (an aged reference, §14.2), so it is `--force`.
+        """
         key = ref_key(kind, step, holder)
+        path = os.path.join(self.args.refs, key + ".npz")
+        if os.path.exists(path) and not self.args.force:
+            print(f"keeping {key} — already taught; --force to replace")
+            return
 
         frame = self.cam.grab()
         if frame is None:
@@ -248,7 +261,6 @@ class Node:
 
         os.makedirs(self.args.refs, exist_ok=True)
         y0, y1, x0, x1 = window
-        path = os.path.join(self.args.refs, key + ".npz")
         np.savez(
             path,
             ref=img[y0:y1, x0:x1],
@@ -278,7 +290,7 @@ class Node:
         self.run_stops(teach=False)
 
     def cmd_teach_run(self):
-        """Teach all four references in one production cycle.
+        """Teach the references this holder is missing, in one production cycle.
 
         Each observation pose has to be referenced in the state the run will
         actually find it in, and those states differ: at step 1 the puck is in
@@ -428,6 +440,11 @@ def main():
         help="hand-eye result written by tools/handeye/solve_joint.py",
     )
     p.add_argument("--kind", type=int, help="1=PickAlign, 3=PlaceAlign (teach/probe)")
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="replace references that are already taught instead of keeping them",
+    )
     p.add_argument("--arrive-timeout", type=float, default=180.0, help="seconds to a hold")
     p.add_argument("--cycle-timeout", type=float, default=900.0, help="seconds to cycle end")
     sub = p.add_subparsers(dest="cmd", required=True)
