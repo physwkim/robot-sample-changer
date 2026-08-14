@@ -78,6 +78,10 @@ python -m pip install silx PyQt6 pyepics numpy pyyaml
 RTDE receive만 로드, `Robot:UR:` prefix (조인트/TCP/안전 상태).
 control/io/jog/gripper 포트는 시퀀서와 배타적이라 제외. procServ 20002.
 
+**유저 레벨 systemd**로 돕니다 (`~/.config/systemd/user/ur-monitor-ioc.service`,
+`systemctl --user status|restart ur-monitor-ioc`, linger on). robot_ioc의
+시스템 유닛과 달리 sudo가 필요 없습니다 — 읽기 전용에 20002/5064만 씁니다.
+
 멀티홈 환경에서 CA 경고("Identical process variable names on multiple
 servers" — 같은 IOC가 두 인터페이스로 답해서 뜨는 무해한 경고)가 거슬리면:
 `export EPICS_CA_NAME_SERVERS=127.0.0.1:5064`

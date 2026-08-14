@@ -6,8 +6,6 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=bl9b
-Group=bl9b
 
 # Paths point at ~/work, not the ~/ws deployment tree the other services
 # use: ~/ws is on main and has no deploy/ur_monitor_ioc at all, and the
@@ -38,5 +36,8 @@ Restart=always
 RestartSec=5
 TimeoutStopSec=15
 
+# A user unit: no User=/Group= (systemd --user already runs as bl9b) and
+# the target is the per-user default, not multi-user. `loginctl
+# enable-linger bl9b` is what keeps it up with nobody logged in.
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

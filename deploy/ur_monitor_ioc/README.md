@@ -25,13 +25,19 @@ cd ~/work/epics-rs-iocs && cargo build --release -p ur-robot-ioc
     ~/work/robot-sample-changer/deploy/ur_monitor_ioc/st.cmd
 ```
 
-## systemd
+## systemd (유저 레벨, sudo 없음)
 
 ```bash
-sudo cp ur-monitor-ioc.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now ur-monitor-ioc
+mkdir -p ~/.config/systemd/user
+cp ur-monitor-ioc.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now ur-monitor-ioc
+loginctl enable-linger bl9b   # 로그아웃/부팅 후에도 유지 (1회)
 # 콘솔: telnet localhost 20002  (robot_ioc는 20001)
+# 로그:  journalctl --user -u ur-monitor-ioc -f
 ```
+
+읽기 전용이고 20002/5064만 쓰므로 시스템 유닛일 이유가 없습니다. linger를
+켜지 않으면 로그아웃할 때 세션과 함께 내려갑니다.
 
 URSim 리허설 시에는 st.cmd의 `IP`를 192.168.56.101로 바꿔서 수동 실행.
