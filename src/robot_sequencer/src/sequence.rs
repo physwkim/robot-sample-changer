@@ -1053,10 +1053,11 @@ impl<'a> Sequencer<'a> {
     }
 
     /// Shared epilogue after a successful step: publish `CurrentStep`,
-    /// then honor a matching `PauseStep`.
-    fn step_epilogue(&mut self, step: i32) {
+    /// then honor a matching `PauseStep`. The error is the operator
+    /// aborting the hold — see [`Sequencer::wait_for_pause_step_change`].
+    fn step_epilogue(&mut self, step: i32) -> Result<(), SequencerError> {
         self.epics.write_current_step(step);
-        self.wait_for_pause_step_change(step);
+        self.wait_for_pause_step_change(step)
     }
 
     fn arm(
@@ -1076,8 +1077,7 @@ impl<'a> Sequencer<'a> {
             name,
         )?;
         log::info("  -> Completed");
-        self.step_epilogue(step);
-        Ok(())
+        self.step_epilogue(step)
     }
 
     fn cartesian(
@@ -1120,8 +1120,7 @@ impl<'a> Sequencer<'a> {
             name,
         )?;
         log::info("  -> Completed (Cartesian)");
-        self.step_epilogue(step);
-        Ok(())
+        self.step_epilogue(step)
     }
 
     fn hand(
@@ -1137,8 +1136,7 @@ impl<'a> Sequencer<'a> {
         self.gripper.command(open);
         self.gripper.wait_reached(open, &self.epics);
         log::info("  -> Completed");
-        self.step_epilogue(step);
-        Ok(())
+        self.step_epilogue(step)
     }
 
     // ---- PV wait loops -------------------------------------------------
@@ -1176,21 +1174,38 @@ impl<'a> Sequencer<'a> {
         }
     }
 
-    fn wait_for_pause_step_change(&mut self, current_step: i32) {
+    /// Holds after step `current_step` while `PauseStep` names it.
+    ///
+    /// Changing `PauseStep` resumes, which used to be the only way out —
+    /// and resuming is forward, into the next step. An operator who
+    /// paused to look at something and then wanted to stop had to kill
+    /// the daemon, which is the one thing that opens the gripper on the
+    /// way back up. `Wait = 2` ends the run instead: the sequence
+    /// unwinds to the trigger loop with `CurrentStep` intact, and
+    /// `CalibMode = 4` is there to walk the arm home.
+    fn wait_for_pause_step_change(&mut self, current_step: i32) -> Result<(), SequencerError> {
         let pause_step = self.epics.read_pause_step();
         if pause_step == 0 || pause_step != current_step {
-            return;
+            return Ok(());
         }
         log::info(&format!(
-            "PAUSED at step {current_step} - Waiting for PauseStep to change..."
+            "PAUSED at step {current_step} - change PauseStep to resume, or Wait=2 to stop here"
         ));
         loop {
+            // Only the literal 2 reads as Skip; 1, anything else, and a
+            // failed read all answer Continue, so a dropped CA read
+            // cannot abort a run by itself.
+            if self.epics.read_wait() == WaitStatus::Skip {
+                return Err(SequencerError(format!(
+                    "run stopped by Wait=2 while paused at step {current_step}"
+                )));
+            }
             let pause_step = self.epics.read_pause_step();
             if pause_step != current_step {
                 log::info(&format!(
                     "PauseStep changed to {pause_step}, resuming execution..."
                 ));
-                return;
+                return Ok(());
             }
             std::thread::sleep(POLL);
         }
