@@ -14,12 +14,22 @@ use crate::config::Config;
 use crate::epics::{CalibMode, Epics, VisionKind, WaitStatus};
 use crate::error::SequencerError;
 use crate::gripper::Gripper;
+use crate::handeye;
 use crate::log;
 use crate::model::{JointMap, Model};
 use crate::motion::Motion;
 use crate::waypoints::WaypointData;
 
 const POLL: Duration = Duration::from_millis(100);
+/// How often the hand-eye aiming hold asks the detector where the tag is.
+/// A detect costs one fresh camera frame; often enough to jog against,
+/// rare enough that the jog itself stays responsive.
+const HANDEYE_AIM_PROBE: Duration = Duration::from_secs(1);
+/// Tool-frame step used to measure the image Jacobian before the frame
+/// sweep. Big enough that the detector's ~0.1 px repeatability is
+/// negligible in the fit, small enough that the arm stays in the
+/// neighbourhood the aiming pose was already cleared in.
+const HANDEYE_PROBE_M: f64 = 0.020;
 
 /// Base waypoints recomputed from the YAML before every sequence.
 /// The C++ also derived holder-above/retreat and sample-holder-retreat
@@ -71,6 +81,35 @@ enum Gate {
     TooLarge(f64),
 }
 
+/// Blocks while `Stop` is set.
+///
+/// A free function over `&Epics` rather than a `&mut self` method so the
+/// hand-eye capture, which holds a mutable borrow of `motion` across its
+/// whole loop, can honour the same pause the sequence steps do instead of
+/// keeping a second copy of this loop.
+fn wait_for_stop_clear(epics: &Epics) {
+    if epics.read_stop() == 0 {
+        return;
+    }
+    log::info("STOPPED - Waiting for Stop PV to become 0...");
+    loop {
+        if epics.read_stop() == 0 {
+            log::info("Stop cleared, resuming execution...");
+            return;
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+/// A list for the log, or `-` when it is empty.
+fn or_dash(items: &[String]) -> String {
+    if items.is_empty() {
+        "-".to_string()
+    } else {
+        items.join(" ")
+    }
+}
+
 fn gate_correction(d: [f64; 3], min_mm: f64, max_mm: f64) -> Gate {
     let mag = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
     if mag < min_mm {
@@ -118,6 +157,7 @@ impl<'a> Sequencer<'a> {
             let mode_name = match calib_mode {
                 CalibMode::Holder => "Holder",
                 CalibMode::SampleHolder => "SampleHolder",
+                CalibMode::HandEye => "HandEye",
                 CalibMode::Normal => "Normal",
             };
             log::info("========================================");
@@ -145,15 +185,18 @@ impl<'a> Sequencer<'a> {
             let outcome = match calib_mode {
                 CalibMode::Holder => self.run_calib_holder(&run, start_from_step)?,
                 CalibMode::SampleHolder => self.run_calib_sample_holder(&run, start_from_step)?,
+                CalibMode::HandEye => self.run_handeye()?,
                 CalibMode::Normal => self.run_normal(&run, start_from_step)?,
             };
 
             log::info("========================================");
             match (calib_mode, outcome) {
-                (CalibMode::Holder | CalibMode::SampleHolder, _) => log::info(&format!(
-                    "Calibration sequence #{} completed ({mode_name} mode)",
-                    self.sequence_count
-                )),
+                (CalibMode::Holder | CalibMode::SampleHolder | CalibMode::HandEye, _) => {
+                    log::info(&format!(
+                        "Calibration sequence #{} completed ({mode_name} mode)",
+                        self.sequence_count
+                    ))
+                }
                 (CalibMode::Normal, true) => log::info(&format!(
                     "Sequence #{}: Steps 13-23 skipped (Wait PV = 2)",
                     self.sequence_count
@@ -330,6 +373,335 @@ impl<'a> Sequencer<'a> {
         self.cartesian(22, "holder_above_final_return", &w.above, start)?;
         self.cartesian(23, "holder_standby_final", &w.standby, start)?;
         Ok(false)
+    }
+
+    /// Hand-eye calibration capture: rotate the tool in place about each
+    /// of its own axes, read the wrist camera at each stop, and write the
+    /// (robot pose, tag pose) pairs `cv2.calibrateHandEye` needs.
+    ///
+    /// It runs here rather than as its own tool because the daemon owns
+    /// the RTDE connection — the robot answers one client, and taking the
+    /// daemon down to calibrate the camera it depends on is the wrong
+    /// way round.
+    ///
+    /// `CurrentStep` is deliberately left alone: it means "an interrupted
+    /// sequence to resume from" everywhere else, and a capture is not
+    /// resumable — the arm returns to the pose it started from, so the
+    /// remedy for any failure is to fix the setup and trigger again.
+    fn run_handeye(&mut self) -> Result<bool, SequencerError> {
+        log::info(">>> HAND-EYE CALIBRATION MODE: tool rotations in place <<<");
+        let mut detector = match handeye::Detector::spawn(&self.config.handeye) {
+            Ok(d) => d,
+            Err(e) => {
+                log::error(&e.to_string());
+                return Ok(false);
+            }
+        };
+        self.handeye_restore_aim()?;
+        self.handeye_aim(&mut detector);
+        match self.handeye_capture(&mut detector)? {
+            Some(path) => log::info(&format!(
+                "Hand-eye capture complete. Next: {} tools/handeye/solve_joint.py {}",
+                self.config.handeye.solve_python.display(),
+                path.display()
+            )),
+            // Reported, not returned as an error: nothing is wrong with
+            // the robot, the arm is back where it started, and killing a
+            // production daemon over a camera that could not see the tag
+            // would be a worse outcome than another trigger.
+            None => log::error("Hand-eye capture produced nothing usable; not written"),
+        }
+        Ok(false)
+    }
+
+    /// Returns to the pose the last usable capture started from, so the
+    /// aiming hold that follows opens with the tag already in view.
+    ///
+    /// Nothing saved, or a straight line there that is blocked, is
+    /// reported and skipped rather than fatal: the hold can reach the
+    /// same place by jog, and refusing to calibrate because a convenience
+    /// move was unavailable would be the wrong trade. A failure once the
+    /// line has been cleared is a motion fault like any other and exits.
+    ///
+    /// The move is interpolated rather than planned for the same reason
+    /// the capture's are: the aiming pose points the camera down at the
+    /// tag and is nowhere near level, so the level-tool path constraint
+    /// the sequence plans under has no solution to it.
+    fn handeye_restore_aim(&mut self) -> Result<(), SequencerError> {
+        let velocity = self.config.handeye.velocity_scale;
+        let saved = match handeye::load_aim_pose(&self.config.handeye.out_dir) {
+            Ok(Some(joints)) => joints,
+            Ok(None) => {
+                log::info("No aiming pose saved yet — aim from where the arm is");
+                return Ok(());
+            }
+            Err(e) => {
+                log::error(&format!("Saved aiming pose unusable: {e}"));
+                return Ok(());
+            }
+        };
+        let here = self.motion.current_joints()?;
+        if !self.motion.direct_path_is_clear(&here, &saved)? {
+            log::warn(
+                "Saved aiming pose is not reachable in a straight line from here — jog to it",
+            );
+            return Ok(());
+        }
+        log::info("Returning to the saved aiming pose");
+        self.motion
+            .move_direct(&saved, velocity, velocity, "saved aiming pose")
+    }
+
+    /// Jog-enabled hold so the operator can bring the tag into view before
+    /// anything moves on its own. Returns on the next trigger.
+    ///
+    /// The idle wait this mode was entered from runs with jog disabled —
+    /// the arm sits at a taught standby pose there and jogging it would
+    /// move the sequence's own start point. So the aiming happens here,
+    /// after the mode is known, exactly as the other two calibration
+    /// modes hold for jogging mid-sequence. Two triggers total: the first
+    /// selects the mode, the second commits to the capture.
+    ///
+    /// The live detection readout is the point of doing this with the
+    /// detector already running: "the tag is on screen" and "the detector
+    /// can solve it" are different claims, and only the second one makes
+    /// the capture work.
+    fn handeye_aim(&mut self, detector: &mut handeye::Detector) {
+        log::info("========================================");
+        log::info("HAND-EYE AIMING: jog the tag into view");
+        log::info("  Use JogX/Y/Z + JogStep to move the TCP");
+        log::info("  Set Trigger=1 to start the capture from where the arm is");
+        log::info("========================================");
+        let mut next_probe = std::time::Instant::now();
+        loop {
+            if self.epics.read_trigger() > 0 {
+                if !self.epics.write_trigger(0) {
+                    log::warn("Failed to reset trigger PV to 0, continuing anyway...");
+                }
+                return;
+            }
+            self.process_jog();
+            if std::time::Instant::now() >= next_probe {
+                next_probe = std::time::Instant::now() + HANDEYE_AIM_PROBE;
+                match detector.detect() {
+                    Ok(Some(seen)) => log::info(&format!("  tag: {}", seen.summary())),
+                    Ok(None) => log::info("  tag: not detected from here"),
+                    Err(e) => log::warn(&format!("  detector: {e}")),
+                }
+            }
+            std::thread::sleep(POLL);
+        }
+    }
+
+    /// Steps the tool along its own x and then its own y, watching where
+    /// the tag goes, and turns the two observations into the frame-sweep
+    /// poses.
+    ///
+    /// The alternative — computing the offsets from a previous run's
+    /// `T_ee_cam` — would make the capture depend on the answer it is
+    /// there to produce, and would be wrong in exactly the case the
+    /// operator is recalibrating for: a camera that has been remounted at
+    /// a different roll. Two moves cost about twenty seconds and the
+    /// mount stops mattering.
+    ///
+    /// Every way this can fall short — no IK for a probe, a blocked line,
+    /// a tag the detector loses, probes that do not span the plane —
+    /// returns an empty sweep and lets the rotation set run alone. The
+    /// sweep improves the lens model; it is not what makes a capture
+    /// valid, so it must not be able to stop one.
+    fn handeye_probe_frame(
+        &mut self,
+        detector: &mut handeye::Detector,
+        home: &JointMap,
+        home_pose: &nalgebra::Isometry3<f64>,
+        at_home: &handeye::Detection,
+    ) -> Result<Vec<(String, [f64; 2])>, SequencerError> {
+        let velocity = self.config.handeye.velocity_scale;
+        let mut probes = Vec::new();
+        for (label, step) in [
+            ("probe x", [HANDEYE_PROBE_M, 0.0]),
+            ("probe y", [0.0, HANDEYE_PROBE_M]),
+        ] {
+            let target = home_pose
+                * nalgebra::Isometry3::from_parts(
+                    nalgebra::Translation3::new(step[0], step[1], 0.0),
+                    nalgebra::UnitQuaternion::identity(),
+                );
+            let Some(goal) = self.model.ik_from_seed(home, &target, label)? else {
+                log::warn(&format!("{label}: no IK — skipping the frame sweep"));
+                return Ok(Vec::new());
+            };
+            if !self.motion.direct_path_is_clear(home, &goal)? {
+                log::warn(&format!(
+                    "{label}: no clear path — skipping the frame sweep"
+                ));
+                return Ok(Vec::new());
+            }
+            self.motion.move_direct(&goal, velocity, velocity, label)?;
+            let seen = detector.detect();
+            self.motion.move_direct(home, velocity, velocity, "home")?;
+            match seen {
+                Ok(Some(seen)) => probes.push((
+                    step,
+                    [
+                        seen.center_px[0] - at_home.center_px[0],
+                        seen.center_px[1] - at_home.center_px[1],
+                    ],
+                )),
+                Ok(None) => {
+                    log::warn(&format!(
+                        "{label}: tag not detected — skipping the frame sweep"
+                    ));
+                    return Ok(Vec::new());
+                }
+                // Left to the capture's own detect to report and act on:
+                // it already turns a dead detector into "nothing usable"
+                // rather than a daemon exit.
+                Err(e) => {
+                    log::warn(&format!(
+                        "{label}: detector: {e} — skipping the frame sweep"
+                    ));
+                    return Ok(Vec::new());
+                }
+            }
+        }
+        let jacobian = match handeye::ImageJacobian::from_probes(&probes) {
+            Ok(j) => j,
+            Err(e) => {
+                log::warn(&format!("{e} — skipping the frame sweep"));
+                return Ok(Vec::new());
+            }
+        };
+        let sweep = handeye::frame_sweep(&jacobian, detector.intrinsics().image_size, at_home);
+        log::info(&format!(
+            "Image Jacobian: {}; {} frame-sweep poses",
+            jacobian.summary(),
+            sweep.len()
+        ));
+        Ok(sweep)
+    }
+
+    /// The capture itself. `Ok(None)` is "no usable sample set" with the
+    /// reason already logged; errors stay reserved for motion and
+    /// structural faults, which exit the daemon like any other step
+    /// failure.
+    fn handeye_capture(
+        &mut self,
+        detector: &mut handeye::Detector,
+    ) -> Result<Option<std::path::PathBuf>, SequencerError> {
+        let h = &self.config.handeye;
+        let (angle_deg, velocity, min_samples) = (h.angle_deg, h.velocity_scale, h.min_samples);
+        let standoffs = h.standoff_mm.clone();
+        let out_dir = h.out_dir.clone();
+
+        let home = self.motion.current_joints()?;
+        let home_pose = self.model.fk(&home)?;
+        log::info(&format!(
+            "Home: ik_frame at ({:.3}, {:.3}, {:.3}) m",
+            home_pose.translation.x, home_pose.translation.y, home_pose.translation.z
+        ));
+        let Some(at_home) = detector.detect()? else {
+            log::error("No tag visible from the current pose — aim the camera at it first");
+            return Ok(None);
+        };
+        log::info(&format!("Tag at home: {}", at_home.summary()));
+
+        let sweep = self.handeye_probe_frame(detector, &home, &home_pose, &at_home)?;
+        let schedule = handeye::schedule(
+            self.model,
+            &home,
+            &home_pose,
+            angle_deg,
+            &standoffs,
+            &sweep,
+            |goal| self.motion.direct_path_is_clear(&home, goal),
+        )?;
+        let dropped: Vec<String> = schedule
+            .dropped
+            .iter()
+            .map(|(label, why)| format!("{label}: {why}"))
+            .collect();
+        log::info(&format!(
+            "Schedule: {} poses to visit, {} dropped ({})",
+            schedule.poses.len(),
+            dropped.len(),
+            or_dash(&dropped)
+        ));
+
+        std::fs::create_dir_all(&out_dir)
+            .map_err(|e| SequencerError(format!("cannot create {}: {e}", out_dir.display())))?;
+
+        let mut samples = vec![handeye::Sample {
+            label: "home".into(),
+            joints: home.clone(),
+            base_t_ee: home_pose,
+            seen: at_home,
+        }];
+        let mut missed = Vec::new();
+
+        // Interpolated, not planned: every pose here is the home pose with
+        // the tool turned a few degrees, and the straight line to it keeps
+        // the arm in that neighbourhood. The schedule already refused the
+        // ones whose line is blocked, so a refusal below is a real fault.
+        let mut detector_died = None;
+        for (label, goal) in &schedule.poses {
+            wait_for_stop_clear(&self.epics);
+            log::info(&format!("Capturing {label}"));
+            self.motion.move_direct(goal, velocity, velocity, label)?;
+            let observed = self.motion.current_joints()?;
+            let detected = detector.detect();
+            // Home between poses so a dropped detection cannot compound
+            // into a drift away from the one configuration known to see
+            // the tag — and, since it runs before the reply is judged, so
+            // that a detector which died leaves the arm parked here
+            // rather than rotated.
+            self.motion.move_direct(&home, velocity, velocity, "home")?;
+            match detected {
+                Ok(Some(seen)) => {
+                    log::info(&format!("  {}", seen.summary()));
+                    samples.push(handeye::Sample {
+                        label: label.clone(),
+                        base_t_ee: self.model.fk(&observed)?,
+                        joints: observed,
+                        seen,
+                    });
+                }
+                Ok(None) => {
+                    log::warn(&format!("  {label}: tag not detected, dropping this pose"));
+                    missed.push(label.clone());
+                }
+                // The camera side failing is not the robot failing.
+                Err(e) => {
+                    detector_died = Some(e);
+                    break;
+                }
+            }
+        }
+        if let Some(e) = detector_died {
+            log::error(&format!("detector stopped answering: {e}"));
+            return Ok(None);
+        }
+        log::info(&format!(
+            "Captured {} poses ({} missed: {})",
+            samples.len(),
+            missed.len(),
+            or_dash(&missed)
+        ));
+        if samples.len() < min_samples {
+            log::error(&format!(
+                "only {} poses saw the tag, need {min_samples} — re-aim so the tag sits \
+                 nearer the image centre, or lower handeye.angle_deg",
+                samples.len()
+            ));
+            return Ok(None);
+        }
+        let path = out_dir.join("samples.yaml");
+        handeye::write_samples(&path, &samples, angle_deg, detector.intrinsics())?;
+        // Saved from here, not from the aiming hold: this is the pose the
+        // capture actually ran from and the tag was demonstrably visible
+        // at, which is the only kind worth returning to.
+        handeye::save_aim_pose(&out_dir, &home)?;
+        Ok(Some(path))
     }
 
     fn calibration_hold(&mut self, banner: &str) {
@@ -523,7 +895,7 @@ impl<'a> Sequencer<'a> {
             log::info(&format!("Skipping step {step} ({name})"));
             return false;
         }
-        self.wait_for_stop_clear();
+        wait_for_stop_clear(&self.epics);
         log::info(&format!("Step {step}: {name}"));
         true
     }
@@ -648,20 +1020,6 @@ impl<'a> Sequencer<'a> {
                 self.process_jog();
             }
             self.gripper.update_rbv(&self.epics);
-            std::thread::sleep(POLL);
-        }
-    }
-
-    fn wait_for_stop_clear(&mut self) {
-        if self.epics.read_stop() == 0 {
-            return;
-        }
-        log::info("STOPPED - Waiting for Stop PV to become 0...");
-        loop {
-            if self.epics.read_stop() == 0 {
-                log::info("Stop cleared, resuming execution...");
-                return;
-            }
             std::thread::sleep(POLL);
         }
     }

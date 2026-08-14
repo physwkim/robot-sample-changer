@@ -143,8 +143,8 @@ pub(crate) fn scene_with_assets<'m>(
 
 /// Index of the first state that collides (self or scene world, ACM
 /// applied), or `None` when the whole path is clear. Used by the jog
-/// gate; see the comment at its call site for the C++ split this
-/// preserves.
+/// gate to truncate an interpolated path; see the comment at its call
+/// site for the C++ split this preserves.
 pub(crate) fn first_collision_index(
     model: &Model,
     assets: &[SceneAsset],
@@ -156,11 +156,11 @@ pub(crate) fn first_collision_index(
     for (i, state) in states.iter().enumerate() {
         let q = state
             .joint_group_positions(&model.group)
-            .map_err(|e| SequencerError(format!("jog: state positions: {e}")))?;
+            .map_err(|e| SequencerError(format!("collision check: state positions: {e}")))?;
         scene
             .current_state_mut()
             .set_joint_group_positions(&model.group, &q)
-            .map_err(|e| SequencerError(format!("jog: scene state: {e}")))?;
+            .map_err(|e| SequencerError(format!("collision check: scene state: {e}")))?;
         scene.current_state_mut().update();
         if scene.check_collision(&env, &request).collision {
             return Ok(Some(i));

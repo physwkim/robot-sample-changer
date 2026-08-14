@@ -31,12 +31,17 @@ pub enum WaitStatus {
     Skip,
 }
 
-/// `Robot:CalibMode` states (mbbo: 0=Normal, 1=Holder, 2=Sample Holder).
+/// `Robot:CalibMode` states (mbbo: 0=Normal, 1=Holder, 2=Sample Holder,
+/// 3=Hand-Eye).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CalibMode {
     Normal,
     Holder,
     SampleHolder,
+    /// Eye-in-hand camera calibration capture. Unlike the other two it
+    /// touches no holder and no gripper — it rotates the tool in place to
+    /// give `cv2.calibrateHandEye` its rotational diversity.
+    HandEye,
 }
 
 /// `Robot:Vision:Kind` request codes (mbbo).
@@ -265,6 +270,7 @@ impl Epics {
         match self.get_i32(&self.calib_mode, GET_TIMEOUT) {
             Some(1) => CalibMode::Holder,
             Some(2) => CalibMode::SampleHolder,
+            Some(3) => CalibMode::HandEye,
             _ => CalibMode::Normal,
         }
     }

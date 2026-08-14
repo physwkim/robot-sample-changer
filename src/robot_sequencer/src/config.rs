@@ -23,6 +23,8 @@ pub struct Config {
     pub scene: SceneConfig,
     #[serde(default)]
     pub vision: VisionConfig,
+    #[serde(default)]
+    pub handeye: HandEyeConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -244,6 +246,60 @@ impl Default for VisionConfig {
     }
 }
 
+/// Eye-in-hand calibration capture (`CalibMode` = Hand-Eye). Commissioning
+/// only: it produces the `T_ee_cam` that [`VisionConfig`]'s node needs
+/// before it can convert pixels to a TCP-local correction at all.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct HandEyeConfig {
+    /// Interpreter for `detector`; needs cv2, numpy and pyepics.
+    pub python: PathBuf,
+    /// Interpreter for the solver; needs cv2, numpy, scipy and yaml. A
+    /// second field and not `python` again because the two roles do not
+    /// fit in one environment here: the detector's needs pyepics and has
+    /// no yaml, so the command the capture prints on completion used to
+    /// name an interpreter that could not run it.
+    pub solve_python: PathBuf,
+    /// The AprilTag detector driven over stdin/stdout.
+    pub detector: PathBuf,
+    /// Directory `samples.yaml` is written to.
+    pub out_dir: PathBuf,
+    /// Largest tool rotation in the schedule (deg). The tag must stay in
+    /// frame at the extremes, so this is bounded by how near the image
+    /// centre the tag sits at the home pose, not by the arm.
+    pub angle_deg: f64,
+    /// Tool-z offsets (mm) the rotation set is repeated at, measured from
+    /// the aiming pose; positive is toward whatever the camera is looking
+    /// at. A single standoff leaves solvePnP's depth error identical in
+    /// every sample, where it is indistinguishable from a camera mounted
+    /// that much further out and lands in `T_ee_cam`'s translation
+    /// unchallenged. Every entry costs a full rotation set of poses.
+    pub standoff_mm: Vec<f64>,
+    /// Velocity and acceleration scale for the capture moves — slower
+    /// than the sequence, because every pose is a fresh excursion into a
+    /// cramped cell rather than a taught path.
+    pub velocity_scale: f64,
+    /// Below this many detected poses the capture is reported as failed
+    /// rather than written: `calibrateHandEye` returns an answer for
+    /// under-determined input as readily as for good input.
+    pub min_samples: usize,
+}
+
+impl Default for HandEyeConfig {
+    fn default() -> Self {
+        Self {
+            python: PathBuf::from("python3"),
+            solve_python: PathBuf::from("python3"),
+            detector: PathBuf::from("tools/handeye/detector.py"),
+            out_dir: PathBuf::from("handeye_samples"),
+            angle_deg: 8.0,
+            standoff_mm: vec![0.0],
+            velocity_scale: 0.1,
+            min_samples: 5,
+        }
+    }
+}
+
 impl Config {
     /// Loads the YAML and resolves every relative path against the config
     /// file's directory, so the daemon can be started from anywhere.
@@ -269,6 +325,29 @@ impl Config {
         anchor(&mut config.sequence.waypoints_yaml);
         for object in &mut config.scene.objects {
             anchor(&mut object.stl);
+        }
+        anchor(&mut config.handeye.detector);
+        anchor(&mut config.handeye.out_dir);
+        // Checked always, not only when the mode is selected: there is no
+        // enable flag to gate on, and an out-of-range angle should be a
+        // startup error rather than a surprise after the arm has moved.
+        let h = &config.handeye;
+        if !(0.0..=30.0).contains(&h.angle_deg) {
+            return Err(SequencerError(
+                "handeye.angle_deg must be within 0..30".into(),
+            ));
+        }
+        if !(0.0..=0.5).contains(&h.velocity_scale) {
+            return Err(SequencerError(
+                "handeye.velocity_scale must be within 0..0.5".into(),
+            ));
+        }
+        if h.min_samples < 3 {
+            return Err(SequencerError(
+                "handeye.min_samples must be at least 3 (calibrateHandEye needs three \
+                 relative motions)"
+                    .into(),
+            ));
         }
         if config.vision.enabled {
             let v = &config.vision;
@@ -336,6 +415,21 @@ mod tests {
         // Production carries an explicit vision section, disabled.
         assert!(!config.vision.enabled);
         assert!(!config.vision.observe_only);
+        // The hand-eye detector is spawned by path, so a typo there
+        // surfaces only when an operator selects the mode on the robot.
+        assert!(
+            config.handeye.detector.exists(),
+            "missing hand-eye detector: {}",
+            config.handeye.detector.display()
+        );
+        assert!(
+            config.handeye.python.is_absolute(),
+            "handeye.python must name an interpreter with cv2/pyepics, not inherit PATH"
+        );
+        assert!(
+            config.handeye.solve_python.is_absolute(),
+            "handeye.solve_python must name an interpreter with cv2/scipy/yaml, not inherit PATH"
+        );
     }
 
     /// The URSim config has no vision section: the serde default path
@@ -352,5 +446,62 @@ mod tests {
         assert_eq!(v.min_correction, 0.05);
         assert_eq!(v.max_correction, 3.0);
         assert_eq!(v.req_pv, "Robot:Vision:Req");
+        // Same for hand-eye: absent from the URSim config, and its
+        // defaults must be the ones the daemon banner advertises.
+        assert_eq!(config.handeye.angle_deg, 8.0);
+        assert_eq!(config.handeye.min_samples, 5);
+    }
+
+    /// The range checks run at load, not at mode selection: an operator
+    /// finding out mid-capture that the schedule was nonsense has already
+    /// moved the arm.
+    #[test]
+    fn rejects_out_of_range_handeye_limits() {
+        let base = std::fs::read_to_string(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/sequencer_ursim.yaml"
+        )))
+        .expect("read");
+        let dir = std::env::temp_dir().join("handeye_config_bounds");
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        for (name, section, want) in [
+            ("angle_hi", "handeye:\n  angle_deg: 45.0\n", "angle_deg"),
+            ("angle_neg", "handeye:\n  angle_deg: -1.0\n", "angle_deg"),
+            (
+                "velocity_hi",
+                "handeye:\n  velocity_scale: 0.9\n",
+                "velocity_scale",
+            ),
+            ("samples_lo", "handeye:\n  min_samples: 2\n", "min_samples"),
+        ] {
+            let path = dir.join(format!("{name}.yaml"));
+            std::fs::write(&path, format!("{base}\n{section}")).expect("write");
+            let err = Config::load(&path).expect_err(name).to_string();
+            assert!(err.contains(want), "{name}: unexpected error {err}");
+        }
+    }
+
+    /// The boundary values themselves are legal — 30 deg and 0.5 are the
+    /// documented maxima, not the first rejected value.
+    #[test]
+    fn accepts_the_handeye_limit_boundaries() {
+        let base = std::fs::read_to_string(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/sequencer_ursim.yaml"
+        )))
+        .expect("read");
+        let dir = std::env::temp_dir().join("handeye_config_bounds");
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let path = dir.join("edges.yaml");
+        std::fs::write(
+            &path,
+            format!(
+                "{base}\nhandeye:\n  angle_deg: 30.0\n  velocity_scale: 0.5\n  min_samples: 3\n"
+            ),
+        )
+        .expect("write");
+        let config = Config::load(&path).expect("boundary values are legal");
+        assert_eq!(config.handeye.angle_deg, 30.0);
+        assert_eq!(config.handeye.min_samples, 3);
     }
 }

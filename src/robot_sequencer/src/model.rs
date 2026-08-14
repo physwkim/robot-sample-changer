@@ -156,33 +156,55 @@ impl Model {
             current_pose * Translation3::new(x, y, z)
         };
 
+        match self.ik_from_seed(original, &target_pose, label)? {
+            Some(joints) => Ok(joints),
+            None => {
+                log::warn(&format!(
+                    "{label}: IK failed for Cartesian offset, using original joints"
+                ));
+                Ok(original.clone())
+            }
+        }
+    }
+
+    /// Joints putting `ik_frame` at `target`, solved from `seed` so the
+    /// result stays on the seed's IK branch — a UR3e pose has up to eight
+    /// solutions, and the arm reaching the right point through the wrong
+    /// elbow is a different path through the cell.
+    ///
+    /// `Ok(None)` is non-convergence, which callers treat as "this pose is
+    /// not usable" rather than a failure; errors stay reserved for
+    /// structural problems (unknown joint/link/group names).
+    pub fn ik_from_seed(
+        &self,
+        seed: &JointMap,
+        target: &Isometry3,
+        label: &str,
+    ) -> Result<Option<JointMap>, SequencerError> {
+        let mut state = self.state_with_joints(seed)?;
         let mut solver = self.solver()?;
         let solved = set_from_ik(
             &mut state,
             &mut solver,
             &[IkTarget {
-                pose: target_pose,
+                pose: *target,
                 frame: &self.ik_frame,
             }],
             &mut IkContext::default(),
         )
         .map_err(|e| SequencerError(format!("{label}: IK error: {e}")))?;
-
         if !solved {
-            log::warn(&format!(
-                "{label}: IK failed for Cartesian offset, using original joints"
-            ));
-            return Ok(original.clone());
+            return Ok(None);
         }
 
         let mut updated = JointMap::new();
-        for name in original.keys() {
+        for name in seed.keys() {
             let value = state
                 .variable_position(name)
                 .map_err(|e| SequencerError(format!("cannot read joint '{name}': {e}")))?;
             updated.insert(name.clone(), value);
         }
-        Ok(updated)
+        Ok(Some(updated))
     }
 }
 

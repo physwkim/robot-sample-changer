@@ -124,7 +124,7 @@ ws/
 |---------|------|------|
 | Robot:Trigger | bo | 시퀀스 시작 트리거 (0=Off, 1=On) |
 | Robot:Wait | mbbo | 측정 대기 상태 (0=Wait, 1=Continue, 2=Abort) |
-| Robot:CalibMode | mbbo | 캘리브레이션 모드 (0=Normal, 1=Holder Calib, 2=Sample Holder Calib) |
+| Robot:CalibMode | mbbo | 캘리브레이션 모드 (0=Normal, 1=Holder Calib, 2=Sample Holder Calib, 3=Hand-Eye Calib) |
 | Robot:StartStep | longout | 시작 스텝 번호 (0-300) |
 | Robot:Holder | longout | 홀더 번호 (1-10) |
 | Robot:Stop | bo | 일시정지 요청 (0=Run, 1=Pause) |
@@ -162,6 +162,45 @@ Req(id)/Kind로 측정을 요청하고, 비전 노드가 DX/DY/DZ(mm, TCP-로컬
 캘리브레이션 모드에는 훅이 없습니다(티칭 오차를 가리므로). 카메라 없는
 리허설은 `vision_sim` 바이너리가 비전 노드를 대신합니다
 (`vision_sim --dx 0.8 --grip-dx 0.3` 등, src/bin/vision_sim.rs).
+
+### Hand-eye 캘리브레이션 (`CalibMode=3`)
+
+비전 노드가 픽셀을 TCP-로컬 보정으로 바꾸려면 먼저 `T_ee_cam`이 있어야
+합니다. 그 수집을 데몬이 직접 합니다 — 로봇은 RTDE 클라이언트를 하나만
+받으므로 별도 도구로 하려면 프로덕션 데몬을 내려야 하고, 그건 순서가
+거꾸로입니다.
+
+**트리거는 2회**입니다 — 다른 캘리브레이션 모드와 같은 패턴(모드 진입 →
+jog hold → 커밋). idle 트리거 대기는 jog를 서비스하지 않습니다(그 자리는
+티칭된 standby 자세라 jog하면 시퀀스 시작점이 움직입니다).
+
+```bash
+caput Robot:CalibMode 3
+caput Robot:Trigger 1     # 1회차: aiming hold 진입, 검출기 기동
+# 로그에 1초마다 "tag: ... centre (x, y)"가 뜹니다.
+# JogX/Y/Z + JogStep으로 100 mm 태그(id 0)를 화면 중앙에 맞춥니다.
+# "not detected from here"가 계속 뜨면 여기서 멈추는 게 맞습니다.
+caput Robot:Trigger 1     # 2회차: 현재 자세를 home으로 잡고 수집 시작
+# 끝나면
+<handeye.python> tools/handeye/solve.py <out_dir>/samples.yaml
+```
+
+2회차 트리거 시점의 자세를 home으로 잡고 툴 x/y/z축 둘레 12자세를 돌며(축 3개는
+필수 — 회전축을 공유하는 두 상대운동은 AX = XB에서 축퇴) 자세마다 home
+복귀. 이동은 시퀀스와 같은 충돌 씬을 통과하는 계획 이동이고, level-tool
+제약은 수집 동안만 가드로 해제됐다가 Drop에서 복원됩니다. 각도는
+`handeye.angle_deg`.
+
+수집 실패(태그 미검출, 검출기 미기동, 표본 부족)는 데몬을 죽이지 않습니다
+— 로봇은 이상 없고 팔은 시작 자세로 돌아와 있으므로 로그만 남기고 트리거
+대기로 복귀합니다. 이동 실패는 다른 스텝과 동일하게 데몬 종료.
+`CurrentStep`은 건드리지 않습니다(재개 대상이 아니므로 불변식 유지).
+
+`db/robot.db`에 상태 3(`THST`/`THVL`)을 추가했지만 **IOC 재시작은 라벨용**
+입니다. robot_ioc의 mbbo는 정의되지 않은 상태값도 그대로 받아 서빙하므로
+(실측: 구 db로 뜬 IOC에 `caput 3` → readback 3, SEVR=0), 데몬은 재시작
+없이도 3을 읽습니다. 재시작 전에는 `caget -s`/GUI가 "Hand-Eye Calib"
+대신 "3"으로 보일 뿐입니다.
 
 ## 그리퍼 통신
 

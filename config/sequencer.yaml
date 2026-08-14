@@ -220,3 +220,38 @@ vision:
   grip_offset: true       # after steps 5 and 16, added to the next place
   place_align: true       # before steps 9 and 20
   seating_check: true     # after steps 11 and 22
+
+# Eye-in-hand calibration capture (CalibMode = 3). Commissioning only:
+# it produces the T_ee_cam that the vision node above needs before it can
+# turn pixels into a TCP-local correction at all. Two triggers: the first
+# enters an aiming hold where JogX/Y/Z move the TCP and the tag position
+# is logged once a second, the second starts the capture from wherever
+# the arm then is. The arm rotates the tool about its own axes, samples
+# the tag at each stop, and returns to where it started. Solve with:
+#   <solve_python> tools/handeye/solve_joint.py <out_dir>/samples.yaml
+handeye:
+  # Two interpreters because no one environment here has both halves: the
+  # detector needs pyepics to reach the camera's PVs, the solver needs
+  # yaml and scipy, and the pydm env has no yaml.
+  python: "/home/bl9b/micromamba/envs/pydm/bin/python3.11"
+  solve_python: "/usr/bin/python3"
+  detector: "../tools/handeye/detector.py"
+  out_dir: "../handeye_samples"
+  angle_deg: 16.0         # largest tool rotation; bounded by the tag staying in frame.
+                          # 8 deg left t_ee_cam underdetermined: (R_a - I) inverts the
+                          # detection noise into the translation, so the methods spread
+                          # 2.9 mm while agreeing to 0.03 deg on rotation. 16 halves that
+                          # amplification. The ceiling is rx, which walks the tag 5.5 px
+                          # per degree down a 480 px frame.
+  standoff_mm: [0.0, -50.0, -100.0]
+                          # the rotation set repeats at 307 and 357 mm as well as the
+                          # aiming 257 mm. At one distance the tag's solvePnP depth error
+                          # is the same in every sample and reads as camera mount offset:
+                          # the 16 deg run agreed to 2.0 mm between methods while leaving
+                          # one out moved the answer 5.6 mm. Only away from the tag —
+                          # reproj tracks the tag's pixel size (0.24 px at 128 px, 0.99 at
+                          # 174), which is a geometric error on the sheet rather than
+                          # detection noise, so closing in makes every sample worse: the
+                          # 227 mm group alone spread 7.55 mm against 1.41 at 307 mm.
+  velocity_scale: 0.1     # slower than the sequence: every pose is a fresh excursion
+  min_samples: 5          # below this the capture is reported failed, not written

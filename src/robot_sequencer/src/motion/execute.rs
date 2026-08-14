@@ -20,6 +20,32 @@ use ur_driver::ur::robot_receive_timeout::RobotReceiveTimeout;
 
 use crate::error::SequencerError;
 
+/// Turns a ur-driver write's acceptance flag into a `Result`.
+///
+/// Every one of these writers answers `Ok(false)` when the robot-side
+/// client is gone — the external-control program is no longer running,
+/// which is what freedrive or a pendant stop does to it. Dropping that
+/// flag does not make the write land; it makes the daemon keep talking
+/// into a dead socket, and the failure then surfaces wherever something
+/// happens to be checked next. That is how a stopped program was
+/// reported as `rejected spline point 1`: the trajectory-start message
+/// had already been refused and its answer thrown away.
+fn accepted<E: std::fmt::Display>(
+    written: Result<bool, E>,
+    label: &str,
+    what: &str,
+) -> Result<(), SequencerError> {
+    match written {
+        Err(e) => Err(SequencerError(format!("{label}: {what}: {e}"))),
+        Ok(false) => Err(SequencerError(format!(
+            "{label}: {what} was not accepted — the external-control program \
+             is not running. Freedrive and a pendant stop both end it; \
+             restart the daemon to send it again."
+        ))),
+        Ok(true) => Ok(()),
+    }
+}
+
 impl Motion<'_> {
     /// Streams the trajectory to the robot and waits for the end
     /// callback. The program is re-parked afterwards on every path,
@@ -50,13 +76,15 @@ impl Motion<'_> {
         self.trajectory_done.store(false, Ordering::SeqCst);
         self.last_result
             .store(TrajectoryResult::Unknown as i32, Ordering::SeqCst);
-        self.reverse
-            .write_trajectory_control_message(
+        accepted(
+            self.reverse.write_trajectory_control_message(
                 TrajectoryControlMessage::TrajectoryStart,
                 (n - 1) as i32,
                 RobotReceiveTimeout::millisec(200),
-            )
-            .map_err(|e| SequencerError(format!("{label}: trajectory start: {e}")))?;
+            ),
+            label,
+            "trajectory start",
+        )?;
 
         let group = &self.model.group;
         for i in 1..n {
@@ -79,15 +107,12 @@ impl Motion<'_> {
                 .try_into()
                 .map_err(|_| SequencerError(format!("{label}: waypoint {i} is not 6 joints")))?;
             let dt = trajectory.way_point_duration_from_previous(i) as f32;
-            let accepted = self
-                .trajectory
-                .write_trajectory_spline_point(Some(&p), Some(&v), Some(&a), dt)
-                .map_err(|e| SequencerError(format!("{label}: spline write: {e}")))?;
-            if !accepted {
-                return Err(SequencerError(format!(
-                    "{label}: robot rejected spline point {i}"
-                )));
-            }
+            accepted(
+                self.trajectory
+                    .write_trajectory_spline_point(Some(&p), Some(&v), Some(&a), dt),
+                label,
+                &format!("spline point {i}"),
+            )?;
         }
 
         let deadline = Instant::now()
@@ -111,13 +136,15 @@ impl Motion<'_> {
                 )));
             }
             session.read()?;
-            self.reverse
-                .write_trajectory_control_message(
+            accepted(
+                self.reverse.write_trajectory_control_message(
                     TrajectoryControlMessage::TrajectoryNoop,
                     0,
                     RobotReceiveTimeout::millisec(200),
-                )
-                .map_err(|e| SequencerError(format!("{label}: keepalive: {e}")))?;
+                ),
+                label,
+                "keepalive",
+            )?;
         }
 
         let result = self.last_result.load(Ordering::SeqCst);
@@ -134,14 +161,15 @@ impl Motion<'_> {
     /// (InstructionExecutor's end-of-motion idiom) so it survives
     /// arbitrarily long pauses between motions.
     pub(super) fn park(&mut self) -> Result<(), SequencerError> {
-        self.reverse
-            .write(
+        accepted(
+            self.reverse.write(
                 Some(&[0.0; 6]),
                 ControlMode::ModeIdle,
                 RobotReceiveTimeout::millisec(0),
-            )
-            .map_err(|e| SequencerError(format!("park program: {e}")))?;
-        Ok(())
+            ),
+            "park program",
+            "idle keepalive",
+        )
     }
 }
 

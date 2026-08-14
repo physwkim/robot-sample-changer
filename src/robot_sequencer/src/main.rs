@@ -16,6 +16,7 @@ mod config;
 mod epics;
 mod error;
 mod gripper;
+mod handeye;
 mod log;
 mod model;
 mod motion;
@@ -89,6 +90,12 @@ fn run() -> Result<(), SequencerError> {
     log::info("    0=Normal (full sequence)");
     log::info("    1=Holder calibration (0-5, wait, 20-23)");
     log::info("    2=SampleHolder calibration (0-8, wait, 16-23)");
+    log::info("    3=Hand-eye calibration (trigger, jog to aim, trigger again; tool rotations");
+    log::info(&format!(
+        "      ±{:.0} deg in place -> {}/samples.yaml)",
+        config.handeye.angle_deg,
+        config.handeye.out_dir.display()
+    ));
     if config.vision.enabled {
         log::info(&format!(
             "  Vision correction: ENABLED{} (deadband {:.2} mm, limit {:.2} mm, {})",

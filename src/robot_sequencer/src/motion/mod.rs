@@ -27,8 +27,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32};
 use std::time::{Duration, Instant};
 
-use cspace_core::geometry::Vector3;
+use cspace_core::geometry::{Isometry3, Vector3};
 use cspace_core::kinematics::{CartesianInterpolator, IkContext, MaxEefStep};
+use cspace_core::state::RobotState;
 use cspace_core::trajectory::RobotTrajectory;
 use cspace_core::trajectory::trajectory_tools::apply_totg_time_parameterization;
 use cspace_planning::constraints::utils::construct_goal_joint_constraints;
@@ -67,6 +68,10 @@ const RESAMPLE_DT: f64 = 0.1;
 /// degenerate start==goal path ("the path requires a 180 deg. turn"), and
 /// MoveIt executed such plans as trivial successes.
 const ALREADY_THERE_TOLERANCE: f64 = 1e-3;
+/// Interpolated fraction at or above which a straight line counts as
+/// followed to the end. The interpolator reports 1.0 on success; the slack
+/// is for the float, not for a partially reachable line.
+const FULL_LINE: f64 = 1.0 - 1e-9;
 /// Slack added to a trajectory's TOTG duration before the keepalive loop
 /// declares the execution hung.
 const EXECUTE_TIMEOUT_MARGIN: Duration = Duration::from_secs(10);
@@ -111,11 +116,154 @@ fn map_to_q(joints: &JointMap) -> Result<Vector6D, SequencerError> {
     Ok(q)
 }
 
-impl Motion<'_> {
+impl<'m> Motion<'m> {
     /// Current joint positions. The stream is borrowed only for the
     /// read: callers plan next, and planning reads nothing.
     fn fresh_q(&mut self) -> Result<Vector6D, SequencerError> {
         self.rtde.session()?.fresh_q()
+    }
+
+    /// Current joint positions, named. For callers that build their own
+    /// goals relative to wherever the arm actually is rather than from a
+    /// taught waypoint.
+    pub fn current_joints(&mut self) -> Result<JointMap, SequencerError> {
+        Ok(q_to_map(&self.fresh_q()?))
+    }
+
+    /// Straight-line `ik_frame` interpolation from `start_state` to
+    /// `target`, and the fraction of that line the arm could follow.
+    fn interpolate(
+        &self,
+        start_state: &RobotState<'m>,
+        target: &Isometry3,
+        what: &str,
+    ) -> Result<(Vec<RobotState<'m>>, f64), SequencerError> {
+        let interpolator = CartesianInterpolator::new(
+            &self.model.group,
+            &self.model.ik_frame,
+            MaxEefStep::new(self.translation_step, self.rotation_step),
+        );
+        let mut solver = self.model.solver()?;
+        let (states, fraction) = interpolator
+            .to_pose(start_state, &mut solver, target, &mut IkContext::default())
+            .map_err(|e| SequencerError(format!("{what}: Cartesian interpolation: {e}")))?;
+        Ok((states, fraction.value()))
+    }
+
+    /// Times an interpolated state sequence with TOTG and runs it.
+    fn timed_execute(
+        &mut self,
+        states: Vec<RobotState<'m>>,
+        velocity_scale: f64,
+        acceleration_scale: f64,
+        label: &str,
+    ) -> Result<(), SequencerError> {
+        let mut trajectory = RobotTrajectory::for_group_name(&self.model.robot, &self.model.group)
+            .map_err(|e| SequencerError(format!("{label}: trajectory: {e}")))?;
+        for state in states {
+            trajectory
+                .add_suffix_way_point(state, 0.0)
+                .map_err(|e| SequencerError(format!("{label}: trajectory waypoint: {e}")))?;
+        }
+        apply_totg_time_parameterization(
+            &mut trajectory,
+            velocity_scale,
+            acceleration_scale,
+            0.1,
+            RESAMPLE_DT,
+            0.001,
+        )
+        .map_err(|e| SequencerError(format!("{label}: TOTG failed: {e}")))?;
+
+        self.execute(&trajectory, label)
+    }
+
+    /// Whether [`Motion::move_direct`] would carry the arm from `from` to
+    /// `to`: the whole straight line reachable, and no state on it
+    /// colliding.
+    ///
+    /// This is the question a caller generating candidate goals has to ask
+    /// before it commits to one, and it is deliberately the *path*
+    /// question rather than the goal-state one. A goal whose endpoint is
+    /// clear can still be unusable because the line to it is not, and
+    /// finding that out at execution time is a motion error — which exits
+    /// the daemon.
+    pub fn direct_path_is_clear(
+        &self,
+        from: &JointMap,
+        to: &JointMap,
+    ) -> Result<bool, SequencerError> {
+        let start_state = self.model.state_with_joints(from)?;
+        let target = self.model.fk(to)?;
+        let (states, fraction) = self.interpolate(&start_state, &target, "path check")?;
+        if fraction < FULL_LINE || states.len() < 2 {
+            return Ok(false);
+        }
+        let hit = first_collision_index(
+            self.model,
+            &self.scene_assets,
+            &self.allow_collisions_with,
+            &states,
+        )?;
+        Ok(hit.is_none())
+    }
+
+    /// Straight-line `ik_frame` move to the pose FK gives at `goal`, with
+    /// every interpolated state collision-checked and no planned fallback.
+    ///
+    /// For motions that are meant to stay small. [`Motion::move_planned`]
+    /// answers "some collision-free path exists", not "a short one":
+    /// RRT-Connect samples the whole joint space and nothing downstream
+    /// shortens what it returns, so two configurations a few degrees apart
+    /// can be joined by a path that swings the TCP most of a metre through
+    /// the cell — measured at 0.71 m on an 8-degree tool rotation during
+    /// hand-eye capture. Interpolating instead makes the executed motion
+    /// the one that was asked for.
+    ///
+    /// A line that cannot be followed to the end, or that collides, is an
+    /// error rather than a fallback: callers vet their goals with
+    /// [`Motion::direct_path_is_clear`] first, so reaching either case
+    /// here means the arm is not where the caller believed it was.
+    pub fn move_direct(
+        &mut self,
+        goal: &JointMap,
+        velocity_scale: f64,
+        acceleration_scale: f64,
+        label: &str,
+    ) -> Result<(), SequencerError> {
+        let start = self.fresh_q()?;
+        let goal_q = map_to_q(goal)?;
+        if already_there(&start, &goal_q) {
+            log::info(&format!("{label}: already at goal, skipping move"));
+            return Ok(());
+        }
+
+        let start_state = self.model.state_with_joints(&q_to_map(&start))?;
+        let target = self.model.fk(goal)?;
+        let (states, fraction) = self.interpolate(&start_state, &target, label)?;
+        if fraction < FULL_LINE {
+            return Err(SequencerError(format!(
+                "{label}: only {:.1}% of the straight path is reachable",
+                fraction * 100.0
+            )));
+        }
+        if let Some(i) = first_collision_index(
+            self.model,
+            &self.scene_assets,
+            &self.allow_collisions_with,
+            &states,
+        )? {
+            return Err(SequencerError(format!(
+                "{label}: the straight path collides at waypoint {i} of {}",
+                states.len()
+            )));
+        }
+        if states.len() < 2 {
+            return Ok(());
+        }
+        log::info(&format!("  Direct path: {} waypoints", states.len()));
+
+        self.timed_execute(states, velocity_scale, acceleration_scale, label)
     }
 
     /// Planned (RRT-Connect) joint-space move, the port of the MoveGroup
@@ -216,31 +364,17 @@ impl Motion<'_> {
 
         let start_state = self.model.state_with_joints(&q_to_map(&start))?;
         let target_pose = self.model.fk(goal)?;
-
-        let interpolator = CartesianInterpolator::new(
-            &self.model.group,
-            &self.model.ik_frame,
-            MaxEefStep::new(self.translation_step, self.rotation_step),
-        );
-        let mut solver = self.model.solver()?;
-        let (states, fraction) = interpolator
-            .to_pose(
-                &start_state,
-                &mut solver,
-                &target_pose,
-                &mut IkContext::default(),
-            )
-            .map_err(|e| SequencerError(format!("{label}: Cartesian interpolation: {e}")))?;
+        let (states, fraction) = self.interpolate(&start_state, &target_pose, label)?;
 
         log::info(&format!(
             "  Cartesian path: {:.1}% computed ({} waypoints)",
-            fraction.value() * 100.0,
+            fraction * 100.0,
             states.len()
         ));
-        if fraction.value() < self.min_fraction {
+        if fraction < self.min_fraction {
             log::warn(&format!(
                 "  Cartesian path incomplete ({:.1}%), falling back to joint space",
-                fraction.value() * 100.0
+                fraction * 100.0
             ));
             return self.move_planned(goal, velocity_scale, acceleration_scale, label);
         }
@@ -249,24 +383,7 @@ impl Motion<'_> {
             return Ok(());
         }
 
-        let mut trajectory = RobotTrajectory::for_group_name(&self.model.robot, &self.model.group)
-            .map_err(|e| SequencerError(format!("{label}: trajectory: {e}")))?;
-        for state in states {
-            trajectory
-                .add_suffix_way_point(state, 0.0)
-                .map_err(|e| SequencerError(format!("{label}: trajectory waypoint: {e}")))?;
-        }
-        apply_totg_time_parameterization(
-            &mut trajectory,
-            velocity_scale,
-            acceleration_scale,
-            0.1,
-            RESAMPLE_DT,
-            0.001,
-        )
-        .map_err(|e| SequencerError(format!("{label}: TOTG failed: {e}")))?;
-
-        self.execute(&trajectory, label)
+        self.timed_execute(states, velocity_scale, acceleration_scale, label)
     }
 
     /// TCP-relative jog for calibration: `d*_mm` in the `ik_frame` frame,
@@ -302,28 +419,14 @@ impl Motion<'_> {
         let offset_base = tcp_tf.rotation * offset_tcp;
         let target = Translation3::from(offset_base) * tcp_tf;
 
-        let interpolator = CartesianInterpolator::new(
-            &self.model.group,
-            &self.model.ik_frame,
-            MaxEefStep::new(self.translation_step, self.rotation_step),
-        );
-        let mut solver = self.model.solver()?;
-        let (mut states, fraction) = interpolator
-            .to_pose(
-                &start_state,
-                &mut solver,
-                &target,
-                &mut IkContext::default(),
-            )
-            .map_err(|e| SequencerError(format!("jog: Cartesian interpolation: {e}")))?;
+        let (mut states, mut fraction) = self.interpolate(&start_state, &target, "jog")?;
 
         // The C++ jog went through move_group's Cartesian-path service,
         // whose avoid_collisions default validity-checks every
         // interpolated state and truncates at the first colliding one —
         // an operator could not jog into the stage. The sequence steps
         // used the core-layer interpolator with no validity callback, so
-        // only the jog gets this gate.
-        let mut fraction = fraction.value();
+        // the jog and [`Motion::move_direct`] gate; the steps do not.
         if let Some(i) = first_collision_index(
             self.model,
             &self.scene_assets,
@@ -344,24 +447,7 @@ impl Motion<'_> {
             return Ok(());
         }
 
-        let mut trajectory = RobotTrajectory::for_group_name(&self.model.robot, &self.model.group)
-            .map_err(|e| SequencerError(format!("jog: trajectory: {e}")))?;
-        for state in states {
-            trajectory
-                .add_suffix_way_point(state, 0.0)
-                .map_err(|e| SequencerError(format!("jog: trajectory waypoint: {e}")))?;
-        }
-        apply_totg_time_parameterization(
-            &mut trajectory,
-            velocity_scale,
-            velocity_scale,
-            0.1,
-            RESAMPLE_DT,
-            0.001,
-        )
-        .map_err(|e| SequencerError(format!("jog: TOTG failed: {e}")))?;
-
-        self.execute(&trajectory, "TCP Jog")
+        self.timed_execute(states, velocity_scale, velocity_scale, "TCP Jog")
     }
 }
 
