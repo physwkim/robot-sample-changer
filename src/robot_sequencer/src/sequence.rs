@@ -368,10 +368,16 @@ impl<'a> Sequencer<'a> {
     /// Two routes, tried in order, because the planner cannot start from
     /// every pose the sequence can stop in. `holder_above` is the case
     /// that forced this: RRT rejects it as an invalid start state, while
-    /// the straight line from it to `holder_retreat` is the move step 6
-    /// makes every cycle. So plan to standby, and when the planner
-    /// refuses, take the interpolated line to retreat — a pose steps 7
-    /// and 18 already plan from — and try again from there.
+    /// the retreat from it is a move step 6 makes every cycle. So plan to
+    /// standby, and when the planner refuses, retreat first — to a pose
+    /// steps 7 and 18 already plan from — and try again from there.
+    ///
+    /// The retreat leg goes through `move_cartesian`, the same call step
+    /// 6 makes, and not `move_direct`. The two disagree here and the
+    /// robot settled it: interpolating the TCP pose clears this span at
+    /// 100%, while the joint-space line between the same two poses is
+    /// read as blocked. Taking the shorter-looking primitive left the
+    /// arm stranded at `above` with recovery refusing to run.
     ///
     /// The gripper is deliberately left alone. Opening it here would
     /// drop the very sample this exists to protect, and where that
@@ -391,17 +397,8 @@ impl<'a> Sequencer<'a> {
                  trying by way of holder_retreat"
             )),
         }
-        let here = self.motion.current_joints()?;
-        if !self.motion.direct_path_is_clear(&here, &w.retreat)? {
-            return Err(SequencerError(
-                "recover: the straight line to holder_retreat is blocked and the \
-                 planner will not start from here. Freedrive the arm to a taught \
-                 pose before triggering again."
-                    .into(),
-            ));
-        }
         self.motion
-            .move_direct(&w.retreat, v, a, "recover_retreat")?;
+            .move_cartesian(&w.retreat, v, a, "recover_retreat")?;
         self.motion
             .move_planned(&w.standby, v, a, "recover_standby")
             .map(|()| false)
