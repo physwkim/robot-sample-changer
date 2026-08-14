@@ -13,9 +13,13 @@ n = 1 is not a σ. This tool collects the rest of them.
 
     reapproach.py ref                  reference frame at the pose the arm is in now
     reapproach.py sample               one re-approach sample against that reference
-    reapproach.py watch --step 1       sample automatically on every arrival at a step
-    reapproach.py stats                σ, peak-to-peak, and what they say about the deadband
     reapproach.py stationary -n 20     the estimator's noise floor, arm parked (the §12.3 control)
+    reapproach.py watch --step 1       sample on arrival, while something else drives the arm
+    reapproach.py cycles --step 1 -n 20    drive N production cycles and sample each arrival
+    reapproach.py stats                σ, peak-to-peak, and what they say about the deadband
+
+`cycles` is the only mode that writes: it moves the robot. Every other mode
+reads.
 
 The estimator is §12.3's: a depth gate isolates the stack from the room, and
 `cv2.findTransformECC(MOTION_TRANSLATION)` recovers the shift of the mono
@@ -253,6 +257,125 @@ def cmd_watch(args):
     print(f"\n{taken} samples collected; run `stats` next")
 
 
+class Robot:
+    """The sequencer's control PVs — the only place in this tool that writes."""
+
+    NAMES = (
+        "Trigger",
+        "CurrentStep",
+        "PauseStep",
+        "StartStep",
+        "Holder",
+        "CalibMode",
+        "Stop",
+        "Wait",
+        "Loaded",
+    )
+
+    def __init__(self):
+        self.pv = {n: PV("Robot:" + n, auto_monitor=False) for n in self.NAMES}
+        for pv in self.pv.values():
+            if not pv.wait_for_connection(5):
+                raise SystemExit(f"{pv.pvname} did not connect")
+
+    def get(self, name):
+        return self.pv[name].get(use_monitor=False)
+
+    def put(self, name, value):
+        self.pv[name].put(value, wait=True)
+
+    def until(self, name, want, timeout, what):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.get(name) == want:
+                return
+            time.sleep(0.05)
+        raise SystemExit(f"timed out after {timeout:.0f}s waiting for {what}")
+
+
+def wait_cycle_end(bot, timeout):
+    """Answer the measurement wait when it comes, then wait for idle.
+
+    Step 12 parks the sample and waits for the beamline. `Wait` cannot be
+    pre-answered: `run_sequence` clears it (`write_wait(0)`) at the top of
+    every run, so anything written before the trigger is gone by the time the
+    question is asked. `Loaded` going high is the question — answering it is
+    what the measurement program does, and it is what keeps a cycle to ~22 s
+    instead of stalling until someone notices.
+    """
+    deadline = time.time() + timeout
+    answered = False
+    while time.time() < deadline:
+        if bot.get("CurrentStep") == 0:
+            return
+        if not answered and bot.get("Loaded") == 1:
+            bot.put("Wait", 1)
+            answered = True
+        time.sleep(0.05)
+    raise SystemExit(f"timed out after {timeout:.0f}s waiting for the cycle to finish")
+
+
+def cmd_cycles(args):
+    """Drive `-n` production cycles, sampling at each arrival at `--step`.
+
+    The daemon owns the arm; this drives it the way an operator does, through
+    `Robot:Trigger`. `PauseStep` is what makes the measurement possible at
+    all — `step_epilogue` publishes `CurrentStep` and then holds while
+    `PauseStep` equals it, so the arm is standing still at the observation
+    pose for as long as the frame grab needs. Releasing means writing a
+    `PauseStep` the run will not match again; zero disables the hold outright
+    (`wait_for_pause_step_change` returns early on zero), which is why zero is
+    both the release value and the parking value.
+
+    Nothing here truncates a run. A cycle that ends anywhere but step 0 leaves
+    `CurrentStep` as the resume point, and this stops rather than trigger over
+    it.
+    """
+    cam = Camera()
+    ref, roi, window, gate = load_ref(args.out)
+    bot = Robot()
+
+    # A run in progress owns CurrentStep as its resume point; a calibration
+    # mode or a non-zero StartStep means the next trigger does something other
+    # than the cycle being measured.
+    checks = [
+        ("CurrentStep", 0, "a run is in progress or interrupted"),
+        ("CalibMode", 0, "not in Normal mode"),
+        ("StartStep", 0, "steps would be skipped"),
+        ("Stop", 0, "the sequence is paused"),
+    ]
+    for name, want, why in checks:
+        got = bot.get(name)
+        if got != want:
+            raise SystemExit(f"refusing to start: Robot:{name} is {got}, not {want} — {why}")
+    holder = bot.get("Holder")
+    print(f"holder {holder}, {args.n} cycles, sampling at step {args.step}")
+
+    taken = 0
+    try:
+        for cycle in range(1, args.n + 1):
+            started = time.time()
+            print(f"\ncycle {cycle}/{args.n}:")
+            bot.put("PauseStep", args.step)
+            bot.put("Trigger", 1)
+            bot.until("CurrentStep", args.step, args.arrive_timeout, f"arrival at step {args.step}")
+            if take_sample(cam, args.out, ref, roi, window, gate, time.time()) is not None:
+                taken += 1
+            bot.put("PauseStep", 0)  # release the hold and disarm it
+            wait_cycle_end(bot, args.cycle_timeout)
+            print(f"  cycle done in {time.time() - started:.1f}s")
+    except KeyboardInterrupt:
+        # Leave nothing holding: release the pause and answer the measurement
+        # wait, so a cycle already past step 1 finishes on its own.
+        print("\ninterrupted — releasing the hold and letting the cycle finish", file=sys.stderr)
+        bot.put("PauseStep", 0)
+        bot.put("Wait", 1)
+        raise SystemExit(f"{taken} samples taken before the interrupt")
+    bot.put("PauseStep", 0)
+    bot.put("Wait", 0)
+    print(f"\n{taken} samples from {args.n} cycles; run `stats` next")
+
+
 def cmd_stationary(args):
     """The §12.3 control: the arm does not move, so this is the estimator alone."""
     cam = Camera()
@@ -355,6 +478,12 @@ def main():
     w.add_argument("--step", type=int, default=1, help="CurrentStep value to sample at")
     w.add_argument("-n", type=int, default=20, help="samples wanted")
     w.set_defaults(func=cmd_watch)
+    c = sub.add_parser("cycles")
+    c.add_argument("--step", type=int, default=1, help="CurrentStep value to sample at")
+    c.add_argument("-n", type=int, default=20, help="cycles to run")
+    c.add_argument("--arrive-timeout", type=float, default=180.0, help="seconds to the hold")
+    c.add_argument("--cycle-timeout", type=float, default=900.0, help="seconds to cycle end")
+    c.set_defaults(func=cmd_cycles)
     st = sub.add_parser("stationary")
     st.add_argument("-n", type=int, default=20, help="frames")
     st.set_defaults(func=cmd_stationary)
