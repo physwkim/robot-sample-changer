@@ -237,6 +237,52 @@ mod tests {
         }
     }
 
+    /// The guard `Motion::move_planned` runs before planning, exercised
+    /// against the same `KinematicConstraintSet` the planner would plan
+    /// under rather than a second reading of "level" that could drift
+    /// from it.
+    ///
+    /// Two boundaries, because they fail differently: the taught pose is
+    /// the path every mode is supposed to end on, and the tilted one is
+    /// what a hand-eye capture used to leave behind — planning reported
+    /// that as "start or goal state is itself invalid", which names
+    /// neither the start nor the constraint and reads like a collision.
+    #[test]
+    fn the_level_constraint_decides_both_sides_of_the_boundary() {
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/sequencer.yaml"
+        ));
+        let config = Config::load(path).expect("load config");
+        let (model, taught) = production_model_and_state();
+        let constraint = LevelToolConstraint::new(
+            &config.robot.ik_frame,
+            config.sequence.level_tool.tolerance_deg,
+        );
+        let (mut scene, _env) = scene_with_assets(&model, &[], &[]);
+        scene.current_state_mut().update();
+        let set = constraint
+            .build(&model, scene.transforms())
+            .expect("build the level-tool constraint");
+
+        let mut level = model.state_with_joints(&taught).expect("taught state");
+        assert!(
+            set.decide(&level.update()).satisfied,
+            "the taught holder1_standby must satisfy the constraint the steps plan under"
+        );
+
+        // Off level about the tool's own axis, which is what jogging the
+        // camera down at the tag produces.
+        let mut tilted = taught.clone();
+        *tilted.get_mut("wrist_1_joint").expect("wrist_1_joint") += 30f64.to_radians();
+        let mut tilted = model.state_with_joints(&tilted).expect("tilted state");
+        assert!(
+            !set.decide(&tilted.update()).satisfied,
+            "30 degrees off level must be rejected at a {} degree tolerance",
+            config.sequence.level_tool.tolerance_deg
+        );
+    }
+
     /// The committed stage parts must never be more permissive than the
     /// CAD mesh they approximate. `compute_exact_convex_hulls` takes the
     /// hull of each partition of the original geometry and a hull

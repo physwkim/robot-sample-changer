@@ -307,6 +307,26 @@ impl<'m> Motion<'m> {
             .transpose()
             .map_err(|e| SequencerError(format!("{label}: level-tool constraint: {e}")))?;
 
+        // A start that already violates the path constraint has no solution
+        // under it, and the planner says so as "start or goal state is
+        // itself invalid" — which names neither which of the two nor why,
+        // and reads like a collision. Only `satisfied` is quoted here: the
+        // result's `distance` sums the deviation about all three world axes
+        // including the one this constraint leaves free, so it is not the
+        // tilt and must not be printed as one.
+        if let Some(set) = &path_constraints {
+            let mut start_state = self.model.state_with_joints(&q_to_map(&start))?;
+            if !set.decide(&start_state.update()).satisfied {
+                return Err(SequencerError(format!(
+                    "{label}: the arm's current pose does not satisfy the \
+                     level-tool constraint, so no planned move can start from \
+                     it. Bring the tool back to level first — hand-eye aiming \
+                     leaves it tens of degrees off, and a capture that ended \
+                     without returning the arm is the usual way to get here."
+                )));
+            }
+        }
+
         let request = PlanningRequest {
             group_name: self.model.group.clone(),
             goal_constraints: vec![goal_constraints],

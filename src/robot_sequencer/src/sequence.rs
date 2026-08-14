@@ -397,6 +397,9 @@ impl<'a> Sequencer<'a> {
                 return Ok(false);
             }
         };
+        // Taken before anything moves, so the mode can put the arm back:
+        // see `handeye_return`.
+        let entry = self.motion.current_joints()?;
         self.handeye_restore_aim()?;
         self.handeye_aim(&mut detector);
         match self.handeye_capture(&mut detector)? {
@@ -411,7 +414,43 @@ impl<'a> Sequencer<'a> {
             // would be a worse outcome than another trigger.
             None => log::error("Hand-eye capture produced nothing usable; not written"),
         }
+        self.handeye_return(&entry)?;
         Ok(false)
+    }
+
+    /// Puts the arm back where this mode was entered from.
+    ///
+    /// The other three modes end on the taught `holder_standby`, so the
+    /// next trigger's step 1 — the daemon's only planned move — starts
+    /// from a pose the level-tool path constraint accepts. This mode aims
+    /// by jogging the camera down at the tag, and the constraint never
+    /// applies while it does so: every hand-eye move is interpolated, and
+    /// `level_tool` is read only by `Motion::move_planned`. Without this
+    /// return the aiming pose is what the next trigger inherits, planning
+    /// reports "start or goal state is itself invalid", and the daemon
+    /// exits having moved nothing. Measured once at 70.8 degrees off level
+    /// against the configured 3.
+    ///
+    /// A blocked line is logged and not returned as an error, as in
+    /// [`Sequence::handeye_restore_aim`]: the robot is fine and killing
+    /// the daemon would not put the arm anywhere better. It is logged at
+    /// error rather than warn because the arm is then left in the state
+    /// this function exists to prevent.
+    fn handeye_return(&mut self, entry: &JointMap) -> Result<(), SequencerError> {
+        let velocity = self.config.handeye.velocity_scale;
+        let here = self.motion.current_joints()?;
+        if !self.motion.direct_path_is_clear(&here, entry)? {
+            log::error(
+                "Cannot return to the pose hand-eye mode started from: the \
+                 straight line is blocked. The arm is left off level, so the \
+                 next sequence's step 1 will fail to plan — freedrive it back \
+                 to a taught pose before triggering.",
+            );
+            return Ok(());
+        }
+        log::info("Returning to the pose hand-eye mode started from");
+        self.motion
+            .move_direct(entry, velocity, velocity, "hand-eye entry pose")
     }
 
     /// Returns to the pose the last usable capture started from, so the
