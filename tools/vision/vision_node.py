@@ -261,6 +261,10 @@ class Node:
 
         os.makedirs(self.args.refs, exist_ok=True)
         y0, y1, x0, x1 = window
+        # The whole frame and its depth ride along with the crop. Every capture
+        # costs a cycle of the arm, so a change to the window rule — the gate
+        # moving, the component test changing — is then re-derived from the
+        # frames that were already taught instead of driving the robot again.
         np.savez(
             path,
             ref=img[y0:y1, x0:x1],
@@ -268,6 +272,8 @@ class Node:
             window=np.array(window),
             gate=np.array(DEFAULT_GATE),
             depth_m=depth,
+            frame=img.astype(np.uint8),
+            depth_map=z.astype(np.float32),
         )
         print(f"taught {key} -> {path}")
         print(
