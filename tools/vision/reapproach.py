@@ -48,6 +48,7 @@ from epics import PV
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from estimator import DEFAULT_GATE, Camera, build_roi, ecc_shift
+from sequencer import Robot
 
 PREFIX = os.environ.get("VISION_CAM_PREFIX", "RS405:")
 
@@ -189,64 +190,6 @@ def cmd_watch(args):
     print(f"\n{taken} samples collected; run `stats` next")
 
 
-class Robot:
-    """The sequencer's control PVs — the only place in this tool that writes."""
-
-    NAMES = (
-        "Trigger",
-        "CurrentStep",
-        "PauseStep",
-        "StartStep",
-        "Holder",
-        "CalibMode",
-        "Stop",
-        "Wait",
-        "Loaded",
-    )
-
-    def __init__(self):
-        self.pv = {n: PV("Robot:" + n, auto_monitor=False) for n in self.NAMES}
-        for pv in self.pv.values():
-            if not pv.wait_for_connection(5):
-                raise SystemExit(f"{pv.pvname} did not connect")
-
-    def get(self, name):
-        return self.pv[name].get(use_monitor=False)
-
-    def put(self, name, value):
-        self.pv[name].put(value, wait=True)
-
-    def until(self, name, want, timeout, what):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            if self.get(name) == want:
-                return
-            time.sleep(0.05)
-        raise SystemExit(f"timed out after {timeout:.0f}s waiting for {what}")
-
-
-def wait_cycle_end(bot, timeout):
-    """Answer the measurement wait when it comes, then wait for idle.
-
-    Step 12 parks the sample and waits for the beamline. `Wait` cannot be
-    pre-answered: `run_sequence` clears it (`write_wait(0)`) at the top of
-    every run, so anything written before the trigger is gone by the time the
-    question is asked. `Loaded` going high is the question — answering it is
-    what the measurement program does, and it is what keeps a cycle to ~22 s
-    instead of stalling until someone notices.
-    """
-    deadline = time.time() + timeout
-    answered = False
-    while time.time() < deadline:
-        if bot.get("CurrentStep") == 0:
-            return
-        if not answered and bot.get("Loaded") == 1:
-            bot.put("Wait", 1)
-            answered = True
-        time.sleep(0.05)
-    raise SystemExit(f"timed out after {timeout:.0f}s waiting for the cycle to finish")
-
-
 def cmd_cycles(args):
     """Drive `-n` production cycles, sampling at each arrival at `--step`.
 
@@ -267,19 +210,7 @@ def cmd_cycles(args):
     ref, roi, window, gate = load_ref(args.out)
     bot = Robot()
 
-    # A run in progress owns CurrentStep as its resume point; a calibration
-    # mode or a non-zero StartStep means the next trigger does something other
-    # than the cycle being measured.
-    checks = [
-        ("CurrentStep", 0, "a run is in progress or interrupted"),
-        ("CalibMode", 0, "not in Normal mode"),
-        ("StartStep", 0, "steps would be skipped"),
-        ("Stop", 0, "the sequence is paused"),
-    ]
-    for name, want, why in checks:
-        got = bot.get(name)
-        if got != want:
-            raise SystemExit(f"refusing to start: Robot:{name} is {got}, not {want} — {why}")
+    bot.check_idle()
     holder = bot.get("Holder")
     print(f"holder {holder}, {args.n} cycles, sampling at step {args.step}")
 
@@ -290,11 +221,11 @@ def cmd_cycles(args):
             print(f"\ncycle {cycle}/{args.n}:")
             bot.put("PauseStep", args.step)
             bot.put("Trigger", 1)
-            bot.until("CurrentStep", args.step, args.arrive_timeout, f"arrival at step {args.step}")
+            bot.advance_to(args.step, args.arrive_timeout, f"arrival at step {args.step}")
             if take_sample(cam, args.out, ref, roi, window, gate, time.time()) is not None:
                 taken += 1
             bot.put("PauseStep", 0)  # release the hold and disarm it
-            wait_cycle_end(bot, args.cycle_timeout)
+            bot.wait_cycle_end(args.cycle_timeout)
             print(f"  cycle done in {time.time() - started:.1f}s")
     except KeyboardInterrupt:
         # Leave nothing holding: release the pause and answer the measurement
