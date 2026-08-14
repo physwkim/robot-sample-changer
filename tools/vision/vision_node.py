@@ -42,15 +42,20 @@ so an image-plane shift genuinely moves the tool in z. `T_ee_cam.yaml` carries
 `R_ee_cam` and the intrinsics it was solved under, and those intrinsics — not
 the IOC's — are the ones to use, because the hand-eye fit refined them.
 
+    vision_node.py teach-run      drive one cycle and teach all four references
+    vision_node.py check-run      drive one cycle and answer at each, teaching nothing
     vision_node.py teach          teach the reference for the pose the arm is at
     vision_node.py probe          answer once from the current frame, write nothing
     vision_node.py run            serve the handshake
 
-`teach` is the step that makes the rest work, and it is a robot-free operation:
-drive the sequencer to the observation step by any means (`PauseStep` holds it
-there — see `reapproach.py cycles`), then run `teach`. It keys the reference by
-`(Kind, CurrentStep)`, plus `Holder` at the two rack poses, because `Kind`
-alone cannot tell step 1 from step 12.
+References are what make the rest work, and `teach-run` is the way to get
+them: the four observation poses have to be referenced in the states a real
+run finds them in, and those differ — the rack is full at step 1 and empty at
+18, the sample holder empty at 7 and full at 12. One cycle passes through all
+four in order. `teach-run` moves the robot; every other mode only reads.
+
+A reference is keyed by `(Kind, CurrentStep)`, plus `Holder` at the two rack
+poses, because `Kind` alone cannot tell step 1 from step 12.
 """
 
 import argparse
@@ -65,6 +70,7 @@ from epics import PV
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from estimator import DEFAULT_GATE, Camera, build_roi, ecc_shift, gate_depth_m, gate_mask
+from sequencer import Robot
 
 PREFIX = os.environ.get("VISION_CAM_PREFIX", "RS405:")
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -76,6 +82,11 @@ ANSWERABLE = (1, 3)
 # The two observation poses that depend on which holder the run is using;
 # the sample-holder poses (steps 7 and 12) do not.
 RACK_STEPS = (1, 18)
+# `(CurrentStep, Kind)` for every reference a run needs, in the order one
+# cycle visits them. Each is a different scene, not just a different pose:
+# the rack is full at 1 and empty at 18, the sample holder empty at 7 and
+# full at 12.
+TEACH_STOPS = ((1, 1), (7, 3), (12, 1), (18, 3))
 
 # Below this the target is not in the gate at all, and the answer is not a
 # small correction but "the arm is not where the reference was taught".
@@ -212,11 +223,12 @@ class Node:
     # ---- commands ------------------------------------------------------
 
     def cmd_teach(self):
-        step = int(self.get("CurrentStep"))
-        holder = int(self.get("Holder"))
-        kind = self.args.kind
-        if kind is None:
+        if self.args.kind is None:
             raise SystemExit("--kind is required: 1=PickAlign, 3=PlaceAlign")
+        self.teach(self.args.kind, int(self.get("CurrentStep")), int(self.get("Holder")))
+
+    def teach(self, kind, step, holder):
+        """Capture the reference for one observation pose, from the frame now."""
         key = ref_key(kind, step, holder)
 
         frame = self.cam.grab()
@@ -251,6 +263,89 @@ class Node:
             + (f", holder {holder}" if step in RACK_STEPS else "")
         )
         print(f"  window {window}, gate {area} px, range {depth * 1000:.1f} mm")
+
+    def cmd_check_run(self):
+        """Drive one cycle and answer at each stop without teaching.
+
+        What a taught reference is worth is not visible at teach time — the
+        capture always succeeds against itself. This runs the same four stops
+        one cycle later and prints what the node would have answered. Every
+        reading is the arm's re-approach plus whatever the scene did, so with
+        good references they land near §14's 0.02 mm and well under
+        `min_correction`. A large one, or a fallen ECC, is the reference
+        having aged (§15.5) rather than the holder having moved.
+        """
+        self.run_stops(teach=False)
+
+    def cmd_teach_run(self):
+        """Teach all four references in one production cycle.
+
+        Each observation pose has to be referenced in the state the run will
+        actually find it in, and those states differ: at step 1 the puck is in
+        the rack, at step 7 the sample holder is **empty** and the puck is in
+        the fingers, at step 12 the puck is in the sample holder, and at step
+        18 the rack slot is **empty** again. A cycle visits all four in that
+        order, which is why this drives one rather than asking an operator to
+        park the arm four times.
+
+        `PauseStep` does the holding, and writing the next stop releases the
+        current hold and arms the next one in the same write. A capture that
+        fails does not abort the cycle — the arm is mid-run with the puck in
+        its fingers, and stopping there is worse than finishing without one
+        reference. The failures are collected and printed at the end.
+        """
+        self.run_stops(teach=True)
+
+    def run_stops(self, teach):
+        """One cycle, stopping at each observation pose to teach or to answer."""
+        bot = Robot()
+        bot.check_idle()
+        holder = int(bot.get("Holder"))
+        verb = "teaching" if teach else "checking"
+        print(f"{verb} references for holder {holder} over one cycle")
+
+        done, failed = [], []
+        try:
+            bot.put("PauseStep", TEACH_STOPS[0][0])
+            bot.put("Trigger", 1)
+            for i, (step, kind) in enumerate(TEACH_STOPS):
+                bot.advance_to(step, self.args.arrive_timeout, f"step {step}")
+                key = ref_key(kind, step, holder)
+                print(f"\nstep {step} — {KINDS[kind]} ({key}):")
+                try:
+                    if teach:
+                        self.teach(kind, step, holder)
+                    else:
+                        d, quality, note = self.observe(key)
+                        if d is None:
+                            raise SystemExit(note)
+                        print(
+                            f"  dx={d[0]:+.4f} dy={d[1]:+.4f} dz={d[2]:+.4f} mm, "
+                            f"|d|={float(np.linalg.norm(d)):.4f} mm"
+                        )
+                        print(f"  {note}")
+                    done.append(key)
+                except SystemExit as e:
+                    print(f"  FAILED: {e}", file=sys.stderr)
+                    failed.append(f"{key}: {e}")
+                # Release this hold and arm the next in one write; 0 after the
+                # last one leaves nothing armed.
+                bot.put("PauseStep", TEACH_STOPS[i + 1][0] if i + 1 < len(TEACH_STOPS) else 0)
+            bot.wait_cycle_end(self.args.cycle_timeout)
+        except KeyboardInterrupt:
+            print("\ninterrupted — releasing the hold, letting the cycle finish", file=sys.stderr)
+            bot.put("PauseStep", 0)
+            bot.put("Wait", 1)
+            raise SystemExit(f"{len(done)} done before the interrupt")
+        bot.put("PauseStep", 0)
+        bot.put("Wait", 0)
+
+        print(f"\n{len(done)}/{len(TEACH_STOPS)} ok: {', '.join(done)}")
+        if failed:
+            print("failed:", file=sys.stderr)
+            for f in failed:
+                print(f"  {f}", file=sys.stderr)
+            raise SystemExit(1)
 
     def cmd_probe(self):
         step = int(self.get("CurrentStep"))
@@ -333,8 +428,12 @@ def main():
         help="hand-eye result written by tools/handeye/solve_joint.py",
     )
     p.add_argument("--kind", type=int, help="1=PickAlign, 3=PlaceAlign (teach/probe)")
+    p.add_argument("--arrive-timeout", type=float, default=180.0, help="seconds to a hold")
+    p.add_argument("--cycle-timeout", type=float, default=900.0, help="seconds to cycle end")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("teach").set_defaults(fn="cmd_teach")
+    sub.add_parser("teach-run").set_defaults(fn="cmd_teach_run")
+    sub.add_parser("check-run").set_defaults(fn="cmd_check_run")
     sub.add_parser("probe").set_defaults(fn="cmd_probe")
     sub.add_parser("run").set_defaults(fn="cmd_run")
     args = p.parse_args()
