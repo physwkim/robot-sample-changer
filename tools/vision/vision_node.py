@@ -498,6 +498,8 @@ class Node:
                 except SystemExit as e:
                     print(f"  FAILED: {e}", file=sys.stderr)
                     failed.append(f"{key}: {e}")
+                if self.args.dump:
+                    self.dump_frame(holder, step)
                 # Release this hold and arm the next in one write; 0 after the
                 # last one leaves nothing armed.
                 bot.put("PauseStep", TEACH_STOPS[i + 1][0] if i + 1 < len(TEACH_STOPS) else 0)
@@ -520,6 +522,33 @@ class Node:
             for f in failed:
                 print(f"  {f}", file=sys.stderr)
             raise SystemExit(1)
+
+    def dump_frame(self, holder, step):
+        """Keep the frame this stop was standing in, for work done afterwards.
+
+        A stop at an observation pose costs a cycle of the arm whether or not
+        anything is kept, so a campaign that needs n of them — the per-holder
+        seat offsets, say — is n cycles either way. Keeping the frame is what
+        makes those cycles reusable by an analysis written later.
+        """
+        frame = self.cam.grab()
+        if frame is None:
+            print("  no fresh frame to dump", file=sys.stderr)
+            return
+        img, z = frame
+        os.makedirs(self.args.dump, exist_ok=True)
+        path = os.path.join(
+            self.args.dump, f"h{holder}_s{step}_{int(time.time())}.npz"
+        )
+        np.savez(
+            path,
+            frame=img.astype(np.uint8),
+            depth_map=z.astype(np.float32),
+            gate=np.array(DEFAULT_GATE),
+            holder=holder,
+            step=step,
+        )
+        print(f"  dumped {os.path.basename(path)}")
 
     def cmd_probe(self):
         step = int(self.get("CurrentStep"))
@@ -606,6 +635,10 @@ def main():
         "--force",
         action="store_true",
         help="replace references that are already taught instead of keeping them",
+    )
+    p.add_argument(
+        "--dump",
+        help="directory to keep every stop's frame in, for analyses written later",
     )
     p.add_argument("--arrive-timeout", type=float, default=180.0, help="seconds to a hold")
     p.add_argument("--cycle-timeout", type=float, default=900.0, help="seconds to cycle end")

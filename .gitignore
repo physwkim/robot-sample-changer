@@ -49,3 +49,6 @@ handeye_samples/
 
 # Taught vision reference frames — site-specific captures, not source.
 vision_refs/
+# Frames kept by `vision_node --dump`, for analyses written after the cycle
+# that produced them. Same reason: a record of this rack on this day.
+vision_survey/
