@@ -1,6 +1,6 @@
 [Unit]
 Description=UR robot monitoring IOC (dashboard + RTDE receive, read-only) via procServ
-Documentation=file:///home/bl9b/ws/CLAUDE.md
+Documentation=file:///home/bl9b/work/robot-sample-changer/CLAUDE.md
 After=network-online.target
 Wants=network-online.target
 
@@ -8,25 +8,31 @@ Wants=network-online.target
 Type=simple
 User=bl9b
 Group=bl9b
-WorkingDirectory=/home/bl9b/ws/deploy/ur_monitor_ioc
+
+# Paths point at ~/work, not the ~/ws deployment tree the other services
+# use: ~/ws is on main and has no deploy/ur_monitor_ioc at all, and the
+# epics-rs-iocs checkout this needs lives at ~/work/epics-rs-iocs (there
+# is no ~/epics-rs-iocs on this host). Flip both prefixes if this IOC is
+# ever deployed from ~/ws.
+WorkingDirectory=/home/bl9b/work/robot-sample-changer/deploy/ur_monitor_ioc
 
 # db paths in st.cmd resolve via $(URROBOT); the binary defaults it to
 # its own crate dir, set explicitly here for clarity.
-Environment=URROBOT=/home/bl9b/epics-rs-iocs/iocs/ur-robot/ur-robot-ioc
+Environment=URROBOT=/home/bl9b/work/epics-rs-iocs/iocs/ur-robot/ur-robot-ioc
 
-# Console on TCP 20002 (robot_ioc owns 20001). Same procServ idiom as
-# robot-ioc.service: --foreground for systemd supervision, --ignore to
-# keep console ^D/^C from killing the IOC.
+# Console on TCP 20002 (robot_ioc owns 20001, d405-ioc 20003). Same
+# procServ idiom as robot-ioc.service: --foreground for systemd
+# supervision, --ignore to keep console ^D/^C from killing the IOC.
 ExecStart=/usr/bin/procServ \
   --foreground --quiet \
   --name ur_monitor_ioc \
-  --chdir /home/bl9b/ws/deploy/ur_monitor_ioc \
-  --logfile /home/bl9b/ws/deploy/ur_monitor_ioc/procServ.log \
+  --chdir /home/bl9b/work/robot-sample-changer/deploy/ur_monitor_ioc \
+  --logfile /home/bl9b/work/robot-sample-changer/deploy/ur_monitor_ioc/procServ.log \
   --logstamp \
   --ignore "^D^C" \
   20002 \
-  /home/bl9b/epics-rs-iocs/target/release/ur-robot-ioc \
-  /home/bl9b/ws/deploy/ur_monitor_ioc/st.cmd
+  /home/bl9b/work/epics-rs-iocs/target/release/ur-robot-ioc \
+  /home/bl9b/work/robot-sample-changer/deploy/ur_monitor_ioc/st.cmd
 
 Restart=always
 RestartSec=5

@@ -17,7 +17,8 @@ MoveIt + C++ 노드)은 `ros-free` 브랜치에서 제거됐습니다.
 | cspace-{core,collision,planning,planners} | `/home/bl9b/cspace` | `~/work/cspace` |
 | epics-ca-rs | `/home/bl9b/epics-rs` | `~/work/epics-rs` |
 
-모니터링 IOC용 `epics-rs-iocs`도 같은 위치 규칙(`/home/bl9b/epics-rs-iocs`).
+모니터링 IOC용 `epics-rs-iocs`도 같은 위치 규칙 — 이 호스트의 실제 체크아웃은
+`/home/bl9b/work/epics-rs-iocs`이고 `/home/bl9b/epics-rs-iocs`는 없습니다.
 robot_ioc(`src/epics_rs_robot`)은 기존 그대로 `/home/bl9b/codes/epics-rs`
 (v0.18.6)를 고정 참조 — 개발머신에서는 빌드되지 않으며 변경하지 않았습니다.
 

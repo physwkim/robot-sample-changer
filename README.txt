@@ -35,7 +35,7 @@ ROS2/MoveIt/colcon은 더 이상 필요 없습니다.
 EPICS IOC(robot_ioc)와 모니터링 IOC는 별도 빌드:
 
     cd ~/ws/src/epics_rs_robot && cargo build --release -p robot_ioc
-    cd ~/epics-rs-iocs && cargo build --release -p ur-robot-ioc
+    cd ~/work/epics-rs-iocs && cargo build --release -p ur-robot-ioc
 
 
 4. 실행 방법
