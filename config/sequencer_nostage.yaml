@@ -131,7 +131,12 @@ vision:
   enabled: false
   observe_only: false
   timeout: 2.0            # s to wait for the vision node's answer
-  min_correction: 0.05    # mm, deadband below which corrections are noise
+  # The deadband filters the arm, not the sensor: 20 production cycles put
+  # the re-approach spread at the observation pose at sigma (0.022, 0.007) mm
+  # and peak-to-peak (0.095, 0.026) mm, against an estimator floor of
+  # 0.001 mm (doc §14). 0.10 sits above the observed spread; the old 0.05
+  # sat inside it, so 1 cycle in 20 would have been corrected for nothing.
+  min_correction: 0.10    # mm, deadband below which corrections are noise
   max_correction: 3.0     # mm, larger corrections stop the sequence
   # Each hook observes from a standby pose, where the target is near the
   # middle of the frame, and the correction is applied to the above/on

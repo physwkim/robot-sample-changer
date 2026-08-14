@@ -226,7 +226,10 @@ impl Default for VisionConfig {
             enabled: false,
             observe_only: false,
             timeout: 2.0,
-            min_correction: 0.05,
+            // Above the arm's own re-approach spread at the observation
+            // pose, measured over 20 production cycles: sigma (0.022,
+            // 0.007) mm, peak-to-peak (0.095, 0.026) mm (doc §14).
+            min_correction: 0.10,
             max_correction: 3.0,
             pick_align: true,
             grip_offset: true,
@@ -444,7 +447,7 @@ mod tests {
         let config = Config::load(path).expect("load");
         let v = &config.vision;
         assert!(!v.enabled);
-        assert_eq!(v.min_correction, 0.05);
+        assert_eq!(v.min_correction, 0.10);
         assert_eq!(v.max_correction, 3.0);
         assert_eq!(v.req_pv, "Robot:Vision:Req");
         // Same for hand-eye: absent from the URSim config, and its
