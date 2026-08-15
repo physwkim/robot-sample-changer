@@ -445,6 +445,47 @@ mod tests {
         );
     }
 
+    /// Why the probe cannot be guarded by the scene, as an assertion.
+    ///
+    /// The stage is an approximate convex decomposition, so thin
+    /// concavities fill in and a bore stops being a hole — the config says
+    /// so about `holder1_on_position` in its own words. That makes the
+    /// taught in-bore pose a collision, and therefore makes every jog out
+    /// of it a collision too: measured on the arm, a 2 mm jog straight up
+    /// out of the bore was refused at 0.0%.
+    ///
+    /// If this ever fails, the decomposition has become fine enough to
+    /// represent the bore and `Guard::ContactForce` should be re-examined
+    /// rather than left standing on a premise that no longer holds.
+    #[test]
+    fn a_taught_in_bore_pose_reads_as_a_scene_collision() {
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/sequencer.yaml"
+        ));
+        let config = Config::load(path).expect("load config");
+        let model = Model::load(&config).expect("load model");
+        let waypoints = WaypointData::load(&config.sequence.waypoints_yaml).expect("waypoints");
+        let assets = load_scene_assets(&config).expect("scene assets");
+
+        let joints: JointMap = WaypointData::arm_joints(&waypoints.holder1_on_position)
+            .into_iter()
+            .collect();
+        let states = [model.state_with_joints(&joints).expect("state")];
+        assert!(
+            first_collision_index(
+                &model,
+                &assets,
+                &config.scene.allow_collisions_with,
+                &states
+            )
+            .expect("check")
+            .is_some(),
+            "holder1_on_position must read as a scene collision — that is the \
+             whole reason a force probe cannot borrow the jog's scene gate"
+        );
+    }
+
     /// The ACM allowances from the config must suppress a hit: the same
     /// TCP cube with every arm link allowed reports clear.
     #[test]

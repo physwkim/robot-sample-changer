@@ -587,7 +587,6 @@ impl<'a> Sequencer<'a> {
         let p = &self.config.probe;
         let lateral = ProbeLimits::new(&p.lateral, p.velocity_scale);
         let depth = ProbeLimits::new(&p.depth, p.velocity_scale);
-        let home = self.motion.current_joints()?;
 
         let mut brackets = Vec::new();
         for (name, axis) in [("base x", Vector3::x()), ("base y", Vector3::y())] {
@@ -601,14 +600,6 @@ impl<'a> Sequencer<'a> {
         // the same line that weight acts on for the slope to mean depth.
         let down = self.motion.base_dir_in_tool(&(-Vector3::z()))?;
         let floor = self.motion.probe_until_contact(down, depth, "base z-")?;
-        // Direct and not Cartesian, for the reason `bracket_axis` gives:
-        // the planner fallback would drag a seated puck sideways.
-        self.motion.move_direct(
-            &home,
-            p.velocity_scale,
-            p.velocity_scale,
-            "seat probe return",
-        )?;
 
         log::info("========================================");
         log::info("SEAT PROBE RESULT (measured from the pose the probe started at)");
@@ -632,10 +623,11 @@ impl<'a> Sequencer<'a> {
                 depth.travel_mm
             )),
         }
-        // Where the arm is, this knows: every probe returned to `home` and
-        // a return that could not be flown is an error rather than a
-        // logged caveat. Whether that pose is in a seat is the operator's
-        // claim from the jog hold, and nothing here has measured it.
+        // Where the arm is, this knows: every probe walks itself back out
+        // before it returns, and a retrace that could not be flown is an
+        // error rather than a logged caveat. Whether that pose is in a
+        // seat is the operator's claim from the jog hold, and nothing here
+        // has measured it.
         log::info(
             "  Nothing was written. The arm is back at the pose the probe \
              started from; lift it out before the next trigger.",

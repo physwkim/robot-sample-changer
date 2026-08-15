@@ -83,6 +83,36 @@ const MIN_ANGLE_CHANGE: f64 = 1e-3;
 /// repeated waypoints are dropped as before; four orders below the
 /// smallest joint change a probe step produces at any taught pose.
 const FINE_MIN_ANGLE_CHANGE: f64 = 1e-8;
+
+/// What keeps a straight-line move from driving the arm into something.
+///
+/// Every interpolated move names exactly one, and the two are not
+/// interchangeable settings on the same motion — they are what makes two
+/// motions different.
+///
+/// The scene is an approximate convex decomposition of the stage CAD, and
+/// `config/sequencer.yaml` already records the consequence in its own
+/// words: thin concavities fill in, and `holder1_on_position` reads as a
+/// collision. A convex hull has no bore. Measured on the arm: at
+/// `holder_on_position` a 2 mm jog straight *up*, out of the bore, was
+/// refused at 0.0% — the start state itself is inside filled-in geometry,
+/// so every direction fails, including the way the arm came in.
+///
+/// So a probe cannot be guarded by the scene, and does not need to be. It
+/// is the one primitive here that measures contact instead of predicting
+/// it, and it bounds its own travel besides.
+#[derive(Debug, Clone, Copy)]
+enum Guard {
+    /// No interpolated state may collide with the scene. Correct wherever
+    /// the model and the metal agree, which is everywhere the arm is not
+    /// deliberately inside a feature the model cannot represent.
+    Scene,
+    /// The caller reads force between steps and stops on contact, with
+    /// total travel bounded before the first step. Nothing here checks
+    /// geometry — see [`Motion::probe_until_contact`], which supplies both
+    /// halves and is the only thing allowed to ask for this.
+    ContactForce,
+}
 /// Below this per-joint distance a move is a no-op: TOTG rejects a
 /// degenerate start==goal path ("the path requires a 180 deg. turn"), and
 /// MoveIt executed such plans as trivial successes.
@@ -450,8 +480,9 @@ impl<'m> Motion<'m> {
     /// fallback — an unreachable line is an error the operator sees.
     ///
     /// An operator's jog is at least the 0.1 mm the GUI offers, so it
-    /// keeps [`MIN_ANGLE_CHANGE`]; [`Motion::jog_fine`] is for callers
-    /// that go smaller.
+    /// keeps [`MIN_ANGLE_CHANGE`], and the scene is what keeps it off the
+    /// stage. [`Motion::probe_step`] is the other caller of the same
+    /// mechanism, and it is guarded differently.
     pub fn jog(
         &mut self,
         dx_mm: f64,
@@ -459,21 +490,74 @@ impl<'m> Motion<'m> {
         dz_mm: f64,
         velocity_scale: f64,
     ) -> Result<(), SequencerError> {
-        self.jog_with(dx_mm, dy_mm, dz_mm, velocity_scale, MIN_ANGLE_CHANGE)
+        self.jog_with(
+            dx_mm,
+            dy_mm,
+            dz_mm,
+            velocity_scale,
+            Guard::Scene,
+            MIN_ANGLE_CHANGE,
+        )
     }
 
-    /// [`Motion::jog`] for a move small enough that TOTG's de-duplication
-    /// would throw it away — see [`FINE_MIN_ANGLE_CHANGE`]. The probe is
-    /// the only caller, and it is the difference between a step that
-    /// happens and one that is reported as having happened.
-    pub fn jog_fine(
+    /// One step of a force probe: the same straight line as
+    /// [`Motion::jog`], guarded by contact rather than by geometry, and
+    /// small enough that TOTG's ordinary de-duplication would throw it
+    /// away (see [`FINE_MIN_ANGLE_CHANGE`]).
+    ///
+    /// Not a jog with two flags flipped. A jog and a probe step are
+    /// different motions that share a mechanism, and the difference is
+    /// [`Guard`] — which is why this is its own name rather than a
+    /// parameter an operator-facing call could be handed by mistake.
+    /// [`Motion::probe_until_contact`] is the only caller and the only
+    /// thing that supplies the guard this depends on.
+    pub fn probe_step(
         &mut self,
         dx_mm: f64,
         dy_mm: f64,
         dz_mm: f64,
         velocity_scale: f64,
     ) -> Result<(), SequencerError> {
-        self.jog_with(dx_mm, dy_mm, dz_mm, velocity_scale, FINE_MIN_ANGLE_CHANGE)
+        self.jog_with(
+            dx_mm,
+            dy_mm,
+            dz_mm,
+            velocity_scale,
+            Guard::ContactForce,
+            FINE_MIN_ANGLE_CHANGE,
+        )
+    }
+
+    /// Flies `path` as given: no interpolation, no goal, no geometry
+    /// question. Used to walk a probe back out along the states it
+    /// reached, which is why there is nothing to check — every one of
+    /// them is a pose the arm was just standing in.
+    ///
+    /// This is the return that [`Motion::move_direct`] cannot be for a
+    /// probe. `move_direct` re-derives a fresh line and asks the scene
+    /// whether it is clear, and inside a bore the scene says no to every
+    /// line including the one the arm arrived on.
+    pub fn retrace(
+        &mut self,
+        path: &[JointMap],
+        velocity_scale: f64,
+        label: &str,
+    ) -> Result<(), SequencerError> {
+        if path.len() < 2 {
+            return Ok(());
+        }
+        let mut states = Vec::with_capacity(path.len());
+        for joints in path {
+            states.push(self.model.state_with_joints(joints)?);
+        }
+        log::info(&format!("  {label}: retracing {} waypoints", states.len()));
+        self.timed_execute(
+            states,
+            velocity_scale,
+            velocity_scale,
+            FINE_MIN_ANGLE_CHANGE,
+            label,
+        )
     }
 
     fn jog_with(
@@ -482,6 +566,7 @@ impl<'m> Motion<'m> {
         dy_mm: f64,
         dz_mm: f64,
         velocity_scale: f64,
+        guard: Guard,
         min_angle_change: f64,
     ) -> Result<(), SequencerError> {
         if dx_mm == 0.0 && dy_mm == 0.0 && dz_mm == 0.0 {
@@ -514,12 +599,18 @@ impl<'m> Motion<'m> {
         // an operator could not jog into the stage. The sequence steps
         // used the core-layer interpolator with no validity callback, so
         // the jog and [`Motion::move_direct`] gate; the steps do not.
-        if let Some(i) = first_collision_index(
-            self.model,
-            &self.scene_assets,
-            &self.allow_collisions_with,
-            &states,
-        )? {
+        //
+        // Reachability is checked either way below: whether IK can follow
+        // the line is a question about the arm, not about the scene, and
+        // no guard excuses a caller from it.
+        if matches!(guard, Guard::Scene)
+            && let Some(i) = first_collision_index(
+                self.model,
+                &self.scene_assets,
+                &self.allow_collisions_with,
+                &states,
+            )?
+        {
             let span = (states.len() - 1).max(1) as f64;
             states.truncate(i);
             fraction *= i.saturating_sub(1) as f64 / span;

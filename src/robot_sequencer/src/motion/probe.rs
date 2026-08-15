@@ -66,7 +66,7 @@ use crate::model::JointMap;
 /// Fraction of a commanded step that must actually appear in the arm's
 /// position for the step to count as taken.
 ///
-/// The guard is not theoretical. Before [`Motion::jog_fine`] existed the
+/// The guard is not theoretical. Before [`Motion::probe_step`] existed the
 /// arm executed 0.05 and 0.10 mm jogs as exactly 0.000 mm — TOTG dropped
 /// the only other waypoint and the move was reported complete — and this
 /// is what stopped the probe from reporting 1.5 mm of clearance it had
@@ -97,8 +97,15 @@ pub struct Contact {
     /// Travel at which the threshold tripped, or `None` if the probe ran
     /// out of allowance without touching anything.
     pub tripped_mm: Option<f64>,
-    /// Joints at the last step, so a caller can put the arm back.
-    pub end_joints: JointMap,
+    /// Every pose the arm actually stood in, starting at the pose the
+    /// probe began from and in the order they were reached.
+    ///
+    /// This is the way back. Measured rather than commanded, so under
+    /// contact — where the servo gives up ground and the arm is not where
+    /// it was told to be — the return still describes poses the arm has
+    /// occupied. See [`Motion::probe_until_contact`], which flies it in
+    /// reverse before returning.
+    pub visited: Vec<JointMap>,
 }
 
 impl Contact {
@@ -254,12 +261,55 @@ impl Motion<'_> {
     /// much harder than a bore wall — the floor while probing sideways, a
     /// puck that never entered the bore — and continuing to push at that
     /// is how a sample gets damaged.
+    ///
+    /// **The arm always ends where it started.** Every exit — contact,
+    /// travel exhausted, the abort limit, a step that did not execute —
+    /// goes back out along [`Contact::visited`] first. A caller cannot
+    /// forget to return the arm, and cannot return it wrongly, because it
+    /// is not the caller's job: leaving the arm pushing into a bore is the
+    /// state this primitive must never hand back, least of all on the
+    /// error paths where something has already gone wrong.
     pub fn probe_until_contact(
         &mut self,
         dir: Vector3,
         limits: ProbeLimits,
         label: &str,
     ) -> Result<Contact, SequencerError> {
+        let mut out = Contact {
+            travel_mm: Vec::new(),
+            lateral_n: Vec::new(),
+            along_n: Vec::new(),
+            tripped_mm: None,
+            visited: Vec::new(),
+        };
+        let stepping = self.step_until_contact(dir, limits, label, &mut out);
+        // Reversed, so it leaves from where the arm is standing now and
+        // ends at the pose the probe began from.
+        let back: Vec<JointMap> = out.visited.iter().rev().cloned().collect();
+        let returned = self.retrace(&back, limits.velocity_scale, label);
+        match (stepping, returned) {
+            (Ok(()), Ok(())) => Ok(out),
+            (Ok(()), Err(b)) => Err(b),
+            (Err(e), Ok(())) => Err(e),
+            // The probe failure is the one the operator has to act on; the
+            // retrace failure is why the arm is not where they will look
+            // for it, so neither can be dropped.
+            (Err(e), Err(b)) => Err(SequencerError(format!(
+                "{e} — and the arm could not be walked back out: {b}"
+            ))),
+        }
+    }
+
+    /// The stepping half of [`Motion::probe_until_contact`], which owns
+    /// the return. Split out so that every way this can leave — including
+    /// `?` on an RTDE read — is a return into code that walks the arm back.
+    fn step_until_contact(
+        &mut self,
+        dir: Vector3,
+        limits: ProbeLimits,
+        label: &str,
+        out: &mut Contact,
+    ) -> Result<(), SequencerError> {
         let norm = dir.norm();
         if norm < f64::EPSILON {
             return Err(SequencerError(format!("{label}: probe direction is zero")));
@@ -290,27 +340,27 @@ impl Motion<'_> {
             limits.travel_mm, steps, limits.step_mm, limits.threshold_n, limits.abort_n
         ));
 
-        let mut out = Contact {
-            travel_mm: Vec::with_capacity(steps),
-            lateral_n: Vec::with_capacity(steps),
-            along_n: Vec::with_capacity(steps),
-            tripped_mm: None,
-            end_joints: start_joints.clone(),
-        };
+        out.travel_mm.reserve(steps);
+        out.lateral_n.reserve(steps);
+        out.along_n.reserve(steps);
+        // The way back starts at the pose the probe began from, so it is
+        // recorded before the first step rather than after it.
+        out.visited.push(start_joints.clone());
 
         let mut previous = 0.0;
         for _ in 1..=steps {
             let d = unit * limits.step_mm;
-            // Fine, not the operator's jog: a probe step is below the size
-            // TOTG keeps, and the whole primitive rests on the step being
-            // real.
-            self.jog_fine(d.x, d.y, d.z, limits.velocity_scale)?;
+            self.probe_step(d.x, d.y, d.z, limits.velocity_scale)?;
 
             let (q, now) = self
                 .rtde
                 .session()?
                 .mean_q_and_wrench(SAMPLES_PER_READING)?;
-            out.end_joints = q_to_map(&q);
+            let here_joints = q_to_map(&q);
+            // Recorded before anything can fail below: a step that put the
+            // arm somewhere and then tripped the abort limit still has to
+            // be walked back out of.
+            out.visited.push(here_joints.clone());
             let df = Vector3::new(
                 now[0] - start_wrench[0],
                 now[1] - start_wrench[1],
@@ -323,7 +373,7 @@ impl Motion<'_> {
             // start pose, which is where the arm's own bias cancels.
             let along = df.dot(&base_dir);
             let lateral = (df - base_dir * along).norm();
-            let here = self.model.fk(&out.end_joints)?;
+            let here = self.model.fk(&here_joints)?;
             let travel =
                 (here.translation.vector - start_pose.translation.vector).dot(&base_dir) * 1000.0;
             out.travel_mm.push(travel);
@@ -344,7 +394,7 @@ impl Motion<'_> {
             if felt >= limits.threshold_n {
                 out.tripped_mm = Some(travel);
                 log::info(&format!("  {label}: contact at {travel:+.3} mm"));
-                return Ok(out);
+                return Ok(());
             }
             if travel - previous < limits.step_mm * STEP_TAKEN_FRACTION {
                 return Err(SequencerError(format!(
@@ -361,48 +411,26 @@ impl Motion<'_> {
             "  {label}: no contact within {:.2} mm",
             limits.travel_mm
         ));
-        Ok(out)
+        Ok(())
     }
 
     /// Both walls along one tool axis, and the middle between them.
     ///
     /// Everything is measured from the pose the arm starts at.
     ///
-    /// Both directions start from the same pose and the arm is returned to
-    /// it in between, so the two contacts are measured against one origin
-    /// rather than against each other.
-    ///
-    /// The returns are [`Motion::move_direct`] and never
-    /// [`Motion::move_cartesian`]: the latter falls back to the planner
-    /// when the line comes up short, and RRT-Connect joining two poses a
-    /// millimetre apart has been measured swinging the TCP 0.71 m. With a
-    /// puck seated in a bore that is not a longer route to the same place,
-    /// it is the sample being dragged out sideways. A line that cannot be
-    /// followed back the way it came means the arm is not where this
-    /// thinks it is, and stopping is the only safe answer to that.
+    /// Both directions start from the same pose, because
+    /// [`Motion::probe_until_contact`] puts the arm back before it
+    /// returns. The two contacts are therefore measured against one
+    /// origin rather than against each other, and this function contains
+    /// no motion of its own — there is no return here to get wrong.
     pub fn bracket_axis(
         &mut self,
         dir: Vector3,
         limits: ProbeLimits,
         label: &str,
     ) -> Result<Bracket, SequencerError> {
-        let home = self.current_joints()?;
-
         let plus = self.probe_until_contact(dir, limits, &format!("{label}+"))?;
-        self.move_direct(
-            &home,
-            limits.velocity_scale,
-            limits.velocity_scale,
-            "probe return",
-        )?;
-
         let minus = self.probe_until_contact(-dir, limits, &format!("{label}-"))?;
-        self.move_direct(
-            &home,
-            limits.velocity_scale,
-            limits.velocity_scale,
-            "probe return",
-        )?;
 
         let bracket = Bracket {
             label: label.to_string(),
@@ -441,12 +469,12 @@ mod tests {
     use crate::model::Model;
     use crate::waypoints::WaypointData;
 
-    /// The reason [`Motion::jog_fine`] exists, as an assertion rather than
-    /// a comment: at the poses the probe actually runs at, one configured
-    /// step moves every joint less than TOTG's ordinary de-duplication
-    /// threshold, so the ordinary path would drop the move and report it
-    /// done. Measured on the arm before this was found — 0.05 and 0.10 mm
-    /// jogs travelled 0.000 mm.
+    /// Why [`Motion::probe_step`] carries its own TOTG threshold, as an
+    /// assertion rather than a comment: at the poses the probe actually
+    /// runs at, one configured step moves every joint less than TOTG's
+    /// ordinary de-duplication threshold, so the ordinary path would drop
+    /// the move and report it done. Measured on the arm before this was
+    /// found — 0.05 and 0.10 mm jogs travelled 0.000 mm.
     ///
     /// It also pins the other side: the fine threshold has to keep the
     /// step, and by a margin that is not a coincidence of one pose.
@@ -479,8 +507,8 @@ mod tests {
                 assert!(
                     moved < super::super::MIN_ANGLE_CHANGE,
                     "{name} axis {axis}: {step_mm} mm moves a joint {moved} rad, which the \
-                     ordinary path would keep — jog_fine may no longer be needed, but check \
-                     every pose before removing it"
+                     ordinary path would keep — probe_step may no longer need its own \
+                     threshold, but check every pose before dropping it"
                 );
                 assert!(
                     moved > super::super::FINE_MIN_ANGLE_CHANGE * 100.0,
@@ -500,7 +528,7 @@ mod tests {
             lateral_n: vec![0.0; travel.len()],
             along_n: along.to_vec(),
             tripped_mm: travel.last().copied(),
-            end_joints: JointMap::new(),
+            visited: Vec::new(),
         }
     }
 
@@ -546,7 +574,7 @@ mod tests {
             lateral_n: Vec::new(),
             along_n: Vec::new(),
             tripped_mm: t,
-            end_joints: JointMap::new(),
+            visited: Vec::new(),
         };
         Bracket {
             label: "base x".into(),
