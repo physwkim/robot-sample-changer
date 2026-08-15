@@ -25,6 +25,8 @@ pub struct Config {
     pub vision: VisionConfig,
     #[serde(default)]
     pub handeye: HandEyeConfig,
+    #[serde(default)]
+    pub probe: ProbeConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -249,6 +251,92 @@ impl Default for VisionConfig {
     }
 }
 
+/// One probe direction's step size, allowance and force limits.
+///
+/// Two of these and not eight prefixed fields on [`ProbeConfig`] because
+/// the numbers genuinely differ between the two directions: a bore wall is
+/// half a millimetre away and answers a light touch, a seat floor is
+/// several millimetres down and is what the puck's own weight already
+/// rests on.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ProbeAxisConfig {
+    /// One step, mm. Also the worst-case overshoot past first contact,
+    /// since the probe reads force between steps and stops on the first
+    /// one that trips.
+    pub step_mm: f64,
+    /// Total travel allowed in one direction, mm. Running out without
+    /// touching anything is an answer, not a failure.
+    pub travel_mm: f64,
+    /// Force change from the start pose that counts as contact, N.
+    pub threshold_n: f64,
+    /// Force change that aborts the probe outright, N.
+    pub abort_n: f64,
+}
+
+/// Force-stopped seat probing (`CalibMode` = Seat Probe). Commissioning
+/// only: it measures where a bore actually is, which a taught pose only
+/// records an operator's belief about.
+///
+/// It exists because the criterion for the offsets is that the puck goes
+/// in and comes out without rubbing — lateral contact is what shakes the
+/// sample — and image agreement is a proxy for that which cannot see a
+/// bore whose axis differs from where its rim looks.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ProbeConfig {
+    /// Velocity and acceleration scale for every probe step and every
+    /// return. One value rather than one per direction: it says how
+    /// gently the arm may move next to a sample, which does not change
+    /// between pushing sideways and pushing down.
+    pub velocity_scale: f64,
+    /// Sideways, toward a bore wall.
+    pub lateral: ProbeAxisConfig,
+    /// Downward, toward the seat floor.
+    pub depth: ProbeAxisConfig,
+}
+
+impl Default for ProbeConfig {
+    fn default() -> Self {
+        Self {
+            velocity_scale: 0.02,
+            lateral: ProbeAxisConfig {
+                // Ten steps to a wall at the nominal 0.50 mm radial
+                // clearance, and 0.05 mm of overshoot past it.
+                step_mm: 0.05,
+                // Past the clearance by enough that "no contact" means the
+                // bore is not where the pose says, rather than that the
+                // probe was too short.
+                travel_mm: 1.5,
+                // Seven times the 0.073 N the arm scatters standing still
+                // (doc/vision_correction_plan.md §16.1). Reading between
+                // steps is what makes a threshold this low usable at all.
+                threshold_n: 0.5,
+                // Well under the 8.5-22.9 N the arm was measured pushing
+                // through a rubbing insert: that is the force this mode
+                // exists to stop the sequence from applying, not a level
+                // to probe up to.
+                abort_n: 5.0,
+            },
+            depth: ProbeAxisConfig {
+                step_mm: 0.10,
+                travel_mm: 4.0,
+                threshold_n: 1.0,
+                abort_n: 8.0,
+            },
+        }
+    }
+}
+
+impl Default for ProbeAxisConfig {
+    /// Only reachable through a partial `lateral:`/`depth:` block, where
+    /// serde fills the unnamed fields from here. The lateral numbers are
+    /// the safer of the two sets to inherit.
+    fn default() -> Self {
+        ProbeConfig::default().lateral
+    }
+}
+
 /// Eye-in-hand calibration capture (`CalibMode` = Hand-Eye). Commissioning
 /// only: it produces the `T_ee_cam` that [`VisionConfig`]'s node needs
 /// before it can convert pixels to a TCP-local correction at all.
@@ -353,6 +441,41 @@ impl Config {
                     .into(),
             ));
         }
+        // Same reasoning as the hand-eye block above, with more at stake:
+        // these numbers are the only thing bounding how hard the arm is
+        // allowed to push on a sample, and a probe that reads them for the
+        // first time has already been triggered.
+        for (name, axis) in [
+            ("probe.lateral", &config.probe.lateral),
+            ("probe.depth", &config.probe.depth),
+        ] {
+            if axis.step_mm <= 0.0 {
+                return Err(SequencerError(format!("{name}.step_mm must be positive")));
+            }
+            if axis.travel_mm < axis.step_mm {
+                return Err(SequencerError(format!(
+                    "{name}.travel_mm must be at least one {name}.step_mm"
+                )));
+            }
+            if axis.threshold_n <= 0.0 {
+                return Err(SequencerError(format!(
+                    "{name}.threshold_n must be positive"
+                )));
+            }
+            // An abort at or below the contact threshold aborts every
+            // probe the moment it succeeds, which reads as "the probe
+            // cannot touch anything" rather than as a misconfiguration.
+            if axis.abort_n <= axis.threshold_n {
+                return Err(SequencerError(format!(
+                    "{name}.abort_n must be above {name}.threshold_n"
+                )));
+            }
+        }
+        if !(0.0..=0.1).contains(&config.probe.velocity_scale) {
+            return Err(SequencerError(
+                "probe.velocity_scale must be within 0..0.1 (a probe steps into contact)".into(),
+            ));
+        }
         if config.vision.enabled {
             let v = &config.vision;
             // Below ~0.002 mm the IK offset helper's epsilon treats the
@@ -454,6 +577,55 @@ mod tests {
         // defaults must be the ones the daemon banner advertises.
         assert_eq!(config.handeye.angle_deg, 8.0);
         assert_eq!(config.handeye.min_samples, 5);
+    }
+
+    /// Same reasoning as the hand-eye ranges, on the numbers that bound
+    /// how hard the arm may push on a sample. `abort_n` at or below
+    /// `threshold_n` is the one that would not look like a
+    /// misconfiguration at runtime: every probe would abort at the
+    /// instant it succeeded, and read as a probe that cannot touch
+    /// anything.
+    #[test]
+    fn rejects_probe_limits_that_would_abort_on_contact() {
+        let base = std::fs::read_to_string(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/sequencer_ursim.yaml"
+        )))
+        .expect("read");
+        let dir = std::env::temp_dir().join("probe_config_bounds");
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        for (name, section, want) in [
+            (
+                "abort_at_threshold",
+                "probe:\n  lateral:\n    threshold_n: 0.5\n    abort_n: 0.5\n",
+                "probe.lateral.abort_n",
+            ),
+            (
+                "abort_under_threshold",
+                "probe:\n  depth:\n    threshold_n: 2.0\n    abort_n: 1.0\n",
+                "probe.depth.abort_n",
+            ),
+            (
+                "step_zero",
+                "probe:\n  lateral:\n    step_mm: 0.0\n",
+                "probe.lateral.step_mm",
+            ),
+            (
+                "travel_under_one_step",
+                "probe:\n  depth:\n    step_mm: 0.5\n    travel_mm: 0.2\n",
+                "probe.depth.travel_mm",
+            ),
+            (
+                "velocity_hi",
+                "probe:\n  velocity_scale: 0.5\n",
+                "probe.velocity_scale",
+            ),
+        ] {
+            let path = dir.join(format!("{name}.yaml"));
+            std::fs::write(&path, format!("{base}\n{section}")).expect("write");
+            let err = Config::load(&path).expect_err(name).to_string();
+            assert!(err.contains(want), "{name}: unexpected error {err}");
+        }
     }
 
     /// The range checks run at load, not at mode selection: an operator

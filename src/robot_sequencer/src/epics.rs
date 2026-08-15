@@ -32,7 +32,7 @@ pub enum WaitStatus {
 }
 
 /// `Robot:CalibMode` states (mbbo: 0=Normal, 1=Holder, 2=Sample Holder,
-/// 3=Hand-Eye, 4=Recover).
+/// 3=Hand-Eye, 4=Recover, 5=Seat Probe).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CalibMode {
     Normal,
@@ -48,6 +48,11 @@ pub enum CalibMode {
     /// uses, and a recovery the operator has to remember a second
     /// mechanism for is one they will not reach for.
     Recover,
+    /// Feel for the walls and floor of the seat the arm is standing in.
+    /// Like Hand-Eye it measures and writes nothing back into the
+    /// sequence; unlike every other mode it moves until something pushes
+    /// back rather than to a pose.
+    SeatProbe,
 }
 
 /// `Robot:Vision:Kind` request codes (mbbo).
@@ -278,6 +283,7 @@ impl Epics {
             Some(2) => CalibMode::SampleHolder,
             Some(3) => CalibMode::HandEye,
             Some(4) => CalibMode::Recover,
+            Some(5) => CalibMode::SeatProbe,
             _ => CalibMode::Normal,
         }
     }

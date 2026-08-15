@@ -13,6 +13,8 @@
 
 use std::time::Duration;
 
+use cspace_core::geometry::Vector3;
+
 use crate::config::Config;
 use crate::epics::{CalibMode, Epics, VisionKind, WaitStatus};
 use crate::error::SequencerError;
@@ -20,7 +22,7 @@ use crate::gripper::Gripper;
 use crate::handeye;
 use crate::log;
 use crate::model::{JointMap, Model};
-use crate::motion::Motion;
+use crate::motion::{Motion, ProbeLimits};
 use crate::waypoints::WaypointData;
 
 const POLL: Duration = Duration::from_millis(100);
@@ -188,6 +190,7 @@ impl<'a> Sequencer<'a> {
                 CalibMode::Holder => "Holder",
                 CalibMode::SampleHolder => "SampleHolder",
                 CalibMode::HandEye => "HandEye",
+                CalibMode::SeatProbe => "SeatProbe",
                 CalibMode::Recover => "Recover",
                 CalibMode::Normal => "Normal",
             };
@@ -217,6 +220,7 @@ impl<'a> Sequencer<'a> {
                     CalibMode::Holder => self.run_calib_holder(&run, start_from_step),
                     CalibMode::SampleHolder => self.run_calib_sample_holder(&run, start_from_step),
                     CalibMode::HandEye => self.run_handeye(),
+                    CalibMode::SeatProbe => self.run_seat_probe(),
                     CalibMode::Recover => self.run_recover(&run),
                     CalibMode::Normal => self.run_normal(&run, start_from_step),
                 });
@@ -259,15 +263,18 @@ impl<'a> Sequencer<'a> {
                     self.sequence_count
                 )),
                 (CalibMode::Recover, _) => log::info("Arm returned to holder standby"),
+                (CalibMode::SeatProbe, _) => log::info("Seat probe finished; nothing written"),
             }
             log::info("========================================");
 
-            // Recover moved the arm; it did not finish the run that
+            // These two moved the arm; neither finished the run that
             // stopped. Zeroing here would erase the step the operator
             // still has to act on, and it would claim idle while the
             // gripper may still be holding a sample, which is the one
-            // state where `CurrentStep = 0` is a lie worth avoiding.
-            if calib_mode == CalibMode::Recover {
+            // state where `CurrentStep = 0` is a lie worth avoiding —
+            // and the seat probe is entered *because* the gripper is
+            // holding one.
+            if matches!(calib_mode, CalibMode::Recover | CalibMode::SeatProbe) {
                 log::info(
                     "CurrentStep left as it was: the interrupted run is still the resume \
                      point, and the gripper still holds whatever it held.",
@@ -534,6 +541,106 @@ impl<'a> Sequencer<'a> {
             None => log::error("Hand-eye capture produced nothing usable; not written"),
         }
         self.handeye_return(&entry)?;
+        Ok(false)
+    }
+
+    /// Feels for the seat the arm is standing in: both walls along base
+    /// x, both along base y, and the floor under the puck.
+    ///
+    /// The offsets exist so the puck goes in and comes out without
+    /// rubbing — lateral contact during the insert is what shakes the
+    /// sample, and shaking is what damages it. Every other way of
+    /// checking them is a proxy for that: the taught pose records where
+    /// an operator once believed the bore was, and the vision correction
+    /// measures a rim, which is not the same object as the bore whose
+    /// axis the puck has to follow. This measures the thing itself.
+    ///
+    /// The result is printed and nothing else. Turning "the bore centre
+    /// is 0.23 mm along base y from here" into a change in the waypoint
+    /// table is a decision about the rack, taken with the numbers from
+    /// more than one holder in front of you, and it is not one a mode
+    /// that has just been driven into contact should take on its own.
+    ///
+    /// Two triggers, like hand-eye: the first selects the mode and opens
+    /// a jog hold, the second commits from wherever the arm was jogged
+    /// to. The hold is where the operator lowers the gripped puck into
+    /// the seat; the idle wait it was entered from cannot be that hold,
+    /// because it services no jog (jogging there would move the taught
+    /// pose the sequence starts from).
+    ///
+    /// `CurrentStep` is untouched, and the arm is left in the seat: this
+    /// mode is entered mid-run with a sample in the fingers, and neither
+    /// deciding how to lift a puck back out of a bore nor claiming the
+    /// run is over belongs here.
+    fn run_seat_probe(&mut self) -> Result<bool, SequencerError> {
+        log::info(">>> SEAT PROBE MODE: step into contact, measure, write nothing <<<");
+        log::info("========================================");
+        log::info("SEAT PROBE: jog the gripped puck down into the seat");
+        log::info("  Use JogX/Y/Z + JogStep to move the TCP, Gripper to hold the puck");
+        log::info("  Set Trigger=1 to probe from where the arm is");
+        log::info("  The arm will push up to the configured abort force. If the puck is");
+        log::info("  not in the seat, or the fingers are empty, stop here.");
+        log::info("========================================");
+        self.wait_for_trigger(true);
+
+        let p = &self.config.probe;
+        let lateral = ProbeLimits::new(&p.lateral, p.velocity_scale);
+        let depth = ProbeLimits::new(&p.depth, p.velocity_scale);
+        let home = self.motion.current_joints()?;
+
+        let mut centres = Vec::new();
+        for (name, axis) in [("base x", Vector3::x()), ("base y", Vector3::y())] {
+            let dir = self.motion.base_dir_in_tool(&axis)?;
+            let (centre, half_gap, _, _) = self.motion.bracket_axis(dir, lateral, name)?;
+            centres.push((name, centre, half_gap));
+        }
+
+        // Straight down in base, not along whichever tool axis happens to
+        // point that way: the seat floor is horizontal and the puck's own
+        // weight is already resting on it, so the probe has to push along
+        // the same line that weight acts on for the slope to mean depth.
+        let down = self.motion.base_dir_in_tool(&(-Vector3::z()))?;
+        let floor = self.motion.probe_until_contact(down, depth, "base z-")?;
+        // Direct and not Cartesian, for the reason `bracket_axis` gives:
+        // the planner fallback would drag a seated puck sideways.
+        self.motion.move_direct(
+            &home,
+            p.velocity_scale,
+            p.velocity_scale,
+            "seat probe return",
+        )?;
+
+        log::info("========================================");
+        log::info("SEAT PROBE RESULT (measured from the pose the probe started at)");
+        for (name, centre, half_gap) in centres {
+            match (centre, half_gap) {
+                (Some(c), Some(h)) => log::info(&format!(
+                    "  {name}: centre {c:+.3} mm, clearance {h:.3} mm per side"
+                )),
+                _ => log::info(&format!(
+                    "  {name}: only one side touched — no centre from a single wall"
+                )),
+            }
+        }
+        // The trip point carries the threshold in it; the fit does not.
+        // Both are printed because they disagreeing by more than a step
+        // is how a floor that was already loaded before the probe began
+        // announces itself.
+        match (floor.tripped_mm, floor.touch_at(depth.threshold_n)) {
+            (Some(t), Some(f)) => log::info(&format!(
+                "  base z: floor at {f:+.3} mm from the force-versus-depth fit, \
+                 tripped at {t:+.3} mm"
+            )),
+            (Some(t), None) => log::info(&format!(
+                "  base z: tripped at {t:+.3} mm, too few rising samples to fit a floor"
+            )),
+            (None, _) => log::info(&format!(
+                "  base z: no floor within {:.2} mm — the puck is not resting on anything",
+                depth.travel_mm
+            )),
+        }
+        log::info("  Nothing was written. The arm is where the probe started, in the seat.");
+        log::info("========================================");
         Ok(false)
     }
 

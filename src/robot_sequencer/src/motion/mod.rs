@@ -17,8 +17,10 @@
 
 mod bringup;
 mod execute;
+mod probe;
 mod scene;
 
+pub(crate) use probe::ProbeLimits;
 pub(crate) use scene::LevelToolConstraint;
 pub(crate) use scene::{SceneAsset, first_collision_index, load_scene_assets, scene_with_assets};
 

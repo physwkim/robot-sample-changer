@@ -158,6 +158,28 @@ impl Session<'_> {
         }
     }
 
+    /// Current TCP wrench, drained the same way as [`Session::fresh_q`].
+    ///
+    /// `actual_TCP_force` is URControl's estimate from joint currents, not
+    /// a wrist sensor, so its absolute value carries the arm's own model
+    /// error and the payload — Fy reads -33.9 N standing still at the rack
+    /// standby. Nothing here trusts that. What the probe uses is the
+    /// *change* across a few millimetres of travel, where the bias is
+    /// common to both readings and cancels; against that difference the
+    /// noise standing still is 0.073 N, and rubbing a bore on the way in is
+    /// 8.5 to 22.9 N.
+    pub fn fresh_wrench(&mut self) -> Result<Vector6D, SequencerError> {
+        for _ in 0..DRAIN_PACKAGES {
+            self.read()?;
+        }
+        match self.read()?.get("actual_TCP_force") {
+            Some(RtdeValue::V6D(f)) => Ok(*f),
+            other => Err(SequencerError(format!(
+                "actual_TCP_force missing from RTDE package: {other:?}"
+            ))),
+        }
+    }
+
     /// Reads until `field` equals `value`, or the deadline passes.
     pub fn wait_for_f64(
         &mut self,
