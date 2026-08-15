@@ -141,6 +141,71 @@ impl Contact {
     }
 }
 
+/// Two opposed probes from one pose, and what they did or did not find.
+///
+/// The pair is kept rather than reduced to a centre because "neither side
+/// touched" and "one side touched" are different facts about the seat, and
+/// a caller that only received `None` could not tell them apart. The first
+/// free-air run reported "only one side touched" when neither had.
+#[derive(Debug, Clone)]
+pub struct Bracket {
+    label: String,
+    /// Travel allowed in each direction, for the message when nothing was
+    /// found within it.
+    travel_mm: f64,
+    pub plus: Contact,
+    pub minus: Contact,
+}
+
+impl Bracket {
+    /// What to add to the current position to sit between the two walls,
+    /// or `None` unless both were found.
+    ///
+    /// A threshold that trips consistently late pushes both contacts
+    /// outward by the same amount, so it cancels here — unlike in
+    /// [`Bracket::half_gap_mm`].
+    pub fn centre_mm(&self) -> Option<f64> {
+        match (self.plus.tripped_mm, self.minus.tripped_mm) {
+            (Some(p), Some(m)) => Some((p - m) / 2.0),
+            _ => None,
+        }
+    }
+
+    /// Half the distance between the two walls: the radial clearance,
+    /// which does carry the contact threshold in it.
+    pub fn half_gap_mm(&self) -> Option<f64> {
+        match (self.plus.tripped_mm, self.minus.tripped_mm) {
+            (Some(p), Some(m)) => Some((p + m) / 2.0),
+            _ => None,
+        }
+    }
+
+    /// One line saying which of the three things happened.
+    pub fn summary(&self) -> String {
+        let label = &self.label;
+        match (self.plus.tripped_mm, self.minus.tripped_mm) {
+            (Some(p), Some(m)) => format!(
+                "{label}: walls at {p:+.3} and {:+.3} mm -> centre {:+.3} mm, \
+                 clearance {:.3} mm per side",
+                -m,
+                self.centre_mm().unwrap_or(f64::NAN),
+                self.half_gap_mm().unwrap_or(f64::NAN),
+            ),
+            (None, None) => format!(
+                "{label}: nothing within {:.2} mm either way — no wall to measure from",
+                self.travel_mm
+            ),
+            (Some(p), None) => format!(
+                "{label}: only the + side touched, at {p:+.3} mm — one wall is not a centre"
+            ),
+            (None, Some(m)) => format!(
+                "{label}: only the - side touched, at {:+.3} mm — one wall is not a centre",
+                -m
+            ),
+        }
+    }
+}
+
 /// How a probe is allowed to move and when it must stop.
 #[derive(Debug, Clone, Copy)]
 pub struct ProbeLimits {
@@ -301,11 +366,7 @@ impl Motion<'_> {
 
     /// Both walls along one tool axis, and the middle between them.
     ///
-    /// Returns `(centre_mm, half_gap_mm)` measured from the pose the arm
-    /// starts at, plus the two probes. `centre_mm` is what a caller adds to
-    /// the current position to sit in the middle of the bore; `half_gap_mm`
-    /// is the radial clearance, which unlike the centre *does* carry the
-    /// threshold in it.
+    /// Everything is measured from the pose the arm starts at.
     ///
     /// Both directions start from the same pose and the arm is returned to
     /// it in between, so the two contacts are measured against one origin
@@ -324,7 +385,7 @@ impl Motion<'_> {
         dir: Vector3,
         limits: ProbeLimits,
         label: &str,
-    ) -> Result<(Option<f64>, Option<f64>, Contact, Contact), SequencerError> {
+    ) -> Result<Bracket, SequencerError> {
         let home = self.current_joints()?;
 
         let plus = self.probe_until_contact(dir, limits, &format!("{label}+"))?;
@@ -343,21 +404,17 @@ impl Motion<'_> {
             "probe return",
         )?;
 
-        let (centre, half_gap) = match (plus.tripped_mm, minus.tripped_mm) {
-            (Some(p), Some(m)) => (Some((p - m) / 2.0), Some((p + m) / 2.0)),
-            _ => (None, None),
+        let bracket = Bracket {
+            label: label.to_string(),
+            plus,
+            minus,
+            travel_mm: limits.travel_mm,
         };
-        match (centre, half_gap) {
-            (Some(c), Some(h)) => log::info(&format!(
-                "{label}: walls at {:+.3} and {:+.3} mm -> centre {c:+.3} mm, clearance {h:.3} mm",
-                plus.tripped_mm.unwrap_or(f64::NAN),
-                -minus.tripped_mm.unwrap_or(f64::NAN),
-            )),
-            _ => log::warn(&format!(
-                "{label}: only one side touched — no centre from a single wall"
-            )),
+        match bracket.centre_mm() {
+            Some(_) => log::info(&bracket.summary()),
+            None => log::warn(&bracket.summary()),
         }
-        Ok((centre, half_gap, plus, minus))
+        Ok(bracket)
     }
 
     /// A base-frame direction expressed in the tool frame at the current
@@ -481,5 +538,47 @@ mod tests {
     fn no_spread_in_depth_is_not_a_fit() {
         let c = contact(&[0.3, 0.3], &[-1.0, -3.0]);
         assert_eq!(c.touch_at(1.0), None);
+    }
+
+    fn bracket(plus: Option<f64>, minus: Option<f64>) -> Bracket {
+        let side = |t: Option<f64>| Contact {
+            travel_mm: Vec::new(),
+            lateral_n: Vec::new(),
+            along_n: Vec::new(),
+            tripped_mm: t,
+            end_joints: JointMap::new(),
+        };
+        Bracket {
+            label: "base x".into(),
+            travel_mm: 1.5,
+            plus: side(plus),
+            minus: side(minus),
+        }
+    }
+
+    /// Both probes report their own travel as positive, each along its own
+    /// direction, so the minus wall sits at `-minus` on the plus axis.
+    /// A bore whose centre is 0.1 mm in the plus direction from the start
+    /// pose, with 0.5 mm of clearance, gives 0.6 and 0.4.
+    #[test]
+    fn the_centre_is_the_midpoint_of_the_two_walls() {
+        let b = bracket(Some(0.6), Some(0.4));
+        assert!((b.centre_mm().unwrap() - 0.1).abs() < 1e-12);
+        assert!((b.half_gap_mm().unwrap() - 0.5).abs() < 1e-12);
+    }
+
+    /// The defect this type was introduced for: the first free-air run
+    /// touched neither wall and the report called it one.
+    #[test]
+    fn neither_wall_is_not_one_wall() {
+        let neither = bracket(None, None).summary();
+        assert!(
+            neither.contains("nothing within") && !neither.contains("only"),
+            "{neither}"
+        );
+        assert!(bracket(Some(0.6), None).summary().contains("only the +"));
+        assert!(bracket(None, Some(0.4)).summary().contains("only the -"));
+        assert_eq!(bracket(None, None).centre_mm(), None);
+        assert_eq!(bracket(Some(0.6), None).centre_mm(), None);
     }
 }

@@ -588,11 +588,10 @@ impl<'a> Sequencer<'a> {
         let depth = ProbeLimits::new(&p.depth, p.velocity_scale);
         let home = self.motion.current_joints()?;
 
-        let mut centres = Vec::new();
+        let mut brackets = Vec::new();
         for (name, axis) in [("base x", Vector3::x()), ("base y", Vector3::y())] {
             let dir = self.motion.base_dir_in_tool(&axis)?;
-            let (centre, half_gap, _, _) = self.motion.bracket_axis(dir, lateral, name)?;
-            centres.push((name, centre, half_gap));
+            brackets.push(self.motion.bracket_axis(dir, lateral, name)?);
         }
 
         // Straight down in base, not along whichever tool axis happens to
@@ -612,15 +611,8 @@ impl<'a> Sequencer<'a> {
 
         log::info("========================================");
         log::info("SEAT PROBE RESULT (measured from the pose the probe started at)");
-        for (name, centre, half_gap) in centres {
-            match (centre, half_gap) {
-                (Some(c), Some(h)) => log::info(&format!(
-                    "  {name}: centre {c:+.3} mm, clearance {h:.3} mm per side"
-                )),
-                _ => log::info(&format!(
-                    "  {name}: only one side touched — no centre from a single wall"
-                )),
-            }
+        for bracket in brackets {
+            log::info(&format!("  {}", bracket.summary()));
         }
         // The trip point carries the threshold in it; the fit does not.
         // Both are printed because they disagreeing by more than a step
