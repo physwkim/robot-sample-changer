@@ -66,6 +66,23 @@ pub const RTDE_JOINT_ORDER: [&str; 6] = [
 
 /// TOTG resample step — each sample becomes one quintic spline segment.
 const RESAMPLE_DT: f64 = 0.1;
+/// TOTG drops a waypoint when no joint moved further than this, which is
+/// upstream's guard against exactly-repeated points in planner output, not
+/// a statement about what the arm can do. A trajectory left with one point
+/// is executed as a trivial success — the move is reported completed and
+/// never sent.
+///
+/// The sequence's steps are centimetres and never approach it. A probe
+/// step is not: 0.20 mm is 1.03e-3 rad at `holder1_standby` and 7.5e-4 rad
+/// at `sample_holder_on_position`, so the same commanded step executes at
+/// one pose and vanishes at another. Measured on the arm — jogs of 0.05
+/// and 0.10 mm moved 0.000 mm, 0.20 mm and above arrived at 101%.
+const MIN_ANGLE_CHANGE: f64 = 1e-3;
+/// [`MIN_ANGLE_CHANGE`] for moves that are deliberately smaller than the
+/// de-duplication heuristic. Still far above float noise, so exactly
+/// repeated waypoints are dropped as before; four orders below the
+/// smallest joint change a probe step produces at any taught pose.
+const FINE_MIN_ANGLE_CHANGE: f64 = 1e-8;
 /// Below this per-joint distance a move is a no-op: TOTG rejects a
 /// degenerate start==goal path ("the path requires a 180 deg. turn"), and
 /// MoveIt executed such plans as trivial successes.
@@ -153,11 +170,18 @@ impl<'m> Motion<'m> {
     }
 
     /// Times an interpolated state sequence with TOTG and runs it.
+    ///
+    /// `min_angle_change` is [`MIN_ANGLE_CHANGE`] for everything the
+    /// sequence does; a caller passes [`FINE_MIN_ANGLE_CHANGE`] only when
+    /// its move is deliberately smaller than the de-duplication heuristic
+    /// and being silently dropped would be worse than any cost of keeping
+    /// it.
     fn timed_execute(
         &mut self,
         states: Vec<RobotState<'m>>,
         velocity_scale: f64,
         acceleration_scale: f64,
+        min_angle_change: f64,
         label: &str,
     ) -> Result<(), SequencerError> {
         let mut trajectory = RobotTrajectory::for_group_name(&self.model.robot, &self.model.group)
@@ -173,7 +197,7 @@ impl<'m> Motion<'m> {
             acceleration_scale,
             0.1,
             RESAMPLE_DT,
-            0.001,
+            min_angle_change,
         )
         .map_err(|e| SequencerError(format!("{label}: TOTG failed: {e}")))?;
 
@@ -265,7 +289,13 @@ impl<'m> Motion<'m> {
         }
         log::info(&format!("  Direct path: {} waypoints", states.len()));
 
-        self.timed_execute(states, velocity_scale, acceleration_scale, label)
+        self.timed_execute(
+            states,
+            velocity_scale,
+            acceleration_scale,
+            MIN_ANGLE_CHANGE,
+            label,
+        )
     }
 
     /// Planned (RRT-Connect) joint-space move, the port of the MoveGroup
@@ -405,13 +435,23 @@ impl<'m> Motion<'m> {
             return Ok(());
         }
 
-        self.timed_execute(states, velocity_scale, acceleration_scale, label)
+        self.timed_execute(
+            states,
+            velocity_scale,
+            acceleration_scale,
+            MIN_ANGLE_CHANGE,
+            label,
+        )
     }
 
     /// TCP-relative jog for calibration: `d*_mm` in the `ik_frame` frame,
     /// converted to a base-frame translation, executed as a straight line
     /// at `velocity_scale`. Unlike step moves there is no planned
     /// fallback — an unreachable line is an error the operator sees.
+    ///
+    /// An operator's jog is at least the 0.1 mm the GUI offers, so it
+    /// keeps [`MIN_ANGLE_CHANGE`]; [`Motion::jog_fine`] is for callers
+    /// that go smaller.
     pub fn jog(
         &mut self,
         dx_mm: f64,
@@ -419,11 +459,36 @@ impl<'m> Motion<'m> {
         dz_mm: f64,
         velocity_scale: f64,
     ) -> Result<(), SequencerError> {
+        self.jog_with(dx_mm, dy_mm, dz_mm, velocity_scale, MIN_ANGLE_CHANGE)
+    }
+
+    /// [`Motion::jog`] for a move small enough that TOTG's de-duplication
+    /// would throw it away — see [`FINE_MIN_ANGLE_CHANGE`]. The probe is
+    /// the only caller, and it is the difference between a step that
+    /// happens and one that is reported as having happened.
+    pub fn jog_fine(
+        &mut self,
+        dx_mm: f64,
+        dy_mm: f64,
+        dz_mm: f64,
+        velocity_scale: f64,
+    ) -> Result<(), SequencerError> {
+        self.jog_with(dx_mm, dy_mm, dz_mm, velocity_scale, FINE_MIN_ANGLE_CHANGE)
+    }
+
+    fn jog_with(
+        &mut self,
+        dx_mm: f64,
+        dy_mm: f64,
+        dz_mm: f64,
+        velocity_scale: f64,
+        min_angle_change: f64,
+    ) -> Result<(), SequencerError> {
         if dx_mm == 0.0 && dy_mm == 0.0 && dz_mm == 0.0 {
             return Ok(());
         }
         log::info(&format!(
-            "TCP Jog: dx={dx_mm:.1}mm, dy={dy_mm:.1}mm, dz={dz_mm:.1}mm"
+            "TCP Jog: dx={dx_mm:.3}mm, dy={dy_mm:.3}mm, dz={dz_mm:.3}mm"
         ));
 
         let start = self.fresh_q()?;
@@ -469,7 +534,13 @@ impl<'m> Motion<'m> {
             return Ok(());
         }
 
-        self.timed_execute(states, velocity_scale, velocity_scale, "TCP Jog")
+        self.timed_execute(
+            states,
+            velocity_scale,
+            velocity_scale,
+            min_angle_change,
+            "TCP Jog",
+        )
     }
 }
 

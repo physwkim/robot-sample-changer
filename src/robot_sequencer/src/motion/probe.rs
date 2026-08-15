@@ -66,12 +66,14 @@ use crate::model::JointMap;
 /// Fraction of a commanded step that must actually appear in the arm's
 /// position for the step to count as taken.
 ///
-/// [`Motion::jog`] returns without moving when its interpolation produces
-/// fewer than two states, and at these step sizes that is a real
-/// possibility. A probe that reports a clearance it never traversed is
-/// worse than one that stops, so a step that does not show up in FK is an
-/// error — contact, the legitimate reason for the arm to stop advancing,
-/// has already returned by the time this is checked.
+/// The guard is not theoretical. Before [`Motion::jog_fine`] existed the
+/// arm executed 0.05 and 0.10 mm jogs as exactly 0.000 mm — TOTG dropped
+/// the only other waypoint and the move was reported complete — and this
+/// is what stopped the probe from reporting 1.5 mm of clearance it had
+/// never traversed. It stays because a silent no-op is the failure this
+/// primitive cannot tolerate, and the mechanism that produced one may not
+/// be the only one. Contact, the legitimate reason for the arm to stop
+/// advancing, has already returned by the time this is checked.
 const STEP_TAKEN_FRACTION: f64 = 0.2;
 
 /// One probe's worth of stepping: where it started, every place it stood,
@@ -226,7 +228,10 @@ impl Motion<'_> {
         let mut previous = 0.0;
         for _ in 1..=steps {
             let d = unit * limits.step_mm;
-            self.jog(d.x, d.y, d.z, limits.velocity_scale)?;
+            // Fine, not the operator's jog: a probe step is below the size
+            // TOTG keeps, and the whole primitive rests on the step being
+            // real.
+            self.jog_fine(d.x, d.y, d.z, limits.velocity_scale)?;
             out.end_joints = self.current_joints()?;
 
             let now = self.rtde.session()?.fresh_wrench()?;
@@ -364,6 +369,59 @@ impl Motion<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use crate::model::Model;
+    use crate::waypoints::WaypointData;
+
+    /// The reason [`Motion::jog_fine`] exists, as an assertion rather than
+    /// a comment: at the poses the probe actually runs at, one configured
+    /// step moves every joint less than TOTG's ordinary de-duplication
+    /// threshold, so the ordinary path would drop the move and report it
+    /// done. Measured on the arm before this was found — 0.05 and 0.10 mm
+    /// jogs travelled 0.000 mm.
+    ///
+    /// It also pins the other side: the fine threshold has to keep the
+    /// step, and by a margin that is not a coincidence of one pose.
+    #[test]
+    fn a_probe_step_is_smaller_than_totg_keeps_by_default() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/sequencer.yaml"
+        ));
+        let config = Config::load(path).expect("load config");
+        let model = Model::load(&config).expect("load model");
+        let w = WaypointData::load(&config.sequence.waypoints_yaml).expect("waypoints");
+        let step_mm = config.probe.lateral.step_mm.min(config.probe.depth.step_mm);
+
+        for (name, taught) in [
+            ("holder1_on_position", &w.holder1_on_position),
+            ("sample_holder_on_position", &w.sample_holder_on_position),
+        ] {
+            let joints: JointMap = WaypointData::arm_joints(taught).into_iter().collect();
+            for axis in 0..3 {
+                let mut offset = [0.0; 3];
+                offset[axis] = step_mm / 1000.0;
+                let shifted = model
+                    .apply_cartesian_offset(&joints, offset, false, "probe step")
+                    .expect("offset");
+                let moved = joints
+                    .iter()
+                    .map(|(k, v)| (shifted[k] - v).abs())
+                    .fold(0.0f64, f64::max);
+                assert!(
+                    moved < super::super::MIN_ANGLE_CHANGE,
+                    "{name} axis {axis}: {step_mm} mm moves a joint {moved} rad, which the \
+                     ordinary path would keep — jog_fine may no longer be needed, but check \
+                     every pose before removing it"
+                );
+                assert!(
+                    moved > super::super::FINE_MIN_ANGLE_CHANGE * 100.0,
+                    "{name} axis {axis}: {step_mm} mm moves a joint only {moved} rad, too \
+                     close to the fine threshold to survive it"
+                );
+            }
+        }
+    }
 
     /// Samples as the arm would record them pushing down: force stays at
     /// the noise until the floor, then grows against the motion, so the
