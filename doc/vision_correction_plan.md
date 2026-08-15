@@ -1396,17 +1396,27 @@ min_angle_change)`은 어느 조인트도 `min_angle_change`보다 더 움직이
 | base x+ | +0.038 mm, along 1.208 N, lateral 1.641 N | +0.024 mm, along 0.730 N, lateral 1.559 N |
 | base x− | +0.051 mm, along 1.549 N, lateral 0.979 N | +0.061 mm, along 1.593 N, lateral 0.623 N |
 | base y+ | +0.052 mm, along 6.293 N → **abort** | +0.048 mm, along 6.008 N → **abort** |
-| base z− | 4.21 mm 주행, 0.070 N, 접촉 없음 | 실행 안 됨 (y+ abort가 앞섬) |
+| base z− | 실행 안 됨 (y+ abort가 앞섬) | 실행 안 됨 (y+ abort가 앞섬) |
 
 **파지는 저항의 경로가 아니다.** 손가락에 0.4 mm 유격을 준 쪽이 문
 쪽과 스텝당 힘·주행이 산포 안에서 같다. 그리퍼–퍽–보어 폐루프의
 강성(24–121 N/mm)을 재고 있었다는 가설은 이 대조로 기각된다. 벌린
 상태에서도 벽은 같은 자리에 있다.
 
-**세로 4 mm는 자유, 가로 0.05 mm는 벽.** 문 상태의 base z−는 4.21 mm를
-0.07 N으로 그냥 내려갔다 — 퍽은 바닥에 얹혀 있지 않았다. 같은 순간
-가로로는 첫 스텝에서 걸린다. 이 조합은 헐거운 Ø20.5 보어가 아니라
-**수십 마이크론 반경 틈새의 미끄럼 끼워맞춤**의 모습이다.
+**세로 여유는 착좌 상태에서 재본 적이 없다.** 두 런 모두 base y+가
+abort하면서 depth 프로브 앞에서 끝났다. 같은 날 10:34 런이 base z−로
+4.21 mm를 0.070 N에 주행했지만 그 런은 **보어 밖**이었다 — 같은 런에서
+base x와 base y도 1.50 mm 안에 아무것도 없었다("nothing within 1.50 mm
+either way"). 자유 공기 수치를 착좌 여유로 읽으면 안 된다.
+
+**축 대응 (holder_on_position, 프로브 로그에서 직접).** `base x+`는
+`TCP Jog dx`, `base y±`는 `dz`, `base z−`는 `dy=+0.100`으로 나간다. 즉
+tool x = base x, **tool y = base −z(아래)**, tool z = base +y(수평,
+그리퍼 접근축). 교시 파일도 같은 말을 한다 — `above_y_offset: -0.005`는
+`Model::apply_cartesian_offset`의 TCP-local 오프셋이므로 tool y로 −5 mm,
+곧 위로 5 mm다. 삽입 구간 5.0 mm가 이 축이고, 세로 = base −z = tool +y다.
+따라서 6 N이 나온 base y+는 세로가 아니라 **가로**, 그것도 그리퍼가
+바라보는 방향이다.
 
 **그래도 벽의 위치는 아직 측정된 값이 아니다.** 세 방향 모두 *첫*
 스텝에서 트립하므로, 기록된 `+0.024`/`+0.061` mm는 벽의 위치가 아니라
