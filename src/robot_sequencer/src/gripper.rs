@@ -101,6 +101,44 @@ impl Gripper {
         }
     }
 
+    /// Opens the fingers by `by_m` from wherever they are now, waits for
+    /// them to stop moving, and reports the play that opened up.
+    ///
+    /// The seat probe is the only caller. It needs the puck loose in the
+    /// bore rather than clamped — a gripped puck closes the
+    /// gripper-puck-bore loop, and a 0.05 mm step then reads 1.2 to 6.3 N
+    /// with no free travel to bracket (measured 2026-08-15) — but not
+    /// released, because the fingers still have to be the thing that holds
+    /// it.
+    ///
+    /// Relative, not absolute: where the fingers stop on a puck is not
+    /// known here, and the close wait does not find out (see
+    /// [`Gripper::settle_at`]). Clamped to `open_position` so this can
+    /// never open wider than a plain open, and `max(0.0)` so it can never
+    /// be a route to closing.
+    pub fn loosen_by(&mut self, by_m: f64, epics: &Epics) -> f64 {
+        let from = self.position();
+        let target = (from + by_m.max(0.0)).min(self.open_position);
+        log::info(&format!("Loosening the grip: {from:.4} -> {target:.4} m"));
+        self.settle_to(target, epics);
+        let play = self.position() - from;
+        log::info(&format!("  Grip loosened, {play:.4} m of play"));
+        play
+    }
+
+    /// Closes onto the sample again and waits for the fingers to stop.
+    ///
+    /// Commands `close_position`, the same register value the sequence's
+    /// close writes, rather than the position the fingers were measured at
+    /// before [`Gripper::loosen_by`]: a Hand-E commanded to where the puck
+    /// already is holds it with whatever force that costs, which is not the
+    /// grip the arm then lifts the puck out with.
+    pub fn regrip(&mut self, epics: &Epics) {
+        log::info("Restoring the grip");
+        self.settle_to(self.close_position, epics);
+        log::info(&format!("  Grip restored at {:.4} m", self.position()));
+    }
+
     /// Port of the C++ `wait_gripper_reached`: block until the gripper
     /// reaches the wait target or stalls (reached its limit, or grabbed an
     /// object — which is why the close wait target is `close_settle_target`
@@ -112,13 +150,38 @@ impl Gripper {
         } else {
             self.close_settle_target
         };
+        self.settle_at(target, self.reach_tolerance, epics);
+    }
+
+    /// Commands `target` and waits for the fingers to come to rest there or
+    /// against something, with no tolerance band.
+    ///
+    /// The band is what makes [`Gripper::wait_reached`] unusable for a
+    /// small move: `reach_tolerance` is 1.5 mm and the probe's release is
+    /// 0.3 mm, so "reached" is already true at the first poll and the wait
+    /// would return before the fingers had moved at all. Waiting for the
+    /// stall instead costs the ~0.55 s the stall dwell takes and answers
+    /// the question actually being asked — where did they end up.
+    fn settle_to(&mut self, target: f64, epics: &Epics) {
+        match &mut self.backend {
+            Backend::Hande(driver) => driver.set_position(target, 1.0),
+            Backend::Simulated { position } => *position = target,
+        }
+        self.settle_at(target, 0.0, epics);
+    }
+
+    /// Blocks until the fingers come within `tolerance` of `target` or stop
+    /// moving. Shared by [`Gripper::wait_reached`] and the probe's
+    /// partial-release pair, so that "stalled on something" means the same
+    /// thing for all of them.
+    fn settle_at(&mut self, target: f64, tolerance: f64, epics: &Epics) {
         let t0 = Instant::now();
         let mut last_move = t0;
         let mut prev: Option<f64> = None;
         loop {
             let pos = self.position();
             let now = Instant::now();
-            if (pos - target).abs() < self.reach_tolerance {
+            if (pos - target).abs() < tolerance {
                 log::info(&format!("  Gripper reached target (pos={pos:.4})"));
                 break;
             }

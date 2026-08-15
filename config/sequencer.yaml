@@ -284,6 +284,12 @@ handeye:
 # validated at startup rather than at the trigger.
 probe:
   velocity_scale: 0.02    # each step is a move into something that may be there
+  loosen_mm: 0.3          # play opened before stepping. A gripped, seated puck
+                          # closes the gripper-puck-bore loop and every direction
+                          # saturated on the first 0.05 mm step (1.2/1.5/6.3 N,
+                          # 2026-08-15) with nothing free in front of it. Under a
+                          # third of the nominal radial clearance, so the fingers
+                          # still cradle the puck.
   lateral:                # sideways, toward a bore wall
     step_mm: 0.05         # ten steps to the nominal 0.50 mm radial clearance,
                           # and the overshoot past first contact is one of them

@@ -290,6 +290,20 @@ pub struct ProbeConfig {
     /// gently the arm may move next to a sample, which does not change
     /// between pushing sideways and pushing down.
     pub velocity_scale: f64,
+    /// How far the fingers open before the probe steps, mm.
+    ///
+    /// A gripped, seated puck closes the gripper-puck-bore loop: measured
+    /// 2026-08-15, all three directions saturated on the first 0.05 mm step
+    /// (1.208 N, 1.549 N, 6.293 N) with no free travel in front of them, so
+    /// the arm was reading its own deformation of that loop rather than a
+    /// wall. This is the play that reopens it. In millimetres, like every
+    /// other number in this block, though the gripper speaks metres.
+    ///
+    /// Small on purpose: the fingers still have to hold the puck upright
+    /// and be the thing that finds it. Along the jaw axis the free run is
+    /// half of this before a finger touches the puck again, then the puck's
+    /// own clearance before the bore wall.
+    pub loosen_mm: f64,
     /// Sideways, toward a bore wall.
     pub lateral: ProbeAxisConfig,
     /// Downward, toward the seat floor.
@@ -300,6 +314,9 @@ impl Default for ProbeConfig {
     fn default() -> Self {
         Self {
             velocity_scale: 0.02,
+            // Under a third of the nominal 0.50 mm radial clearance, so
+            // the puck stays cradled between the pads.
+            loosen_mm: 0.3,
             lateral: ProbeAxisConfig {
                 // Ten steps to a wall at the nominal 0.50 mm radial
                 // clearance, and 0.05 mm of overshoot past it.
@@ -476,6 +493,15 @@ impl Config {
                 "probe.velocity_scale must be within 0..0.1 (a probe steps into contact)".into(),
             ));
         }
+        // Bounded above because the fingers are holding a sample over an
+        // open rack while this runs: a decimal-point slip here is the
+        // difference between play and a dropped puck.
+        if !(0.0..=1.0).contains(&config.probe.loosen_mm) {
+            return Err(SequencerError(
+                "probe.loosen_mm must be within 0..1 (the fingers still have to hold the sample)"
+                    .into(),
+            ));
+        }
         if config.vision.enabled {
             let v = &config.vision;
             // Below ~0.002 mm the IK offset helper's epsilon treats the
@@ -619,6 +645,13 @@ mod tests {
                 "velocity_hi",
                 "probe:\n  velocity_scale: 0.5\n",
                 "probe.velocity_scale",
+            ),
+            // A slipped decimal point here opens the fingers 3 mm over an
+            // open rack with a sample in them.
+            (
+                "loosen_wide",
+                "probe:\n  loosen_mm: 3.0\n",
+                "probe.loosen_mm",
             ),
         ] {
             let path = dir.join(format!("{name}.yaml"));

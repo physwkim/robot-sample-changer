@@ -588,21 +588,30 @@ impl<'a> Sequencer<'a> {
         let lateral = ProbeLimits::new(&p.lateral, p.velocity_scale);
         let depth = ProbeLimits::new(&p.depth, p.velocity_scale);
 
-        let mut brackets = Vec::new();
-        for (name, axis) in [("base x", Vector3::x()), ("base y", Vector3::y())] {
-            let dir = self.motion.base_dir_in_tool(&axis)?;
-            brackets.push(self.motion.bracket_axis(dir, lateral, name)?);
-        }
+        let (play_mm, (brackets, floor)) = self.with_grip_loosened(|s| {
+            let mut brackets = Vec::new();
+            for (name, axis) in [("base x", Vector3::x()), ("base y", Vector3::y())] {
+                let dir = s.motion.base_dir_in_tool(&axis)?;
+                brackets.push(s.motion.bracket_axis(dir, lateral, name)?);
+            }
 
-        // Straight down in base, not along whichever tool axis happens to
-        // point that way: the seat floor is horizontal and the puck's own
-        // weight is already resting on it, so the probe has to push along
-        // the same line that weight acts on for the slope to mean depth.
-        let down = self.motion.base_dir_in_tool(&(-Vector3::z()))?;
-        let floor = self.motion.probe_until_contact(down, depth, "base z-")?;
+            // Straight down in base, not along whichever tool axis happens
+            // to point that way: the seat floor is horizontal and the
+            // puck's own weight is already resting on it, so the probe has
+            // to push along the same line that weight acts on for the slope
+            // to mean depth.
+            let down = s.motion.base_dir_in_tool(&(-Vector3::z()))?;
+            let floor = s.motion.probe_until_contact(down, depth, "base z-")?;
+            Ok((brackets, floor))
+        })?;
 
         log::info("========================================");
         log::info("SEAT PROBE RESULT (measured from the pose the probe started at)");
+        // Half of it on each side, so the first `play/2` of every lateral
+        // run is a pad leaving the puck rather than the puck crossing its
+        // clearance. Printed because that is the offset between these
+        // numbers and the bore.
+        log::info(&format!("  fingers opened {play_mm:.3} mm before stepping"));
         for bracket in brackets {
             log::info(&format!("  {}", bracket.summary()));
         }
@@ -630,10 +639,42 @@ impl<'a> Sequencer<'a> {
         // has measured it.
         log::info(
             "  Nothing was written. The arm is back at the pose the probe \
-             started from; lift it out before the next trigger.",
+             started from and the grip is back on the puck; lift it out \
+             before the next trigger.",
         );
         log::info("========================================");
         Ok(false)
+    }
+
+    /// Runs `probe` with the fingers opened by `probe.loosen_mm`, and puts
+    /// the grip back where it found it before returning — on the error
+    /// paths as well as the successful one.
+    ///
+    /// The play is what the probe needs: clamped on a seated puck the
+    /// gripper, puck and bore are one closed loop, and a step measures how
+    /// hard the arm deforms it rather than how far anything can move.
+    /// Loose, the fingers give way first and the puck can reach a wall.
+    ///
+    /// Restoring is not optional and not the probe's business to remember.
+    /// A run that ends on an abort or a blocked retrace leaves the operator
+    /// with a puck hanging in a loosened grip over an open rack, and the
+    /// next trigger resumes the sequence by lifting it. So the loosen and
+    /// the restore are one call with the probe in the middle, rather than a
+    /// pair for a caller to keep in step. The one exit this cannot cover is
+    /// a panic, which takes the daemon down with it — and a daemon that
+    /// dies holding a sample is already the documented hazard, because its
+    /// successor's activation stroke opens the fingers.
+    fn with_grip_loosened<T>(
+        &mut self,
+        probe: impl FnOnce(&mut Self) -> Result<T, SequencerError>,
+    ) -> Result<(f64, T), SequencerError> {
+        let play_mm = self
+            .gripper
+            .loosen_by(self.config.probe.loosen_mm / 1000.0, &self.epics)
+            * 1000.0;
+        let out = probe(self);
+        self.gripper.regrip(&self.epics);
+        out.map(|t| (play_mm, t))
     }
 
     /// Puts the arm back where this mode was entered from.
