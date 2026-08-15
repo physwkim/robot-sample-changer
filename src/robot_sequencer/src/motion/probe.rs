@@ -57,7 +57,7 @@
 
 use cspace_core::geometry::Vector3;
 
-use super::Motion;
+use super::{Motion, q_to_map};
 use crate::config::ProbeAxisConfig;
 use crate::error::SequencerError;
 use crate::log;
@@ -75,6 +75,11 @@ use crate::model::JointMap;
 /// be the only one. Contact, the legitimate reason for the arm to stop
 /// advancing, has already returned by the time this is checked.
 const STEP_TAKEN_FRACTION: f64 = 0.2;
+
+/// RTDE packages averaged for each between-steps reading. At 125 Hz this
+/// is 0.2 s of standing still, which puts the pose scatter under a micron
+/// against a 0.05 mm step — see [`Session::mean_q_and_wrench`].
+const SAMPLES_PER_READING: usize = 25;
 
 /// One probe's worth of stepping: where it started, every place it stood,
 /// and what pushed back there.
@@ -202,14 +207,17 @@ impl Motion<'_> {
             )));
         }
 
-        let start_joints = self.current_joints()?;
+        let (start_q, start_wrench) = self
+            .rtde
+            .session()?
+            .mean_q_and_wrench(SAMPLES_PER_READING)?;
+        let start_joints = q_to_map(&start_q);
         let start_pose = self.model.fk(&start_joints)?;
         // The probe axis in base, taken once at the start pose. A pure
         // translation leaves the tool orientation alone, so this is the
         // axis for every step, and using one axis for both the travel and
         // the force projection is what keeps the slope fit meaningful.
         let base_dir = start_pose.rotation * unit;
-        let start_wrench = self.rtde.session()?.fresh_wrench()?;
         let steps = (limits.travel_mm / limits.step_mm).floor() as usize;
         log::info(&format!(
             "{label}: probing up to {:.2} mm in {} steps of {:.3} mm, \
@@ -232,9 +240,12 @@ impl Motion<'_> {
             // TOTG keeps, and the whole primitive rests on the step being
             // real.
             self.jog_fine(d.x, d.y, d.z, limits.velocity_scale)?;
-            out.end_joints = self.current_joints()?;
 
-            let now = self.rtde.session()?.fresh_wrench()?;
+            let (q, now) = self
+                .rtde
+                .session()?
+                .mean_q_and_wrench(SAMPLES_PER_READING)?;
+            out.end_joints = q_to_map(&q);
             let df = Vector3::new(
                 now[0] - start_wrench[0],
                 now[1] - start_wrench[1],

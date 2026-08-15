@@ -158,26 +158,59 @@ impl Session<'_> {
         }
     }
 
-    /// Current TCP wrench, drained the same way as [`Session::fresh_q`].
+    /// Mean joints and mean TCP wrench over `samples` packages, for
+    /// measurements taken with the arm standing still.
     ///
-    /// `actual_TCP_force` is URControl's estimate from joint currents, not
-    /// a wrist sensor, so its absolute value carries the arm's own model
-    /// error and the payload — Fy reads -33.9 N standing still at the rack
-    /// standby. Nothing here trusts that. What the probe uses is the
-    /// *change* across a few millimetres of travel, where the bias is
-    /// common to both readings and cancels; against that difference the
-    /// noise standing still is 0.073 N, and rubbing a bore on the way in is
-    /// 8.5 to 22.9 N.
-    pub fn fresh_wrench(&mut self) -> Result<Vector6D, SequencerError> {
+    /// Both come out of the *same* packages, which is the point: a probe
+    /// asks "how far did it move, and what pushed back there", and two
+    /// separate reads would answer about two different instants.
+    ///
+    /// Averaged because one package is not enough at this scale. Standing
+    /// still the pose scatters 0.004-0.007 mm per sample and spans 0.046 mm
+    /// over a stop, which is most of a 0.05 mm probe step; twenty-five
+    /// samples put that under a micron. `actual_TCP_force` is URControl's
+    /// estimate from joint currents rather than a wrist sensor, so its
+    /// absolute value carries the arm's own model error and the payload —
+    /// Fy reads -33.9 N standing still at the rack standby. Nothing here
+    /// trusts that. What the probe uses is the *change* across a few
+    /// millimetres, where the bias is common to both readings and cancels;
+    /// against that difference the noise standing still is 0.073 N, and
+    /// rubbing a bore on the way in is 8.5 to 22.9 N.
+    pub fn mean_q_and_wrench(
+        &mut self,
+        samples: usize,
+    ) -> Result<(Vector6D, Vector6D), SequencerError> {
+        if samples == 0 {
+            return Err(SequencerError("mean over zero packages".into()));
+        }
         for _ in 0..DRAIN_PACKAGES {
             self.read()?;
         }
-        match self.read()?.get("actual_TCP_force") {
-            Some(RtdeValue::V6D(f)) => Ok(*f),
-            other => Err(SequencerError(format!(
-                "actual_TCP_force missing from RTDE package: {other:?}"
-            ))),
+        let mut q = [0.0; 6];
+        let mut f = [0.0; 6];
+        for _ in 0..samples {
+            let package = self.read()?;
+            for (field, sum) in [("actual_q", &mut q), ("actual_TCP_force", &mut f)] {
+                match package.get(field) {
+                    Some(RtdeValue::V6D(v)) => {
+                        for (slot, value) in sum.iter_mut().zip(v.iter()) {
+                            *slot += *value;
+                        }
+                    }
+                    other => {
+                        return Err(SequencerError(format!(
+                            "{field} missing from RTDE package: {other:?}"
+                        )));
+                    }
+                }
+            }
         }
+        let n = samples as f64;
+        for (a, b) in q.iter_mut().zip(f.iter_mut()) {
+            *a /= n;
+            *b /= n;
+        }
+        Ok((q, f))
     }
 
     /// Reads until `field` equals `value`, or the deadline passes.
