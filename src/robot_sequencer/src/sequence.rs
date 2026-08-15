@@ -568,7 +568,8 @@ impl<'a> Sequencer<'a> {
     /// because it services no jog (jogging there would move the taught
     /// pose the sequence starts from).
     ///
-    /// `CurrentStep` is untouched, and the arm is left in the seat: this
+    /// `CurrentStep` is untouched, and the arm is left where the probe
+    /// started rather than lifted clear: this
     /// mode is entered mid-run with a sample in the fingers, and neither
     /// deciding how to lift a puck back out of a bore nor claiming the
     /// run is over belongs here.
@@ -631,7 +632,14 @@ impl<'a> Sequencer<'a> {
                 depth.travel_mm
             )),
         }
-        log::info("  Nothing was written. The arm is where the probe started, in the seat.");
+        // Where the arm is, this knows: every probe returned to `home` and
+        // a return that could not be flown is an error rather than a
+        // logged caveat. Whether that pose is in a seat is the operator's
+        // claim from the jog hold, and nothing here has measured it.
+        log::info(
+            "  Nothing was written. The arm is back at the pose the probe \
+             started from; lift it out before the next trigger.",
+        );
         log::info("========================================");
         Ok(false)
     }
