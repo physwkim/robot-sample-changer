@@ -97,6 +97,11 @@ fn run() -> Result<(), SequencerError> {
         config.handeye.out_dir.display()
     ));
     log::info("    4=Recover (return the arm to holder standby; gripper untouched)");
+    log::info("    5=Seat probe (trigger, jog the gripped puck into the seat, trigger again;");
+    log::info(&format!(
+        "      steps into contact at {:.2}/{:.2} N, measures, writes nothing)",
+        config.probe.lateral.threshold_n, config.probe.depth.threshold_n
+    ));
     if config.vision.enabled {
         log::info(&format!(
             "  Vision correction: ENABLED{} (deadband {:.2} mm, limit {:.2} mm, {})",
