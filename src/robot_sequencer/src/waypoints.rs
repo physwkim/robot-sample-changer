@@ -112,6 +112,218 @@ impl WaypointData {
     }
 }
 
+/// Rounds to 7 decimals (0.1 um in metres): enough for any trim, short
+/// enough that the file stays readable.
+fn round7(v: f64) -> f64 {
+    (v * 1e7).round() / 1e7
+}
+
+/// Replaces the value of a top-level scalar `key:` line, preserving the
+/// line's indentation and everything else in the file. Returns the text
+/// with `(old, new)` values, `new = round7(old + delta)`.
+fn edit_scalar_line(
+    text: &str,
+    key: &str,
+    delta: f64,
+) -> Result<(String, f64, f64), SequencerError> {
+    let prefix = format!("{key}:");
+    let mut hit = None;
+    let mut lines: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix(&prefix) {
+            if hit.is_some() {
+                return Err(SequencerError(format!(
+                    "waypoints: '{key}' appears more than once; refusing to edit"
+                )));
+            }
+            let old: f64 = rest.trim().parse().map_err(|e| {
+                SequencerError(format!("waypoints: cannot parse '{key}' value: {e}"))
+            })?;
+            let new = round7(old + delta);
+            let indent = &line[..line.len() - trimmed.len()];
+            lines.push(format!("{indent}{key}: {new:?}"));
+            hit = Some((old, new));
+            continue;
+        }
+        lines.push(line.to_string());
+    }
+    let (old, new) = hit.ok_or_else(|| {
+        SequencerError(format!(
+            "waypoints: key '{key}' not found; refusing to edit"
+        ))
+    })?;
+    Ok((lines.join("\n") + "\n", old, new))
+}
+
+/// Replaces one entry of a top-level flow-list `key: [..]`, consuming a
+/// list wrapped over several lines and re-emitting it on one. Everything
+/// outside the list block is preserved byte for byte.
+fn edit_list_entry(
+    text: &str,
+    key: &str,
+    index: usize,
+    delta: f64,
+) -> Result<(String, f64, f64), SequencerError> {
+    let prefix = format!("{key}:");
+    let src: Vec<&str> = text.lines().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut hit = None;
+    let mut i = 0;
+    while i < src.len() {
+        let line = src[i];
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix(&prefix) else {
+            out.push(line.to_string());
+            i += 1;
+            continue;
+        };
+        if hit.is_some() {
+            return Err(SequencerError(format!(
+                "waypoints: '{key}' appears more than once; refusing to edit"
+            )));
+        }
+        let indent = &line[..line.len() - trimmed.len()];
+        let mut body = rest.trim().to_string();
+        while !body.ends_with(']') {
+            i += 1;
+            let Some(cont) = src.get(i) else {
+                return Err(SequencerError(format!(
+                    "waypoints: list '{key}' is not closed with ']'"
+                )));
+            };
+            body.push(' ');
+            body.push_str(cont.trim());
+        }
+        let inner = body
+            .strip_prefix('[')
+            .and_then(|b| b.strip_suffix(']'))
+            .ok_or_else(|| SequencerError(format!("waypoints: '{key}' is not a flow list")))?;
+        let mut values: Vec<f64> = Vec::new();
+        for part in inner.split(',') {
+            values.push(part.trim().parse().map_err(|e| {
+                SequencerError(format!("waypoints: cannot parse '{key}' entry: {e}"))
+            })?);
+        }
+        let old = *values.get(index).ok_or_else(|| {
+            SequencerError(format!(
+                "waypoints: '{key}' has {} entries, wanted index {index}",
+                values.len()
+            ))
+        })?;
+        let new = round7(old + delta);
+        values[index] = new;
+        let joined = values
+            .iter()
+            .map(|v| format!("{v:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push(format!("{indent}{key}: [{joined}]"));
+        hit = Some((old, new));
+        i += 1;
+    }
+    let (old, new) = hit.ok_or_else(|| {
+        SequencerError(format!(
+            "waypoints: key '{key}' not found; refusing to edit"
+        ))
+    })?;
+    Ok((out.join("\n") + "\n", old, new))
+}
+
+/// Adds probe-measured deltas (metres) to one holder's x and/or z trim
+/// slots in the taught-waypoints file, editing the text in place so the
+/// comments and every untouched line survive (unlike a parse-and-dump).
+/// The edited text is parsed back and the touched fields compared to
+/// what was intended before it replaces the original (temp + rename),
+/// so a write that cannot be read back never lands. Returns one line
+/// per slot written, for the caller's log.
+pub fn persist_holder_trims(
+    path: &Path,
+    holder: i32,
+    dx_m: Option<f64>,
+    dz_m: Option<f64>,
+) -> Result<Vec<String>, SequencerError> {
+    if !(1..=10).contains(&holder) {
+        return Err(SequencerError(format!(
+            "waypoints: holder {holder} has no trim slots"
+        )));
+    }
+    let mut text = std::fs::read_to_string(path)
+        .map_err(|e| SequencerError(format!("cannot read waypoints {}: {e}", path.display())))?;
+    let mut report = Vec::new();
+    // (delta, scalar key for holder 1, list key for holders 2-10,
+    //  read-back accessor)
+    type ReadBack = fn(&WaypointData, usize) -> Option<f64>;
+    let slots: [(&str, Option<f64>, &str, &str, ReadBack); 2] = [
+        (
+            "x",
+            dx_m,
+            "holder1_on_position_x_offset",
+            "holder_multi_x_offsets",
+            |w, i| {
+                if i == usize::MAX {
+                    Some(w.holder1_on_x_offset)
+                } else {
+                    w.holder_multi_x_offsets.get(i).copied()
+                }
+            },
+        ),
+        (
+            "z",
+            dz_m,
+            "holder1_on_position_z_offset",
+            "holder_multi_z_offsets",
+            |w, i| {
+                if i == usize::MAX {
+                    Some(w.holder1_on_z_offset)
+                } else {
+                    w.holder_multi_z_offsets.get(i).copied()
+                }
+            },
+        ),
+    ];
+    let mut checks: Vec<(String, usize, f64, ReadBack)> = Vec::new();
+    for (axis, delta, scalar_key, list_key, read_back) in slots {
+        let Some(delta) = delta else { continue };
+        let (new_text, old, new, slot_name, idx) = if holder == 1 {
+            let (t, old, new) = edit_scalar_line(&text, scalar_key, delta)?;
+            (t, old, new, scalar_key.to_string(), usize::MAX)
+        } else {
+            let idx = (holder - 2) as usize;
+            let (t, old, new) = edit_list_entry(&text, list_key, idx, delta)?;
+            (t, old, new, format!("{list_key}[{idx}]"), idx)
+        };
+        text = new_text;
+        report.push(format!(
+            "holder {holder} {axis} trim ({slot_name}): {old:?} -> {new:?} ({:+.3} mm)",
+            delta * 1000.0
+        ));
+        checks.push((slot_name, idx, new, read_back));
+    }
+    if checks.is_empty() {
+        return Ok(report);
+    }
+    let tmp = path.with_extension("yaml.new");
+    std::fs::write(&tmp, &text)
+        .map_err(|e| SequencerError(format!("cannot write {}: {e}", tmp.display())))?;
+    let reread = WaypointData::load(&tmp).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })?;
+    for (slot_name, idx, expected, read_back) in &checks {
+        let got = read_back(&reread, *idx);
+        if got != Some(*expected) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(SequencerError(format!(
+                "waypoints: verify failed for {slot_name}: wrote {expected:?}, read back {got:?}; \
+                 the original file is untouched"
+            )));
+        }
+    }
+    std::fs::rename(&tmp, path)
+        .map_err(|e| SequencerError(format!("cannot replace {}: {e}", path.display())))?;
+    Ok(report)
+}
+
 fn f64_at(params: &Value, key: &str, default: f64) -> f64 {
     params.get(key).and_then(Value::as_f64).unwrap_or(default)
 }
@@ -225,6 +437,62 @@ mod tests {
         assert_eq!(data.holder_tilt_x_trim_deg(1), 0.0);
         assert_eq!(data.holder_tilt_z_trim_deg(2), 0.0);
         assert_eq!(data.wrist3_rotation_offset, 0.0);
+    }
+
+    fn temp_copy(tag: &str) -> std::path::PathBuf {
+        let src = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/taught_waypoints.yaml"
+        ));
+        let dst = std::env::temp_dir().join(format!(
+            "taught_waypoints_persist_{tag}_{}.yaml",
+            std::process::id()
+        ));
+        std::fs::copy(src, &dst).expect("copy");
+        dst
+    }
+
+    #[test]
+    fn persist_edits_holder1_scalars_in_place() {
+        let path = temp_copy("h1");
+        let report = persist_holder_trims(&path, 1, Some(0.0001), None).expect("persist");
+        assert_eq!(report.len(), 1, "{report:?}");
+        let data = WaypointData::load(&path).expect("reload");
+        assert_eq!(data.holder1_on_x_offset, 0.0001);
+        assert_eq!(data.holder1_on_z_offset, -0.0003);
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.contains("# Insertion-depth trim"), "comments survive");
+        assert!(text.contains("holder_on_position_tilt_x_deg: 0.3"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn persist_edits_a_wrapped_multi_list_entry() {
+        let path = temp_copy("multi");
+        // holder 4 -> index 2; both slots at once. The z list wraps two
+        // lines in the production file, which is the case this exercises.
+        let report = persist_holder_trims(&path, 4, Some(-0.0005), Some(0.0002)).expect("persist");
+        assert_eq!(report.len(), 2, "{report:?}");
+        let data = WaypointData::load(&path).expect("reload");
+        assert_eq!(data.holder_multi_x_offsets[2], 0.001);
+        assert_eq!(data.holder_multi_z_offsets[2], 0.0002);
+        // neighbours untouched
+        assert_eq!(data.holder_multi_x_offsets[1], 0.0005);
+        assert_eq!(data.holder_multi_z_offsets[3], 0.0002);
+        assert_eq!(data.holder_multi_z_offsets[8], 0.00045);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn persist_refuses_a_missing_key_and_leaves_the_file() {
+        let path = temp_copy("missing");
+        let mut text = std::fs::read_to_string(&path).expect("read");
+        text = text.replace("holder_multi_z_offsets", "renamed_away");
+        std::fs::write(&path, &text).expect("write");
+        let err = persist_holder_trims(&path, 4, None, Some(0.0002));
+        assert!(err.is_err());
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), text);
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

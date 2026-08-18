@@ -25,7 +25,7 @@ use crate::model::{JointMap, Model};
 use crate::motion::{
     Bracket, Centring, MIN_EXECUTABLE_MM, Motion, ProbeLimits, Probed, TiltLimits, Tilted,
 };
-use crate::waypoints::WaypointData;
+use crate::waypoints::{WaypointData, persist_holder_trims};
 
 const POLL: Duration = Duration::from_millis(100);
 /// How often the hand-eye aiming hold asks the detector where the tag is.
@@ -673,7 +673,13 @@ impl<'a> Sequencer<'a> {
         log::info("  not in the seat, or the fingers are empty, stop here.");
         log::info("========================================");
         self.wait_for_trigger(true);
-        match self.seat_probe_here()? {
+        let (_, soft) = self.seat_probe_here()?;
+        log::info(
+            "Nothing was written. The arm is back at the pose the probe \
+             started from and the grip is back on the puck; lift it out \
+             before the next trigger.",
+        );
+        match soft {
             Some(e) => Err(e),
             None => Ok(false),
         }
@@ -682,14 +688,23 @@ impl<'a> Sequencer<'a> {
     /// The probe body shared by [`Sequencer::run_seat_probe`] (after its
     /// jog hold) and holder map mode (straight after seating the puck):
     /// step into contact, measure every configured height, print the
-    /// report, write nothing.
+    /// report. Writing is the caller's business: mode 5 writes nothing,
+    /// holder map folds the returned centres into the trim file.
     ///
-    /// The nested result keeps "how much was measured" apart from "where
-    /// is the arm": `Ok(None)` measured everything, `Ok(Some(e))` was
-    /// stopped by `e` but the arm is back at the entry pose with the
-    /// grip on the puck, and `Err` means even the walk back failed, so
-    /// the arm is somewhere a caller must not build on.
-    fn seat_probe_here(&mut self) -> Result<Option<SequencerError>, SequencerError> {
+    /// The first element of the pair is the trigger-pose level's bracket
+    /// centres `(base x, base y)` in mm — the pose the probe starts at
+    /// is the taught seat pose itself, so these ARE the residual trim
+    /// errors — and `None` when either bracket failed to find both
+    /// walls. The `Option<SequencerError>` keeps "how much was measured"
+    /// apart from "where is the arm": `None` measured everything,
+    /// `Some(e)` was stopped by `e` but the arm is back at the entry
+    /// pose with the grip on the puck, and the outer `Err` means even
+    /// the walk back failed, so the arm is somewhere a caller must not
+    /// build on.
+    #[allow(clippy::type_complexity)]
+    fn seat_probe_here(
+        &mut self,
+    ) -> Result<(Option<(f64, f64)>, Option<SequencerError>), SequencerError> {
         let p = &self.config.probe;
         let depth = ProbeLimits::new(&p.depth, p.velocity_scale);
         let limits = Limits {
@@ -717,6 +732,15 @@ impl<'a> Sequencer<'a> {
         let (play_mm, (levels, walked, returned)) =
             self.with_grip_loosened(|s| Ok(s.sweep_heights(limits)))?;
 
+        // The trigger-pose level is the taught seat pose, so its bracket
+        // centres are the trim residuals holder map persists.
+        // measure_level order: brackets[0] = base x, [1] = base y.
+        let seat = levels.first().and_then(|l| {
+            Some((
+                l.brackets.first()?.centre_mm()?,
+                l.brackets.get(1)?.centre_mm()?,
+            ))
+        });
         log::info("========================================");
         log::info("SEAT PROBE RESULT (measured from the pose the probe started at)");
         // Half of it on each side, so the first `play/2` of every lateral
@@ -728,7 +752,7 @@ impl<'a> Sequencer<'a> {
         } else {
             log::info("  the grip was held throughout — no play in front of the steps");
         }
-        for level in levels {
+        for level in &levels {
             if self.config.probe.heights_mm.is_empty() {
                 log::info("  at the pose the probe was triggered at:");
             } else {
@@ -743,10 +767,10 @@ impl<'a> Sequencer<'a> {
                     load.x, load.y, load.z
                 ));
             }
-            for bracket in level.brackets {
+            for bracket in &level.brackets {
                 log::info(&format!("    {}", bracket.summary()));
             }
-            for tilt in level.tilts {
+            for tilt in &level.tilts {
                 log::info(&format!("    {}", tilt.summary()));
             }
             // The trip point carries the threshold in it; the fit does
@@ -778,13 +802,7 @@ impl<'a> Sequencer<'a> {
         // Where the arm is, this knows: every probe walks itself back out
         // before it returns, and a retrace that could not be flown is an
         // error rather than a logged caveat. Whether that pose is in a
-        // seat is the operator's claim from the jog hold, and nothing here
-        // has measured it.
-        log::info(
-            "  Nothing was written. The arm is back at the pose the probe \
-             started from and the grip is back on the puck; lift it out \
-             before the next trigger.",
-        );
+        // seat is the caller's claim, and nothing here has measured it.
         log::info("========================================");
         if let Err(back) = returned {
             return Err(match walked {
@@ -794,7 +812,7 @@ impl<'a> Sequencer<'a> {
                 Ok(()) => back,
             });
         }
-        Ok(walked.err())
+        Ok((seat, walked.err()))
     }
 
     /// Holder map (`CalibMode = 6`): one trigger probes one holder's
@@ -804,7 +822,11 @@ impl<'a> Sequencer<'a> {
     /// itself, the resident puck picked in place (steps 0-4). The probe
     /// then runs without a jog hold, since the arm just seated the puck
     /// and the taught pose is the pose under test, and the puck is left
-    /// seated (steps 21-23).
+    /// seated (steps 21-23). A probe that measured everything folds the
+    /// seat-level bracket centres into this holder's x/z trim slots in
+    /// the taught-waypoints file (see
+    /// [`Sequencer::persist_seat_centres`]) — obtaining the optimum and
+    /// applying it is what the mode is for.
     ///
     /// Step numbers and waypoints are the normal sequence's own, so
     /// PauseStep and CurrentStep behave as usual; like the other
@@ -873,7 +895,7 @@ impl<'a> Sequencer<'a> {
             self.cartesian(20, "holder_on_position_final", &w_t.on_pos, 0)?;
         }
 
-        let probed = self.seat_probe_here()?;
+        let (seat, probed) = self.seat_probe_here()?;
         if let Some(e) = &probed {
             log::warn(&format!(
                 "probe measured less than asked ({e}); the arm walked back to \
@@ -884,10 +906,61 @@ impl<'a> Sequencer<'a> {
         self.hand(21, "open_gripper_final", true, 0)?;
         self.cartesian(22, "holder_above_final_return", &w_t.above, 0)?;
         self.cartesian(23, "holder_standby_final", &w_t.standby, 0)?;
-        match probed {
-            Some(e) => Err(e),
-            None => Ok(false),
+        if let Some(e) = probed {
+            return Err(e);
         }
+        self.persist_seat_centres(target, seat)
+    }
+
+    /// The write half of holder map: folds the seat-level bracket
+    /// centres into the holder's trim slots in the taught-waypoints
+    /// file, which the next trigger reloads like everything in it.
+    ///
+    /// Bracket "base x" corrects the x trim (tool x is base +x at the
+    /// seats) and bracket "base y" the z trim (tool z is base +y) — the
+    /// same mapping every hand-tuned trim used. A centre within one
+    /// lateral probe step is measurement grain, not error, and leaves
+    /// the taught value alone; one past `PERSIST_CAP_MM` is not a trim,
+    /// it is something wrong with the seat (a foreign object in the
+    /// bore reads exactly like this), so the write is refused and the
+    /// number reported instead of absorbed.
+    fn persist_seat_centres(
+        &mut self,
+        holder: i32,
+        seat: Option<(f64, f64)>,
+    ) -> Result<bool, SequencerError> {
+        const PERSIST_CAP_MM: f64 = 1.0;
+        let Some((cx_mm, cy_mm)) = seat else {
+            return Err(SequencerError(
+                "holder map: the seat-level brackets did not find both walls, \
+                 so there is no centre to write; the taught trims are unchanged"
+                    .into(),
+            ));
+        };
+        for (name, c) in [("x", cx_mm), ("y", cy_mm)] {
+            if c.abs() > PERSIST_CAP_MM {
+                return Err(SequencerError(format!(
+                    "holder map: base {name} centre {c:+.3} mm exceeds the \
+                     {PERSIST_CAP_MM} mm persist cap — that is not a trim \
+                     error; nothing was written"
+                )));
+            }
+        }
+        let step_mm = self.config.probe.lateral.step_mm;
+        let dx = (cx_mm.abs() >= step_mm).then_some(cx_mm / 1000.0);
+        let dz = (cy_mm.abs() >= step_mm).then_some(cy_mm / 1000.0);
+        if dx.is_none() && dz.is_none() {
+            log::info(&format!(
+                "holder map: both centres ({cx_mm:+.3}, {cy_mm:+.3} mm) are \
+                 within one lateral step ({step_mm} mm); the taught trims \
+                 already hold the optimum and were kept"
+            ));
+            return Ok(false);
+        }
+        for line in persist_holder_trims(&self.config.sequence.waypoints_yaml, holder, dx, dz)? {
+            log::info(&line);
+        }
+        Ok(false)
     }
 
     /// Probes at every configured height and always brings the arm back
@@ -981,8 +1054,7 @@ impl<'a> Sequencer<'a> {
             let level = levels.last_mut().expect("just pushed");
             // Pushed before it is filled, and filled in place, so that a
             // fault part way through a level still leaves the axes it had
-            // already measured in the report. This mode writes nothing
-            // else — what it printed is the whole of it.
+            // already measured in the report.
             Self::measure_level(&mut self.motion, axes, level, limits)?;
             Self::centre_here(&mut self.motion, axes, level, from_trigger, limits.lateral)?;
         }
