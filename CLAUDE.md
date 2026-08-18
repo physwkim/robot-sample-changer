@@ -58,19 +58,34 @@ procServ 콘솔 20001). 수동: `~/ws/src/epics_rs_robot/target/release/robot_io
 - `config/sequencer_ursim.yaml` — URSim 리허설 (192.168.56.101, ur5e,
   simulated gripper, stage scene 없음)
 
-### 3. robot_gui (선택)
+### 3. robot_gui_rs (선택)
 
-순수 Python EPICS CA 클라이언트(silx/PyQt6/pyepics), conda env `robot_gui`.
-`2_Robot_GUI.desktop` → `launch_robot_gui.sh`. 환경 재생성:
+Rust RsDM GUI (`src/robot_gui_rs`, 독립 cargo workspace) — rsdm/rsplot을
+`../../../rsplot` 상대 경로로 참조하므로 `~/work/rsplot` 체크아웃 필요.
+빌드: `cd src/robot_gui_rs && cargo build --release`.
 
-```bash
-source ~/miniconda3/etc/profile.d/conda.sh
-conda create -n robot_gui --override-channels -c conda-forge python=3.11 -y
-conda activate robot_gui
-python -m ensurepip --upgrade
-python -m pip install silx PyQt6 pyepics numpy pyyaml
-# 실행: cd ~/ws/src && python -m robot_gui.main
-```
+`2_Robot_GUI.desktop` → `launch_robot_gui.sh` → `robot-gui <waypoints.yaml>`.
+탭: Operate(시퀀스 조작/상태) / Camera(D405 color+depth) / Calibration
+(jog + 오프셋·틸트 테이블, 편집 셀만 텍스트 편집으로 저장 — 데몬의
+holder-map persist와 같은 규율이라 동시 쓰기에 안전).
+
+- CA는 브로드캐스트 search 그대로 둡니다 — 이 프로세스는 robot_ioc과
+  D405 IOC 둘 다에 붙으므로 `EPICS_CA_NAME_SERVERS`/`ADDR_LIST` 금지.
+- 이미지는 **pvAccess 기본**: UDP 5076도 5064처럼 여러 IOC가 공유해서
+  search가 엉키므로 TCP 직결(`ROBOT_GUI_PVA_SERVER`, 기본
+  `127.0.0.1:5085` = st.d405.cmd의 `EPICS_PVAS_SERVER_PORT`).
+  depth(Z16, `RS405:depthPva1:Image`)는 RsdmImageView(폭 640 고정 —
+  NTNDArray dimension 서브필드는 rsdm 주소로 못 읽음), color(RGB8
+  ubyte, `RS405:Pva1:Image`)는 RsdmImageView가 Bytes를 못 그려서
+  자체 텍스처 위젯.
+
+`3_Camera_Viewer.desktop` → `launch_camera_viewer.sh` = 같은 바이너리
+`--camera`(Camera 탭으로 시작). D405 IOC가 없으면 `run-d405-ioc.sh`로
+자동 기동(procServ 콘솔 20003, systemd 유닛 없음).
+
+구 Python GUI(silx/PyQt6/pyepics, conda env `robot_gui`)도 그대로 실행
+가능: `cd ~/ws/src && python -m robot_gui.main`. 단 yaml 저장 시 주석이
+날아가므로(yaml.dump) 오프셋 편집은 RsDM GUI를 쓰세요.
 
 ### 4. UR 모니터링 IOC (선택, 읽기 전용)
 
@@ -119,12 +134,14 @@ ws/
 │   ├── robot_sequencer/   # Rust 시퀀스 데몬 (독립 cargo workspace)
 │   │   └── src/{main,sequence,motion,gripper,epics,model,waypoints,config}.rs
 │   ├── epics_rs_robot/    # Rust EPICS IOC(robot_ioc) + deploy (기존 유지)
-│   └── robot_gui/         # EPICS 기반 GUI (silx/PyQt, conda)
+│   ├── robot_gui_rs/      # RsDM GUI (Rust, 독립 workspace, ~/work/rsplot 참조)
+│   └── robot_gui/         # 구 Python GUI (silx/PyQt, conda) — 실행 가능
 ├── model/                 # 정적 URDF/SRDF/메쉬 (ur3e + ur5e URSim용)
 ├── config/                # sequencer.yaml, sequencer_ursim.yaml, taught_waypoints.yaml
 ├── resources/urscript/    # external_control.urscript, RTDE recipe
 ├── deploy/ur_monitor_ioc/ # 읽기 전용 UR 모니터링 IOC
 ├── db/robot.db            # EPICS IOC 데이터베이스
+├── display/               # pydm 스크린 (d435i_dual_view.py, CA 폴백용)
 ├── desktop/ scripts/      # 데스크톱 런처
 └── doc/
 ```

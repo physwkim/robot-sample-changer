@@ -1,24 +1,19 @@
 #!/bin/bash
-printf '\033]0;[2] Robot GUI - robot_control_gui\007'
-if pgrep -f "[r]obot_gui.main" > /dev/null; then
+printf '\033]0;[2] Robot GUI - rsdm\007'
+# One control panel at a time; camera-viewer instances (--camera) don't count.
+if pgrep -af '/robot-gui' | grep -v -- --camera | grep -q robot-gui; then
     echo "Robot GUI is already running."
     read -p "Press Enter to close..."
     exit 0
 fi
 
-# robot_gui is a pure-Python EPICS CA client (silx/PyQt6/pyepics) — no ROS.
-# It runs from a dedicated conda env that provides silx, since the system
-# Python does not have it. See CLAUDE.md for env setup.
-source /home/bl9b/miniconda3/etc/profile.d/conda.sh
-conda activate robot_gui
+REPO=/home/bl9b/work/robot-sample-changer
+BIN="$REPO/src/robot_gui_rs/target/release/robot-gui"
 
-# Resolve Robot:* over TCP at the local IOC. This host is multihomed and
-# shares 5064 with other CA servers; NAME_SERVERS pins the lookup without
-# breaking broadcast search for anyone else (never use EPICS_CA_ADDR_LIST
-# here — see CLAUDE.md).
-export EPICS_CA_NAME_SERVERS=127.0.0.1:5064
-
-unset PYTHONPATH
-cd /home/bl9b/work/robot-sample-changer/src/robot_gui
-python -m robot_gui.main
+# RsDM GUI (Rust). Robot:* and the camera's RS405:* both resolve over CA
+# broadcast search — set neither EPICS_CA_NAME_SERVERS nor ADDR_LIST here,
+# the process talks to two different IOCs (see CLAUDE.md). Images arrive
+# over pvAccess through a direct TCP connection (ROBOT_GUI_PVA_SERVER,
+# default 127.0.0.1:5085).
+"$BIN" "$REPO/config/taught_waypoints.yaml"
 exec bash

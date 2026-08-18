@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=[2] Robot GUI
-Comment=Start Robot Control GUI (start after Robot Sequencer)
+Comment=Robot control GUI (RsDM); start after Robot Sequencer
 Icon=utilities-terminal
 Terminal=true
 Exec=/home/bl9b/work/robot-sample-changer/desktop/scripts/launch_robot_gui.sh

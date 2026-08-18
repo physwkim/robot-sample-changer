@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=[3] Camera Viewer
+Comment=D405 color + depth over pvAccess
+Icon=camera-video
+Terminal=true
+Exec=/home/bl9b/work/robot-sample-changer/desktop/scripts/launch_camera_viewer.sh
+Categories=Development;

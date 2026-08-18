@@ -1,0 +1,22 @@
+[package]
+name = "robot-gui"
+version = "0.1.0"
+edition = "2024"
+
+# Independent workspace, like robot_sequencer: this GUI builds against the
+# sibling rsplot checkout (../../../rsplot) and must not join a parent
+# workspace that pins different egui/wgpu versions.
+[workspace]
+
+[dependencies]
+rsdm = { path = "../../../rsplot/rsdm" }
+rsplot = { path = "../../../rsplot" }
+eframe = { version = "0.34", features = ["wgpu"] }
+serde_yaml = "0.9"
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+# The camera view converts a 921k-byte RGB frame per update; keep it optimized
+# but debuggable enough for a backtrace on the machine.
+debug = 1
