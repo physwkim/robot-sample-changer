@@ -20,7 +20,7 @@
     sample_holder_on_position_z_offset: 0.0005
     holder_multi_x_offsets: [0.0003, 0.0005, 0.0015, 0.0015, 0.003, 0.003, 0.003,
       0.003, 0.003]
-    holder_multi_z_offsets: [0.0, 0.0, 0.0, 0.0002, 0.00025, 0.0003, 0.00035, 0.0004,
+    holder_multi_z_offsets: [0.0, 0.0, 0.0, 0.0002, 0.00025, 0.0004, 0.00045, 0.00045,
       0.00045]
     # Per-holder trim on holder_on_position_tilt_x_deg, deg, holder N at
     # index N-2. Reloaded every trigger, like everything here.
