@@ -85,6 +85,18 @@ const STEP_TAKEN_FRACTION: f64 = 0.2;
 /// against a 0.05 mm step — see [`Session::mean_q_and_wrench`].
 const SAMPLES_PER_READING: usize = 25;
 
+/// The share of the abort limit at which the overtravel stops asking for
+/// another sample.
+///
+/// Those steps are ones the probe chooses to take into something it
+/// already knows is there, so they must never be the reason the abort
+/// fires. Measured 2026-08-18: three 0.05 mm steps past the `base y+`
+/// wall took the load from 2.48 N to 5.24 N and aborted a run that had
+/// already found what it came for. Stopping at half leaves the abort
+/// meaning what it meant before — one step meeting something much harder
+/// than the step before it.
+const OVERTRAVEL_LOAD_FRACTION: f64 = 0.5;
+
 /// One probe's worth of stepping: where it started, every place it stood,
 /// and what pushed back there.
 #[derive(Debug, Clone)]
@@ -388,11 +400,13 @@ impl Motion<'_> {
     /// with the arm stationary — see the module doc for why that is the
     /// whole design and not an implementation detail.
     ///
-    /// Returns once the threshold has tripped and `overtravel_steps`
-    /// further steps have been taken, so the worst case is
-    /// `1 + overtravel_steps` steps of travel past first contact — still
-    /// bounded by `step_mm` by construction rather than by tuning, and
-    /// still under `abort_n`, which is checked on every one of them.
+    /// Returns once the threshold has tripped and the wall has been
+    /// stepped past — `overtravel_steps` further steps, or fewer if the
+    /// load reaches half the abort limit first, so the worst case is
+    /// `1 + overtravel_steps` steps of travel past first contact and the
+    /// probe never walks itself into the abort. Still bounded by
+    /// `step_mm` by construction rather than by tuning, and `abort_n` is
+    /// checked on every one of them.
     /// Those steps are what [`Contact::wall_mm`] fits: with the lateral
     /// threshold at 0.5 N and a wall this stiff, contact goes from noise
     /// to tripped in one step, and one sample is not a slope.
@@ -502,12 +516,18 @@ impl Motion<'_> {
         // says how far past one it may push to measure it.
         let mut taken = 0usize;
         let mut extra = 0usize;
+        // What the last step read, so the overtravel can stop on the force
+        // it has already produced rather than on the one it is about to.
+        let mut last_load = 0.0;
         loop {
             let overtravelling = out.tripped.is_some();
             if !overtravelling && taken >= steps {
                 break;
             }
-            if overtravelling && extra >= limits.overtravel_steps {
+            if overtravelling
+                && (extra >= limits.overtravel_steps
+                    || last_load >= limits.abort_n * OVERTRAVEL_LOAD_FRACTION)
+            {
                 break;
             }
             let d = unit * limits.step_mm;
@@ -540,6 +560,7 @@ impl Motion<'_> {
             out.lateral_n.push(reading.lateral);
 
             let load = reading.load;
+            last_load = load;
             log::info(&format!(
                 "  {label}: {travel:+.3} mm, along {:+.3} N, lateral {:.3} N",
                 reading.along, reading.lateral

@@ -314,7 +314,9 @@ probe:
     overtravel_steps: 3   # steps taken after contact so the wall comes from a
                           # slope, not from the trip point. A bore wall trips in
                           # one step (0.17 -> 0.59 N, doc §16.8) and one sample is
-                          # not a slope. 0.15 mm further in, abort still checked
+                          # not a slope. 0.15 mm further in at most -- it also
+                          # stops at half the abort force, so a stiffer wall costs
+                          # samples rather than an aborted run (doc §16.9)
   depth:                  # downward, toward the seat floor
     step_mm: 0.10
     travel_mm: 4.0

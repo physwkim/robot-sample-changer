@@ -282,6 +282,10 @@ pub struct ProbeAxisConfig {
     /// would reach the abort limit instead. Nonzero where it does not:
     /// laterally the same day, contact went from 0.17 N to 0.59 N in one
     /// 0.05 mm step, and one sample is not a slope.
+    ///
+    /// An upper bound, not a count: the overtravel also stops once the
+    /// load reaches half of `abort_n`, so a wall stiffer than the one this
+    /// was set for costs samples rather than an aborted run.
     pub overtravel_steps: usize,
 }
 
