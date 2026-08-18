@@ -1978,6 +1978,17 @@ impl<'a> Sequencer<'a> {
             w.holder_on_tilt_x_deg.to_radians(),
             "holder_rack_pitch",
         )?;
+        // The other lean axis, same rigid-body reasoning: a rack rolled
+        // about base y (tool z here) tips the stack line sideways, so
+        // the roll also goes on before the per-holder translation. At
+        // these sub-degree angles the x/z application order is a
+        // second-order (angle-product) effect.
+        let holder_on = self.model.apply_tool_point_rotation(
+            &holder_on,
+            [0.0, 0.0, 1.0],
+            w.holder_on_tilt_z_deg.to_radians(),
+            "holder_rack_roll",
+        )?;
         let sample_holder_standby = taught(&w.sample_holder_standby);
         let sample_holder_on = self.model.apply_cartesian_offset(
             &taught(&w.sample_holder_on_position),
@@ -2080,6 +2091,12 @@ impl<'a> Sequencer<'a> {
             [1.0, 0.0, 0.0],
             w.holder_tilt_x_trim_deg(holder_number).to_radians(),
             "holder_seat_tilt",
+        )?);
+        let on_pos = apply_wrist3(self.model.apply_tool_point_rotation(
+            &on_pos,
+            [0.0, 0.0, 1.0],
+            w.holder_tilt_z_trim_deg(holder_number).to_radians(),
+            "holder_seat_tilt_z",
         )?);
         let above = apply_wrist3(self.model.apply_cartesian_offset(
             &on_pos,

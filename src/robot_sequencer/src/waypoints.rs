@@ -54,6 +54,11 @@ pub struct WaypointData {
     /// one side of its seat, and closing the fingers on that pitch is
     /// what loads base y at every height the bracket can reach.
     pub holder_on_tilt_x_deg: f64,
+    /// The other lean axis: how far the grip pose is turned about tool
+    /// z (base +y), deg. Together with the x angle this fixes the full
+    /// seat lean; spin about the puck's own axis (tool y) is not a
+    /// lean and stays with [`Self::wrist3_rotation_offset`].
+    pub holder_on_tilt_z_deg: f64,
     pub holder1_on_x_offset: f64,
     pub holder1_on_y_offset: f64,
     pub holder1_on_z_offset: f64,
@@ -72,6 +77,9 @@ pub struct WaypointData {
     /// leans by its own manufacturing error; the shared angle carries
     /// what the puck geometry needs and this carries the rest.
     pub holder_multi_tilt_x_deg: Vec<f64>,
+    /// Per-holder trim added to [`Self::holder_on_tilt_z_deg`], deg,
+    /// holder N at index N-2, same shape as the x list.
+    pub holder_multi_tilt_z_deg: Vec<f64>,
     pub wrist3_rotation_offset: f64,
 }
 
@@ -83,6 +91,18 @@ impl WaypointData {
     pub fn holder_tilt_x_trim_deg(&self, holder: i32) -> f64 {
         if (2..=10).contains(&holder) {
             self.holder_multi_tilt_x_deg
+                .get((holder - 2) as usize)
+                .copied()
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// The tool-z twin of [`Self::holder_tilt_x_trim_deg`].
+    pub fn holder_tilt_z_trim_deg(&self, holder: i32) -> f64 {
+        if (2..=10).contains(&holder) {
+            self.holder_multi_tilt_z_deg
                 .get((holder - 2) as usize)
                 .copied()
                 .unwrap_or(0.0)
@@ -139,6 +159,7 @@ impl WaypointData {
             retreat_z_offset: f64_at(params, "retreat_z_offset", -0.05),
             holder_on_lift: f64_at(params, "holder_on_position_lift", 0.0),
             holder_on_tilt_x_deg: f64_at(params, "holder_on_position_tilt_x_deg", 0.0),
+            holder_on_tilt_z_deg: f64_at(params, "holder_on_position_tilt_z_deg", 0.0),
             holder1_on_x_offset: f64_at(params, "holder1_on_position_x_offset", 0.0),
             holder1_on_y_offset: f64_at(params, "holder1_on_position_y_offset", 0.0),
             holder1_on_z_offset: f64_at(params, "holder1_on_position_z_offset", 0.0),
@@ -149,6 +170,7 @@ impl WaypointData {
             holder_multi_y_offsets: vec_at_or(params, "holder_multi_y_offsets", 9),
             holder_multi_z_offsets: vec_at_or(params, "holder_multi_z_offsets", 9),
             holder_multi_tilt_x_deg: vec_at_or(params, "holder_multi_tilt_x_deg", 9),
+            holder_multi_tilt_z_deg: vec_at_or(params, "holder_multi_tilt_z_deg", 9),
             wrist3_rotation_offset: f64_at(params, "wrist3_rotation_offset", 0.0),
         };
 
@@ -198,7 +220,10 @@ mod tests {
         assert_eq!(data.holder_on_tilt_x_deg, 0.3);
         assert_eq!(data.holder_multi_x_offsets.len(), 9);
         assert_eq!(data.holder_multi_tilt_x_deg.len(), 9);
+        assert_eq!(data.holder_on_tilt_z_deg, 0.0);
+        assert_eq!(data.holder_multi_tilt_z_deg.len(), 9);
         assert_eq!(data.holder_tilt_x_trim_deg(1), 0.0);
+        assert_eq!(data.holder_tilt_z_trim_deg(2), 0.0);
         assert_eq!(data.wrist3_rotation_offset, 0.0);
     }
 

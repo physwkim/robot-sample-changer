@@ -14,6 +14,9 @@
     holder1_on_position_y_offset: 0.0005
     holder_on_position_lift: 0.00015
     holder_on_position_tilt_x_deg: 0.3
+    # The other lean axis, about tool z (base +y), deg. Spin about the
+    # puck's own axis is wrist3_rotation_offset, not a tilt.
+    holder_on_position_tilt_z_deg: 0.0
     holder1_on_position_z_offset: -0.0003
     sample_holder_on_position_x_offset: -0.002785
     sample_holder_on_position_y_offset: -0.0005
@@ -28,4 +31,6 @@
     # Per-holder trim on holder_on_position_tilt_x_deg, deg, holder N at
     # index N-2. Reloaded every trigger, like everything here.
     holder_multi_tilt_x_deg: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # Per-holder trim on holder_on_position_tilt_z_deg, deg, same shape.
+    holder_multi_tilt_z_deg: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     wrist3_rotation_offset: 0.0
