@@ -1181,11 +1181,14 @@ impl<'a> Sequencer<'a> {
     /// stage bore (0.05 mm clearance) the gripper, puck and bore are one
     /// closed loop, and a step measures how hard the arm deforms it
     /// rather than how far anything can move — there the fingers must
-    /// give way first, so mode 5 probes loosened. A holder well is the
-    /// opposite seat: its clearance dwarfs any play the pads could open,
-    /// and a loosened pad does not let the puck reach a wall, it drags a
-    /// gravity-held puck out of the well (measured at holder 2,
-    /// 2026-08-19). Holder map therefore probes clamped, passing zero.
+    /// give way first, so mode 5 probes loosened. A holder well is just
+    /// as tight (0.050 mm per side, bracketed at holder 4) but holds the
+    /// puck by gravity alone: a loosened pad pushing on the neck does
+    /// not walk the puck to a wall, it tips it up and out of the well
+    /// (holder 2, both 2026-08-19). Holder map therefore probes clamped,
+    /// passing zero. The cost is range: a taught pose off by more than
+    /// the clearance starts the probe preloaded against a wall (6.9 N on
+    /// the first 0.05 mm step) and saturates instead of measuring.
     ///
     /// Restoring is not optional and not the probe's business to remember.
     /// A run that ends on an abort or a blocked retrace leaves the operator
