@@ -14,6 +14,20 @@ use crate::epics::Epics;
 use crate::error::SequencerError;
 use crate::log;
 
+/// Where the gripper posts `Gripper_RBV` transitions while the fingers
+/// move. Production passes [`Epics`]; tests pass a no-op sink, which is
+/// the seam that lets the loosen/regrip contract run under `cargo test`
+/// (an [`Epics`] cannot exist without a CA server).
+pub trait RbvSink {
+    fn write_gripper_rbv(&self, value: i32);
+}
+
+impl RbvSink for Epics {
+    fn write_gripper_rbv(&self, value: i32) {
+        Epics::write_gripper_rbv(self, value);
+    }
+}
+
 const SETTLE_POLL: Duration = Duration::from_millis(30);
 /// Position change below this between polls counts as "not moving".
 const STALL_EPSILON: f64 = 0.0003;
@@ -138,7 +152,7 @@ impl Gripper {
     /// position at [`RELEASE_FORCE`] stops squeezing, so the one command
     /// that looks like a no-op is the one that would quietly give up the
     /// grip this is supposed to leave alone.
-    pub fn loosen_by(&mut self, by_m: f64, epics: &Epics) -> f64 {
+    pub fn loosen_by(&mut self, by_m: f64, epics: &dyn RbvSink) -> f64 {
         if by_m <= 0.0 {
             log::info("Keeping the grip as it is (no play asked for)");
             return 0.0;
@@ -169,7 +183,7 @@ impl Gripper {
     /// Returns where the fingers settled, so the caller holding the
     /// pre-loosen width can tell whether the same object is back between
     /// the pads.
-    pub fn regrip(&mut self, epics: &Epics) -> f64 {
+    pub fn regrip(&mut self, epics: &dyn RbvSink) -> f64 {
         log::info("Restoring the grip");
         self.settle_to(self.close_position, self.grip, epics);
         let settled = self.position();
@@ -201,7 +215,7 @@ impl Gripper {
     /// object — which is why the close wait target is `close_settle_target`
     /// rather than the commanded position), up to `settle_timeout`, which
     /// only warns. Keeps `Gripper_RBV` fresh while the fingers move.
-    pub fn wait_reached(&mut self, open: bool, epics: &Epics) {
+    pub fn wait_reached(&mut self, open: bool, epics: &dyn RbvSink) {
         let target = if open {
             self.open_position
         } else {
@@ -220,7 +234,7 @@ impl Gripper {
     /// Waiting for the
     /// stall instead costs the ~0.55 s the stall dwell takes and answers
     /// the question actually being asked — where did they end up.
-    fn settle_to(&mut self, target: f64, grip: Grip, epics: &Epics) {
+    fn settle_to(&mut self, target: f64, grip: Grip, epics: &dyn RbvSink) {
         match &mut self.backend {
             Backend::Hande(driver) => driver.set_position(target, grip),
             Backend::Simulated { position } => *position = target,
@@ -232,7 +246,7 @@ impl Gripper {
     /// moving. Shared by [`Gripper::wait_reached`] and the probe's
     /// partial-release pair, so that "stalled on something" means the same
     /// thing for all of them.
-    fn settle_at(&mut self, target: f64, tolerance: f64, epics: &Epics) {
+    fn settle_at(&mut self, target: f64, tolerance: f64, epics: &dyn RbvSink) {
         let t0 = Instant::now();
         let mut last_move = t0;
         let mut prev: Option<f64> = None;
@@ -267,11 +281,95 @@ impl Gripper {
 
     /// Writes `Gripper_RBV` (1 = at/above `open_threshold`) on state
     /// change, the C++ `/joint_states`-callback behavior.
-    pub fn update_rbv(&mut self, epics: &Epics) {
+    pub fn update_rbv(&mut self, epics: &dyn RbvSink) {
         let state = i32::from(self.position() >= self.open_threshold);
         if self.last_rbv != Some(state) {
             self.last_rbv = Some(state);
             epics.write_gripper_rbv(state);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoRbv;
+    impl RbvSink for NoRbv {
+        fn write_gripper_rbv(&self, _value: i32) {}
+    }
+
+    /// A gripper as the sequence holds it mid-run: simulated backend
+    /// parked at `at_m` as if a close had settled there.
+    fn gripped_at(at_m: f64) -> Gripper {
+        Gripper {
+            backend: Backend::Simulated { position: at_m },
+            open_position: 0.025,
+            close_position: 0.0,
+            close_settle_target: 0.01,
+            reach_tolerance: 0.0015,
+            settle_timeout: Duration::from_secs(1),
+            open_threshold: 0.02,
+            grip: Grip {
+                force: 0.05,
+                speed: 0.0,
+            },
+            min_grip_position: 0.008,
+            last_rbv: None,
+        }
+    }
+
+    /// The holder-2 incident: the puck held at 11.4 mm is gone by the
+    /// time the fingers close again, and the settle lands far enough
+    /// from the held width that the caller's tolerance comparison must
+    /// flag it. The simulated regrip closes all the way to
+    /// `close_position`, which is exactly what the real fingers did
+    /// over the emptied seat.
+    #[test]
+    fn a_regrip_that_missed_the_puck_settles_away_from_the_held_width() {
+        let mut gr = gripped_at(0.0114);
+        let held = gr.position();
+        let play = gr.loosen_by(0.0025, &NoRbv);
+        assert!((play - 0.0025).abs() < 1e-9);
+        let settled = gr.regrip(&NoRbv);
+        assert!((settled - held).abs() > gr.reach_tolerance());
+    }
+
+    /// The healthy pair: what the fingers held is where they settle
+    /// again, inside the band the caller compares with.
+    #[test]
+    fn a_regrip_onto_the_same_object_settles_where_it_held() {
+        let mut gr = gripped_at(0.0);
+        let held = gr.position();
+        gr.loosen_by(0.0025, &NoRbv);
+        let settled = gr.regrip(&NoRbv);
+        assert!((settled - held).abs() <= gr.reach_tolerance());
+    }
+
+    /// The loosen is clamped to `open_position`: near-open it reports
+    /// only the play it actually opened.
+    #[test]
+    fn the_loosen_never_opens_past_a_plain_open() {
+        let mut gr = gripped_at(0.024);
+        let play = gr.loosen_by(0.0025, &NoRbv);
+        assert!((play - 0.001).abs() < 1e-9);
+    }
+
+    /// Zero play must not touch the gripper at all — a Hand-E told to
+    /// hold its current position at RELEASE_FORCE stops squeezing.
+    #[test]
+    fn no_play_asked_for_touches_nothing() {
+        let mut gr = gripped_at(0.0114);
+        assert_eq!(gr.loosen_by(0.0, &NoRbv), 0.0);
+        assert!((gr.position() - 0.0114).abs() < 1e-12);
+    }
+
+    /// The empty-close check must never fire on the simulated backend —
+    /// its fingers always reach the command exactly, and flagging that
+    /// would fail every URSim rehearsal close.
+    #[test]
+    fn a_simulated_close_is_never_reported_empty() {
+        let gr = gripped_at(0.0);
+        assert_eq!(gr.empty_close(), None);
     }
 }
