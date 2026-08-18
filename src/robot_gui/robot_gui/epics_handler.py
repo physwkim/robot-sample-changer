@@ -33,6 +33,7 @@ class EpicsHandler(qt.QObject):
         'pause_step': 'Robot:PauseStep',
         'start_step': 'Robot:StartStep',
         'loaded': 'Robot:Loaded',
+        'map_source': 'Robot:MapSource',
         'jog_x': 'Robot:JogX',
         'jog_y': 'Robot:JogY',
         'jog_z': 'Robot:JogZ',
@@ -127,6 +128,9 @@ class EpicsHandler(qt.QObject):
 
     def set_calib_mode(self, mode):
         return self.set_value('calib_mode', mode)
+
+    def set_map_source(self, holder_num):
+        return self.set_value('map_source', holder_num)
 
     def set_wait(self, value):
         return self.set_value('wait', value)

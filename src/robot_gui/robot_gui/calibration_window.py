@@ -524,7 +524,7 @@ class YamlOffsetEditor(qt.QGroupBox):
         layout.addWidget(self.offset_table)
 
     def _load_yaml(self):
-        default_path = os.path.expanduser("~/ws/config")
+        default_path = _repo_config_dir()
         path, _ = qt.QFileDialog.getOpenFileName(
             self, "Load Waypoints YAML", default_path, "YAML Files (*.yaml *.yml)"
         )
@@ -598,6 +598,12 @@ class YamlOffsetEditor(qt.QGroupBox):
 
         except Exception as e:
             qt.QMessageBox.critical(self, "Error", f"Failed to save YAML:\n{e}")
+
+
+def _repo_config_dir():
+    """config/ of the checkout this GUI runs from."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.normpath(os.path.join(here, "..", "..", "..", "config"))
 
 
 class TcpJogWidget(qt.QGroupBox):
@@ -975,6 +981,9 @@ class CalibrationWindow(qt.QDialog):
         self._calib_holder_num = None
         self._setup_ui()
         self._connect_signals()
+        taught = os.path.join(_repo_config_dir(), "taught_waypoints.yaml")
+        if os.path.exists(taught):
+            self.yaml_editor.load_yaml_file(taught)
 
     def _setup_ui(self):
         self.setWindowTitle("Calibration - TCP Coordinate & YAML Editor")
