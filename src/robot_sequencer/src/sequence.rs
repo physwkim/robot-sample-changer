@@ -611,7 +611,11 @@ impl<'a> Sequencer<'a> {
         // run is a pad leaving the puck rather than the puck crossing its
         // clearance. Printed because that is the offset between these
         // numbers and the bore.
-        log::info(&format!("  fingers opened {play_mm:.3} mm before stepping"));
+        if play_mm > 0.0 {
+            log::info(&format!("  fingers opened {play_mm:.3} mm before stepping"));
+        } else {
+            log::info("  the grip was held throughout — no play in front of the steps");
+        }
         for bracket in brackets {
             log::info(&format!("  {}", bracket.summary()));
         }
@@ -668,12 +672,22 @@ impl<'a> Sequencer<'a> {
         &mut self,
         probe: impl FnOnce(&mut Self) -> Result<T, SequencerError>,
     ) -> Result<(f64, T), SequencerError> {
-        let play_mm = self
-            .gripper
-            .loosen_by(self.config.probe.loosen_mm / 1000.0, &self.epics)
-            * 1000.0;
+        // One value decides both halves. Reading it once and gating the
+        // restore on the same answer is what keeps "a loosened grip is
+        // always restored" true without making it depend on how much play
+        // the fingers actually managed to open.
+        let loosening = self.config.probe.loosen_mm > 0.0;
+        let play_mm = if loosening {
+            self.gripper
+                .loosen_by(self.config.probe.loosen_mm / 1000.0, &self.epics)
+                * 1000.0
+        } else {
+            0.0
+        };
         let out = probe(self);
-        self.gripper.regrip(&self.epics);
+        if loosening {
+            self.gripper.regrip(&self.epics);
+        }
         out.map(|t| (play_mm, t))
     }
 

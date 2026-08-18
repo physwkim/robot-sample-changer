@@ -321,6 +321,12 @@ pub struct ProbeConfig {
     /// fingers were not the thing in the way: at 0.4 mm the free run was
     /// 0.2 mm against a nominal 0.50 mm clearance (§16.2) and could not
     /// decide it.
+    ///
+    /// Zero holds the grip instead: the fingers are not commanded at all,
+    /// and the probe measures the arm against a puck that is rigidly
+    /// attached to it. That is a different measurement, not a degenerate
+    /// one — the play is the largest unknown in the chain, and a run that
+    /// finds free travel without it needs no play to be subtracted.
     pub loosen_mm: f64,
     /// Sideways, toward a bore wall.
     pub lateral: ProbeAxisConfig,

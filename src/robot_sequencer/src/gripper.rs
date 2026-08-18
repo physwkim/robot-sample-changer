@@ -122,11 +122,20 @@ impl Gripper {
     /// Relative, not absolute: where the fingers stop on a puck is not
     /// known here, and the close wait does not find out (see
     /// [`Gripper::settle_at`]). Clamped to `open_position` so this can
-    /// never open wider than a plain open, and `max(0.0)` so it can never
-    /// be a route to closing.
+    /// never open wider than a plain open.
+    ///
+    /// Asked for no play, this touches the gripper at all — not even to
+    /// command where it already is. A Hand-E told to hold its current
+    /// position at [`RELEASE_FORCE`] stops squeezing, so the one command
+    /// that looks like a no-op is the one that would quietly give up the
+    /// grip this is supposed to leave alone.
     pub fn loosen_by(&mut self, by_m: f64, epics: &Epics) -> f64 {
+        if by_m <= 0.0 {
+            log::info("Keeping the grip as it is (no play asked for)");
+            return 0.0;
+        }
         let from = self.position();
-        let target = (from + by_m.max(0.0)).min(self.open_position);
+        let target = (from + by_m).min(self.open_position);
         log::info(&format!("Loosening the grip: {from:.4} -> {target:.4} m"));
         self.settle_to(target, RELEASE_FORCE, epics);
         let play = self.position() - from;
