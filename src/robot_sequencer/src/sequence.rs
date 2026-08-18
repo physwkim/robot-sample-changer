@@ -673,7 +673,7 @@ impl<'a> Sequencer<'a> {
         log::info("  not in the seat, or the fingers are empty, stop here.");
         log::info("========================================");
         self.wait_for_trigger(true);
-        let (_, soft) = self.seat_probe_here()?;
+        let (_, soft) = self.seat_probe_here(self.config.probe.loosen_mm)?;
         log::info(
             "Nothing was written. The arm is back at the pose the probe \
              started from and the grip is back on the puck; lift it out \
@@ -705,6 +705,7 @@ impl<'a> Sequencer<'a> {
     #[allow(clippy::type_complexity)]
     fn seat_probe_here(
         &mut self,
+        loosen_mm: f64,
     ) -> Result<(Option<(f64, f64)>, Option<SequencerError>), SequencerError> {
         let p = &self.config.probe;
         let depth = ProbeLimits::new(&p.depth, p.velocity_scale);
@@ -731,7 +732,7 @@ impl<'a> Sequencer<'a> {
         // ladder does not make the heights above it unmeasured, and this
         // mode's whole output is what it printed.
         let (play_mm, grip_lost, (levels, walked, returned)) =
-            self.with_grip_loosened(|s| Ok(s.sweep_heights(limits)))?;
+            self.with_grip_loosened(loosen_mm, |s| Ok(s.sweep_heights(limits)))?;
 
         // The trigger-pose level is the taught seat pose, so its bracket
         // centres are the trim residuals holder map persists.
@@ -899,7 +900,10 @@ impl<'a> Sequencer<'a> {
             self.cartesian(20, "holder_on_position_final", &w_t.on_pos, 0)?;
         }
 
-        let (seat, probed) = self.seat_probe_here()?;
+        // Clamped: a holder well holds the puck by gravity only, so the
+        // loosened-pad probe that the stage bore needs would drag the
+        // puck out of it instead of bracketing walls.
+        let (seat, probed) = self.seat_probe_here(0.0)?;
         if let Some(e) = &probed {
             log::warn(&format!(
                 "probe measured less than asked ({e}); the arm walked back to \
@@ -1168,14 +1172,20 @@ impl<'a> Sequencer<'a> {
         Ok(())
     }
 
-    /// Runs `probe` with the fingers opened by `probe.loosen_mm`, and puts
+    /// Runs `probe` with the fingers opened by `loosen_mm`, and puts
     /// the grip back where it found it before returning — on the error
     /// paths as well as the successful one.
     ///
-    /// The play is what the probe needs: clamped on a seated puck the
-    /// gripper, puck and bore are one closed loop, and a step measures how
-    /// hard the arm deforms it rather than how far anything can move.
-    /// Loose, the fingers give way first and the puck can reach a wall.
+    /// The play is a statement about the seat, which is why the caller
+    /// makes it and not the config alone. Clamped on a puck seated in the
+    /// stage bore (0.05 mm clearance) the gripper, puck and bore are one
+    /// closed loop, and a step measures how hard the arm deforms it
+    /// rather than how far anything can move — there the fingers must
+    /// give way first, so mode 5 probes loosened. A holder well is the
+    /// opposite seat: its clearance dwarfs any play the pads could open,
+    /// and a loosened pad does not let the puck reach a wall, it drags a
+    /// gravity-held puck out of the well (measured at holder 2,
+    /// 2026-08-19). Holder map therefore probes clamped, passing zero.
     ///
     /// Restoring is not optional and not the probe's business to remember.
     /// A run that ends on an abort or a blocked retrace leaves the operator
@@ -1197,18 +1207,17 @@ impl<'a> Sequencer<'a> {
     /// caller's safe epilogue should still run before the run fails.
     fn with_grip_loosened<T>(
         &mut self,
+        loosen_mm: f64,
         probe: impl FnOnce(&mut Self) -> Result<T, SequencerError>,
     ) -> Result<(f64, Option<SequencerError>, T), SequencerError> {
         // One value decides both halves. Reading it once and gating the
         // restore on the same answer is what keeps "a loosened grip is
         // always restored" true without making it depend on how much play
         // the fingers actually managed to open.
-        let loosening = self.config.probe.loosen_mm > 0.0;
+        let loosening = loosen_mm > 0.0;
         let held_m = self.gripper.position();
         let play_mm = if loosening {
-            self.gripper
-                .loosen_by(self.config.probe.loosen_mm / 1000.0, &self.epics)
-                * 1000.0
+            self.gripper.loosen_by(loosen_mm / 1000.0, &self.epics) * 1000.0
         } else {
             0.0
         };
