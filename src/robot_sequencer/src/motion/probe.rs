@@ -110,6 +110,12 @@ pub struct Contact {
     pub lateral_n: Vec<f64>,
     /// Force along the probe direction relative to the start pose, N.
     pub along_n: Vec<f64>,
+    /// The force change that counted as contact for this probe, N. Carried
+    /// with the samples because it is what "out of the noise" means for
+    /// them: it was chosen for this axis, against this sample, and
+    /// [`Contact::wall_mm`] needs it to tell a ramp from a rise that is
+    /// still nothing.
+    pub threshold_n: f64,
     /// Index into the sample vectors of the step that tripped the contact
     /// threshold, or `None` if the probe ran out of allowance without
     /// touching anything.
@@ -171,7 +177,14 @@ impl Contact {
         }
         let baseline = median(before);
         let deviations: Vec<f64> = before.iter().map(|f| (f - baseline).abs()).collect();
-        let quiet = baseline + NOISE_MADS * median(&deviations);
+        // Out of the noise by whichever is the larger claim: what this run
+        // actually scattered, or half of what was decided in advance to be
+        // real contact on this axis. The scatter alone is not enough — on
+        // the depth axis it sits near 0.1 N, which swept a 0.4 N shoulder
+        // that is not the floor into the fit and halved the slope
+        // (2026-08-18). The threshold alone is not enough either: it is
+        // what the lateral ramp clears in a single step.
+        let quiet = baseline + (NOISE_MADS * median(&deviations)).max(self.threshold_n / 2.0);
 
         // The ramp is the run of samples at the end that are out of the
         // noise, found from the last sample backwards: everything after
@@ -440,6 +453,7 @@ impl Motion<'_> {
             travel_mm: Vec::new(),
             lateral_n: Vec::new(),
             along_n: Vec::new(),
+            threshold_n: limits.threshold_n,
             tripped: None,
             visited: Vec::new(),
         };
@@ -755,10 +769,20 @@ mod tests {
     /// it was already at, then grows against the motion once the probe
     /// meets something.
     fn contact(travel: &[f64], along: &[f64], tripped: Option<usize>) -> Contact {
+        with_threshold(travel, along, tripped, 1.0)
+    }
+
+    fn with_threshold(
+        travel: &[f64],
+        along: &[f64],
+        tripped: Option<usize>,
+        threshold_n: f64,
+    ) -> Contact {
         Contact {
             travel_mm: travel.to_vec(),
             lateral_n: vec![0.0; travel.len()],
             along_n: along.to_vec(),
+            threshold_n,
             tripped,
             visited: Vec::new(),
         }
@@ -787,10 +811,11 @@ mod tests {
     /// zero the same samples put it short.
     #[test]
     fn the_wall_is_measured_against_the_drag_not_against_zero() {
-        let c = contact(
+        let c = with_threshold(
             &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
             &[0.24, 0.26, 0.25, 0.24, 0.26, 0.25, 0.55, 0.95],
             Some(6),
+            0.5,
         );
         let wall = c.wall_mm().expect("two ramp samples are a slope");
         assert!(
@@ -800,6 +825,28 @@ mod tests {
         // The same ramp extrapolated to zero force, which is what ignoring
         // the drag would give.
         assert!(wall > 0.5625, "and that is later than the zero intercept");
+    }
+
+    /// The depth run of 2026-08-18: force sat at the noise, rose to a
+    /// 0.4-0.5 N shoulder that is not the floor, then jumped. The
+    /// shoulder is far outside the run's own scatter, so the scatter
+    /// alone would take it into the fit and halve the slope; half the
+    /// contact threshold keeps it out.
+    #[test]
+    fn a_shoulder_under_the_threshold_is_not_part_of_the_ramp() {
+        let c = with_threshold(
+            &[0.10, 0.20, 0.32, 0.42, 0.52, 0.63, 0.74, 0.85, 0.96, 1.06],
+            &[
+                0.002, -0.030, -0.005, -0.057, -0.040, -0.032, -0.495, -0.382, -0.472, -2.133,
+            ],
+            Some(9),
+            1.0,
+        );
+        // One sample clears baseline + threshold/2, and one is not a slope.
+        assert_eq!(c.wall_mm(), None);
+        // With the scatter alone as the cut, the shoulder joins the ramp
+        // and the fit reports a floor 0.2 mm above where the jump is.
+        assert_eq!(c.tripped_mm(), Some(1.06));
     }
 
     #[test]

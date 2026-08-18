@@ -276,12 +276,12 @@ pub struct ProbeAxisConfig {
     /// can be fitted from a slope instead of read off the trip point,
     /// which carries the threshold and up to one step of overshoot in it.
     ///
-    /// Zero where the ramp already appears below the threshold: the depth
-    /// probe's 1.0 N sits above four rising samples (0.33, 0.32, 0.62 N,
-    /// 2026-08-18), and three more 0.10 mm steps into a floor that stiff
-    /// would reach the abort limit instead. Nonzero where it does not:
-    /// laterally the same day, contact went from 0.17 N to 0.59 N in one
-    /// 0.05 mm step, and one sample is not a slope.
+    /// Needed on both axes, for the same reason: what the probe reads
+    /// below the contact threshold is not the ramp. Laterally it is
+    /// nothing at all — 0.17 N to 0.59 N in one 0.05 mm step, 2026-08-18.
+    /// Downwards it is a 0.4-0.5 N shoulder that appears half a
+    /// millimetre before the jump and is not the floor; fitting it in
+    /// halves the slope and moves the floor 0.2 mm.
     ///
     /// An upper bound, not a count: the overtravel also stops once the
     /// load reaches half of `abort_n`, so a wall stiffer than the one this
@@ -370,8 +370,11 @@ impl Default for ProbeConfig {
                 travel_mm: 4.0,
                 threshold_n: 1.0,
                 abort_n: 8.0,
-                // The floor's ramp is already below the 1.0 N threshold.
-                overtravel_steps: 0,
+                // Two, not three: the floor is stiffer than a bore wall
+                // (16 N/mm against 4), so the load bound stops this early
+                // anyway, and 0.2 mm is what it takes to put a second
+                // sample in the hard part of the contact.
+                overtravel_steps: 2,
             },
         }
     }

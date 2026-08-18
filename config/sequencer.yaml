@@ -322,6 +322,8 @@ probe:
     travel_mm: 4.0
     threshold_n: 1.0      # the puck's own weight is already on the floor
     abort_n: 8.0
-    overtravel_steps: 0   # the floor's ramp already shows up below the threshold
-                          # (0.33/0.32/0.62 N), and three more steps into it would
-                          # reach the abort limit instead of a better fit
+    overtravel_steps: 2   # the 0.4-0.5 N shoulder half a millimetre above the
+                          # floor is not the floor: fitting it in halves the slope
+                          # and moves the answer 0.2 mm (doc §16.9). Two steps put
+                          # a second sample in the hard part; the load bound (half
+                          # of abort_n) stops it sooner on a stiff floor
