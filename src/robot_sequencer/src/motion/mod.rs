@@ -23,7 +23,9 @@ mod scene;
 
 pub(crate) use probe::ProbeLimits;
 pub(crate) use scene::LevelToolConstraint;
-pub(crate) use scene::{SceneAsset, first_collision_index, load_scene_assets, scene_with_assets};
+pub(crate) use scene::{
+    SceneAsset, first_collision_index, load_scene_assets, scene_with_assets, shortcut_keep_indices,
+};
 
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -35,6 +37,7 @@ use cspace_core::kinematics::{CartesianInterpolator, IkContext, MaxEefStep};
 use cspace_core::state::RobotState;
 use cspace_core::trajectory::RobotTrajectory;
 use cspace_core::trajectory::trajectory_tools::apply_totg_time_parameterization;
+use cspace_planning::constraints::KinematicConstraintSet;
 use cspace_planning::constraints::utils::construct_goal_joint_constraints;
 use cspace_planning::planner_registry::resolve_planner;
 use cspace_planning::{PlannerConfigurationMap, PlanningRequest, generate_plan};
@@ -67,6 +70,11 @@ pub const RTDE_JOINT_ORDER: [&str; 6] = [
 
 /// TOTG resample step — each sample becomes one quintic spline segment.
 const RESAMPLE_DT: f64 = 0.1;
+/// Sample spacing (joint-space Euclidean) when validating a shortcut
+/// splice — `RrtConnectManager`'s default motion-validator resolution,
+/// so a spliced segment is checked as finely as the planner edges it
+/// removes.
+const SHORTCUT_RESOLUTION: f64 = 0.05;
 /// TOTG drops a waypoint when no joint moved further than this, which is
 /// upstream's guard against exactly-repeated points in planner output, not
 /// a statement about what the arm can do. A trajectory left with one point
@@ -279,13 +287,13 @@ impl<'m> Motion<'m> {
     /// every interpolated state collision-checked and no planned fallback.
     ///
     /// For motions that are meant to stay small. [`Motion::move_planned`]
-    /// answers "some collision-free path exists", not "a short one":
-    /// RRT-Connect samples the whole joint space and nothing downstream
-    /// shortens what it returns, so two configurations a few degrees apart
-    /// can be joined by a path that swings the TCP most of a metre through
-    /// the cell — measured at 0.71 m on an 8-degree tool rotation during
-    /// hand-eye capture. Interpolating instead makes the executed motion
-    /// the one that was asked for.
+    /// answers "some collision-free path exists", not "the line asked
+    /// for": RRT-Connect samples the whole joint space, and although its
+    /// answer is now shortcut before execution ([`shortcut_keep_indices`]
+    /// — before that, an 8-degree tool rotation during hand-eye capture
+    /// measured 0.71 m of TCP swing), a spliced segment is straight in
+    /// joint space, which still arcs the TCP. Interpolating instead makes
+    /// the executed motion the one that was asked for.
     ///
     /// A line that cannot be followed to the end, or that collides, is an
     /// error rather than a fallback: callers vet their goals with
@@ -341,6 +349,51 @@ impl<'m> Motion<'m> {
 
     /// Planned (RRT-Connect) joint-space move, the port of the MoveGroup
     /// action fallback. Plans against the stage collision scene.
+    /// Shorten a freshly planned trajectory in place — see
+    /// [`shortcut_keep_indices`]. Runs between planning and TOTG: the
+    /// splice only removes waypoints, and TOTG re-times whatever remains,
+    /// so timing never has to be touched here.
+    fn shortcut(
+        &self,
+        trajectory: &mut RobotTrajectory<'_>,
+        constraints: Option<&KinematicConstraintSet>,
+        label: &str,
+    ) -> Result<(), SequencerError> {
+        let n = trajectory.way_point_count();
+        if n <= 2 {
+            return Ok(());
+        }
+        let mut qs = Vec::with_capacity(n);
+        for i in 0..n {
+            let q = trajectory
+                .way_point(i)
+                .map_err(|e| SequencerError(format!("{label}: shortcut: waypoint {i}: {e}")))?
+                .joint_group_positions(&self.model.group)
+                .map_err(|e| SequencerError(format!("{label}: shortcut: positions {i}: {e}")))?;
+            qs.push(q);
+        }
+        let keep = shortcut_keep_indices(
+            self.model,
+            &self.scene_assets,
+            &self.allow_collisions_with,
+            constraints,
+            &qs,
+            SHORTCUT_RESOLUTION,
+        )?;
+        if keep.len() == n {
+            return Ok(());
+        }
+        for i in (0..n).rev() {
+            if !keep.contains(&i) {
+                trajectory
+                    .remove_way_point(i)
+                    .map_err(|e| SequencerError(format!("{label}: shortcut: remove {i}: {e}")))?;
+            }
+        }
+        log::info(&format!("  Shortcut: {n} -> {} waypoints", keep.len()));
+        Ok(())
+    }
+
     pub fn move_planned(
         &mut self,
         goal: &JointMap,
@@ -403,7 +456,7 @@ impl<'m> Motion<'m> {
         let request = PlanningRequest {
             group_name: self.model.group.clone(),
             goal_constraints: vec![goal_constraints],
-            path_constraints,
+            path_constraints: path_constraints.clone(),
             max_velocity_scaling_factor: velocity_scale,
             max_acceleration_scaling_factor: acceleration_scale,
             ..PlanningRequest::default()
@@ -418,6 +471,8 @@ impl<'m> Motion<'m> {
             .map_err(|e| SequencerError(format!("{label}: planning failed: {e}")))?;
         let planned_in = planning_started.elapsed();
         let mut trajectory = response.trajectory;
+        self.shortcut(&mut trajectory, path_constraints.as_ref(), label)?;
+        let shortcut_done = planning_started.elapsed();
         apply_totg_time_parameterization(
             &mut trajectory,
             velocity_scale,
@@ -428,9 +483,10 @@ impl<'m> Motion<'m> {
         )
         .map_err(|e| SequencerError(format!("{label}: TOTG failed: {e}")))?;
         log::info(&format!(
-            "  Planned in {:.2} s, TOTG {:.2} s",
+            "  Planned in {:.2} s, shortcut {:.2} s, TOTG {:.2} s",
             planned_in.as_secs_f64(),
-            (planning_started.elapsed() - planned_in).as_secs_f64(),
+            (shortcut_done - planned_in).as_secs_f64(),
+            (planning_started.elapsed() - shortcut_done).as_secs_f64(),
         ));
 
         self.execute(&trajectory, label)

@@ -169,6 +169,97 @@ pub(crate) fn first_collision_index(
     Ok(None)
 }
 
+/// One interpolated sample of a candidate shortcut splice, held to the
+/// same two judgments the planner held its own edges to: the path
+/// constraint and the collision world.
+fn shortcut_sample_is_valid(
+    scene: &mut PlanningScene<'_>,
+    env: &ParryCollisionEnv,
+    request: &CollisionRequest,
+    group: &str,
+    constraints: Option<&KinematicConstraintSet>,
+    q: &[f64],
+) -> Result<bool, SequencerError> {
+    let state = scene.current_state_mut();
+    state
+        .set_joint_group_positions(group, q)
+        .map_err(|e| SequencerError(format!("shortcut: scene state: {e}")))?;
+    let posed = state.update();
+    if let Some(set) = constraints
+        && !set.decide(&posed).satisfied
+    {
+        return Ok(false);
+    }
+    Ok(!scene.check_collision(env, request).collision)
+}
+
+/// The planner's answer, shortened: a greedy farthest-first pass over the
+/// waypoints of a solved path, keeping a waypoint only when no later one
+/// is reachable from it on a straight joint-space segment. RRT-Connect
+/// returns its solution unsimplified — the port left OMPL's
+/// `simplifySolution` behind (see cspace-planners' registry) — so two
+/// configurations a few degrees apart can be joined through most of a
+/// metre of TCP swing; this closes that gap where the plan is consumed.
+///
+/// Candidate segments are sampled every `resolution` of joint-space
+/// Euclidean distance — pass the planner's own motion-validator spacing,
+/// so a spliced edge is checked as finely as the edges it removes. The
+/// pass is deterministic (no random shortcut sampling): a given path
+/// always shortens to the same result. Original adjacent edges are the
+/// planner's own and are not re-validated; waypoints themselves are
+/// likewise trusted, only splice interiors are sampled.
+///
+/// Returns the kept indices, ascending, always including the endpoints.
+pub(crate) fn shortcut_keep_indices(
+    model: &Model,
+    assets: &[SceneAsset],
+    allow_collisions_with: &[String],
+    constraints: Option<&KinematicConstraintSet>,
+    qs: &[Vec<f64>],
+    resolution: f64,
+) -> Result<Vec<usize>, SequencerError> {
+    if qs.len() < 2 {
+        return Ok((0..qs.len()).collect());
+    }
+    let (mut scene, env) = scene_with_assets(model, assets, allow_collisions_with);
+    let request = CollisionRequest::default();
+
+    let mut keep = vec![0];
+    let mut i = 0;
+    while i + 1 < qs.len() {
+        let mut next = i + 1;
+        'candidates: for j in (i + 2..qs.len()).rev() {
+            let (a, b) = (&qs[i], &qs[j]);
+            let distance = a
+                .iter()
+                .zip(b)
+                .map(|(x, y)| (x - y).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            let steps = (distance / resolution).ceil().max(1.0) as usize;
+            for k in 1..steps {
+                let t = k as f64 / steps as f64;
+                let q: Vec<f64> = a.iter().zip(b).map(|(x, y)| x + (y - x) * t).collect();
+                if !shortcut_sample_is_valid(
+                    &mut scene,
+                    &env,
+                    &request,
+                    &model.group,
+                    constraints,
+                    &q,
+                )? {
+                    continue 'candidates;
+                }
+            }
+            next = j;
+            break;
+        }
+        keep.push(next);
+        i = next;
+    }
+    Ok(keep)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -483,6 +574,95 @@ mod tests {
             .is_some(),
             "holder1_on_position must read as a scene collision — that is the \
              whole reason a force probe cannot borrow the jog's scene gate"
+        );
+    }
+
+    /// The shortcut must take the farthest valid splice — a free-space
+    /// dogleg collapses to its endpoints — and must refuse it for exactly
+    /// the two reasons a splice can be wrong: a scene collision on the
+    /// spliced segment, and a path-constraint violation on it. The blocked
+    /// variants keep the via point, and each is paired with its unblocked
+    /// twin so the test can only pass if the block is the cube (or the
+    /// constraint), not something about the states.
+    #[test]
+    fn shortcut_splices_only_segments_the_planner_would_have_accepted() {
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/sequencer.yaml"
+        ));
+        let config = Config::load(path).expect("load config");
+        let (model, taught) = production_model_and_state();
+        let group_q = |joints: &JointMap| -> Vec<f64> {
+            model
+                .state_with_joints(joints)
+                .expect("state")
+                .joint_group_positions(&model.group)
+                .expect("positions")
+        };
+        let q0 = group_q(&taught);
+
+        // A dogleg: via lifts the shoulder, endpoint pans it. The straight
+        // q0 -> q2 segment is a pure pan sweep in free air.
+        let mut via = taught.clone();
+        *via.get_mut("shoulder_lift_joint").expect("lift") += 0.2;
+        let mut panned = taught.clone();
+        *panned.get_mut("shoulder_pan_joint").expect("pan") += 0.3;
+        let qs = [q0.clone(), group_q(&via), group_q(&panned)];
+
+        assert_eq!(
+            shortcut_keep_indices(&model, &[], &[], None, &qs, 0.05).expect("shortcut"),
+            vec![0, 2],
+            "a free-space dogleg must collapse to its endpoints"
+        );
+
+        // Same dogleg with a cube parked at the TCP of the splice's
+        // midpoint: the pan sweep now passes through it, the planner's own
+        // adjacent edges do not (the via lifts over), so the via survives.
+        let mut mid = taught.clone();
+        *mid.get_mut("shoulder_pan_joint").expect("pan") += 0.15;
+        let mut mid_state = model.state_with_joints(&mid).expect("mid state");
+        let mid_tcp = mid_state
+            .update()
+            .global_link_transform(&model.ik_frame)
+            .expect("fk");
+        let block = cube_asset(
+            "block",
+            Isometry3::from_parts(mid_tcp.translation, mid_tcp.rotation),
+        );
+        assert_eq!(
+            shortcut_keep_indices(&model, &[block], &[], None, &qs, 0.05).expect("shortcut"),
+            vec![0, 1, 2],
+            "a cube on the spliced segment must keep the via point"
+        );
+
+        // A splice that tilts through the level-tool band: q0 and a
+        // wrist_1-rotated endpoint. Without the constraint the segment
+        // is a plain free-air wrist sweep and splices; with it, the
+        // interior tilt (up to 30 degrees) must be rejected.
+        let mut tilted = taught.clone();
+        *tilted.get_mut("wrist_1_joint").expect("wrist_1") += 30f64.to_radians();
+        let qs_tilting = [q0.clone(), qs[1].clone(), group_q(&tilted)];
+
+        assert_eq!(
+            shortcut_keep_indices(&model, &[], &[], None, &qs_tilting, 0.05).expect("shortcut"),
+            vec![0, 2],
+            "without the constraint the wrist sweep must splice"
+        );
+
+        let constraint = LevelToolConstraint::new(
+            &config.robot.ik_frame,
+            config.sequence.level_tool.tolerance_deg,
+        );
+        let (mut scene, _env) = scene_with_assets(&model, &[], &[]);
+        scene.current_state_mut().update();
+        let set = constraint
+            .build(&model, scene.transforms())
+            .expect("build the level-tool constraint");
+        assert_eq!(
+            shortcut_keep_indices(&model, &[], &[], Some(&set), &qs_tilting, 0.05)
+                .expect("shortcut"),
+            vec![0, 1, 2],
+            "under the level-tool constraint the tilting splice must be refused"
         );
     }
 
