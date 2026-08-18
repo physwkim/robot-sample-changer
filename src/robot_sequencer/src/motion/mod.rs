@@ -133,7 +133,11 @@ pub struct Motion<'m> {
     script_command: Arc<ScriptCommandInterface>,
     // Held for its side effect: the primary stream carries the running
     // program.
-    _primary: TcpStream,
+    /// The 30001 stream the current program was sent over. Held open:
+    /// URControl can abandon a program whose sender disconnects during
+    /// the load (observed 2026-08-18: a resend that closed right after
+    /// the write left the program "STOPPED <unnamed>", never running).
+    primary: TcpStream,
     /// The address and rendered headless program from bring-up, kept so
     /// a dead program can be resent without restarting the daemon (a
     /// restart re-activates the Hand-E, which can open the fingers on a

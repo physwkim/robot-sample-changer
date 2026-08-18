@@ -164,7 +164,7 @@ impl<'m> Motion<'m> {
             reverse,
             trajectory,
             script_command,
-            _primary: primary,
+            primary,
             robot_ip,
             full_program,
             rtde,
@@ -362,14 +362,15 @@ impl Motion<'_> {
     /// 1.0). The connection is dropped right after the write, like the
     /// hand-run `nc` procedure this replaces.
     fn resend_program(&mut self) -> Result<(), SequencerError> {
-        {
-            let mut primary = TcpStream::connect((self.robot_ip.as_str(), 30001)).map_err(|e| {
-                SequencerError(format!("primary connect to {}:30001: {e}", self.robot_ip))
-            })?;
-            primary
-                .write_all(self.full_program.as_bytes())
-                .map_err(|e| SequencerError(format!("resend program: {e}")))?;
-        }
+        let mut primary = TcpStream::connect((self.robot_ip.as_str(), 30001)).map_err(|e| {
+            SequencerError(format!("primary connect to {}:30001: {e}", self.robot_ip))
+        })?;
+        primary
+            .write_all(self.full_program.as_bytes())
+            .map_err(|e| SequencerError(format!("resend program: {e}")))?;
+        // Replace, do not drop: the stored stream keeps the fresh
+        // program's sender alive, the way bring-up keeps its own.
+        self.primary = primary;
         wait_for_program(
             &self.program_running,
             &self.trajectory,
