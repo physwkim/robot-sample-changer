@@ -31,20 +31,24 @@
 //!
 //! A threshold decides when to *stop*, and stopping early or late would
 //! move the answer if the answer were "the position where it tripped". It
-//! is not. Two axes, two different reasons:
+//! is not, on any axis: every wall and the floor alike come from
+//! [`Contact::wall_mm`], which fits the force-versus-travel samples after
+//! contact and extrapolates back to the level the force sat at before it.
+//! Where the slope *began* is a property of the metal; where a level was
+//! *crossed* is a property of the threshold and of how big a step the
+//! probe happened to be taking. That is the other reason every step is
+//! kept rather than only the last, and the reason the probe takes a few
+//! steps past contact rather than returning on it.
 //!
-//! - **Lateral (x, y).** The bore has a wall on both sides, so the probe
-//!   brackets: contact at `+d`, contact at `-d`, and the centre is the
-//!   midpoint. A threshold that trips consistently late pushes both
-//!   contacts outward by the same amount and leaves the midpoint where it
-//!   was. What it changes is the *clearance* estimate, which is reported
-//!   with its own caveat.
-//! - **Vertical (z).** One floor, no bracket, so the midpoint trick is not
-//!   available. Instead the force-versus-depth samples after contact are
-//!   fitted and extrapolated back to zero: the intercept is the touch
-//!   point whatever threshold collected the samples. That is what
-//!   [`Contact::touch_at`] returns, and it needs the samples, which is the
-//!   other reason every step is kept rather than only the last.
+//! It was not always one rule. The floor was fitted from the beginning
+//! while the two lateral walls were read off the trip point, on the
+//! argument that a threshold tripping late pushes both walls outward
+//! equally and cancels in the midpoint. It does not cancel when the two
+//! sides do not trip alike, which is exactly what a real seat gives: on
+//! 2026-08-18 `base x+` ramped over 0.7 mm against a steady drag while
+//! `base x-` went from noise to tripped in one step. Two meanings of
+//! "where it touched" in one file is what produced that, so there is now
+//! one.
 //!
 //! # What bounds the force
 //!
@@ -94,9 +98,15 @@ pub struct Contact {
     pub lateral_n: Vec<f64>,
     /// Force along the probe direction relative to the start pose, N.
     pub along_n: Vec<f64>,
-    /// Travel at which the threshold tripped, or `None` if the probe ran
-    /// out of allowance without touching anything.
-    pub tripped_mm: Option<f64>,
+    /// Index into the sample vectors of the step that tripped the contact
+    /// threshold, or `None` if the probe ran out of allowance without
+    /// touching anything.
+    ///
+    /// The index rather than the travel, because both readers need it:
+    /// [`Contact::tripped_mm`] is one lookup away, and [`Contact::wall_mm`]
+    /// needs to know which samples are *before* contact to have a baseline
+    /// to measure the wall against.
+    pub tripped: Option<usize>,
     /// Every pose the arm actually stood in, starting at the pose the
     /// probe began from and in the order they were reached.
     ///
@@ -109,42 +119,100 @@ pub struct Contact {
 }
 
 impl Contact {
-    /// Where the force would have been zero, from the samples after
-    /// contact — the touch point without a threshold in it.
+    /// Travel at which the contact threshold tripped.
+    pub fn tripped_mm(&self) -> Option<f64> {
+        self.tripped.map(|i| self.travel_mm[i])
+    }
+
+    /// Where the wall is: the travel at which the force left the level it
+    /// had been sitting at before contact.
     ///
-    /// A straight line through the rising samples, extrapolated back. Fewer
-    /// than two of them is not a slope, and a fit that comes out flat or
-    /// backwards is not contact, so both give `None` rather than a number
-    /// that would look like a measurement.
-    pub fn touch_at(&self, threshold_n: f64) -> Option<f64> {
-        let rising: Vec<(f64, f64)> = self
-            .travel_mm
-            .iter()
-            .zip(&self.along_n)
-            .filter(|(_, f)| f.abs() >= threshold_n * 0.5)
-            .map(|(d, f)| (*d, f.abs()))
-            .collect();
-        if rising.len() < 2 {
+    /// This, not the trip point, is the answer the mode exists to give.
+    /// The trip point carries two things that are properties of the probe
+    /// rather than of the metal — the threshold it had to clear, and up to
+    /// one step of overshoot past first contact — and both are removed by
+    /// asking where the *slope* began instead of where the *level* was
+    /// crossed. The floor has been read this way since the beginning; the
+    /// two lateral walls were read from the trip point until 2026-08-18,
+    /// which is two meanings of "where it touched" in one file.
+    ///
+    /// Against the baseline, not against zero. A probe that is dragging
+    /// something reads a steady force before it meets anything — `base x+`
+    /// sat at 0.22-0.27 N for 0.7 mm on 2026-08-18 — and extrapolating
+    /// that ramp back to zero would put the wall most of a millimetre
+    /// short. The baseline is the median of the samples before the trip,
+    /// which is the level the drag settled at, and the spread around it is
+    /// the median absolute deviation, which is what "still just noise"
+    /// means for this run rather than for a nominal one.
+    ///
+    /// `None` rather than a number that would look like a measurement
+    /// when: nothing tripped, there are too few pre-contact samples to
+    /// establish a baseline, the ramp is a single sample (which is not a
+    /// slope), or the fit comes out flat or backwards (drift, or a grip
+    /// letting go — pushing further in must read harder).
+    pub fn wall_mm(&self) -> Option<f64> {
+        let trip = self.tripped?;
+        let force: Vec<f64> = self.along_n.iter().map(|f| f.abs()).collect();
+        let before = &force[..trip];
+        if before.len() < MIN_BASELINE_SAMPLES {
             return None;
         }
-        let n = rising.len() as f64;
-        let mean_d = rising.iter().map(|(d, _)| d).sum::<f64>() / n;
-        let mean_f = rising.iter().map(|(_, f)| f).sum::<f64>() / n;
-        let sxy: f64 = rising
+        let baseline = median(before);
+        let deviations: Vec<f64> = before.iter().map(|f| (f - baseline).abs()).collect();
+        let quiet = baseline + NOISE_MADS * median(&deviations);
+
+        // The ramp is the run of samples at the end that are out of the
+        // noise, found from the last sample backwards: everything after
+        // the probe met the wall, and nothing from before it.
+        let ramp: Vec<(f64, f64)> = force
             .iter()
-            .map(|(d, f)| (d - mean_d) * (f - mean_f))
-            .sum();
-        let sxx: f64 = rising.iter().map(|(d, _)| (d - mean_d).powi(2)).sum();
+            .enumerate()
+            .rev()
+            .take_while(|(_, f)| **f > quiet)
+            .map(|(i, f)| (self.travel_mm[i], *f))
+            .collect();
+        if ramp.len() < 2 {
+            return None;
+        }
+
+        let n = ramp.len() as f64;
+        let mean_d = ramp.iter().map(|(d, _)| d).sum::<f64>() / n;
+        let mean_f = ramp.iter().map(|(_, f)| f).sum::<f64>() / n;
+        let sxy: f64 = ramp.iter().map(|(d, f)| (d - mean_d) * (f - mean_f)).sum();
+        let sxx: f64 = ramp.iter().map(|(d, _)| (d - mean_d).powi(2)).sum();
         if sxx <= f64::EPSILON {
             return None;
         }
         let slope = sxy / sxx;
         // Stiffness has a sign: pushing further in must read harder. A fit
-        // that says otherwise is drift or a slipping grip, not a floor.
+        // that says otherwise is drift or a slipping grip, not a wall.
         if slope.abs() < f64::EPSILON || (slope > 0.0) != (mean_d > 0.0) {
             return None;
         }
-        Some(mean_d - mean_f / slope)
+        Some(mean_d - (mean_f - baseline) / slope)
+    }
+}
+
+/// Pre-contact samples needed before a baseline is a baseline rather than
+/// one reading that happened to be first.
+const MIN_BASELINE_SAMPLES: usize = 3;
+
+/// How many median absolute deviations above the baseline a sample has to
+/// sit to count as part of the ramp rather than as more of the same noise.
+const NOISE_MADS: f64 = 3.0;
+
+/// Median of a non-empty slice, by value. Not a mean: the samples this is
+/// asked about include the ones where the probe met something, and one
+/// contact reading is large enough to drag a mean out of the noise it was
+/// supposed to describe.
+fn median(values: &[f64]) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = sorted.len() / 2;
+    if sorted.len() % 2 == 0 {
+        (sorted[mid - 1] + sorted[mid]) / 2.0
+    } else {
+        sorted[mid]
     }
 }
 
@@ -213,50 +281,67 @@ pub struct Bracket {
 }
 
 impl Bracket {
-    /// What to add to the current position to sit between the two walls,
-    /// or `None` unless both were found.
+    /// Where both walls are, and which estimator found them.
     ///
-    /// A threshold that trips consistently late pushes both contacts
-    /// outward by the same amount, so it cancels here — unlike in
-    /// [`Bracket::half_gap_mm`].
-    pub fn centre_mm(&self) -> Option<f64> {
-        match (self.plus.tripped_mm, self.minus.tripped_mm) {
-            (Some(p), Some(m)) => Some((p - m) / 2.0),
+    /// One estimator for both sides, never one each. A fit on one wall and
+    /// a trip point on the other differ by that side's overshoot, and the
+    /// midpoint of the two would carry the whole of it — the exact error
+    /// the fit was introduced to remove, reappearing as a bias instead of
+    /// as a symmetric offset. So if either side cannot be fitted, both
+    /// fall back to the trip point.
+    fn walls_mm(&self) -> Option<(f64, f64, &'static str)> {
+        if let (Some(p), Some(m)) = (self.plus.wall_mm(), self.minus.wall_mm()) {
+            return Some((p, m, "fitted"));
+        }
+        match (self.plus.tripped_mm(), self.minus.tripped_mm()) {
+            (Some(p), Some(m)) => Some((p, m, "at the trip point, no slope to fit")),
             _ => None,
         }
     }
 
-    /// Half the distance between the two walls: the radial clearance,
-    /// which does carry the contact threshold in it.
+    /// What to add to the current position to sit between the two walls,
+    /// or `None` unless both were found.
+    pub fn centre_mm(&self) -> Option<f64> {
+        self.walls_mm().map(|(p, m, _)| (p - m) / 2.0)
+    }
+
+    /// Half the distance between the two walls: the radial clearance.
+    ///
+    /// Unlike the centre, this does not cancel anything — an estimator
+    /// that reads both walls late reports a gap that is too wide by twice
+    /// that, which is why [`Contact::wall_mm`] is worth having.
     pub fn half_gap_mm(&self) -> Option<f64> {
-        match (self.plus.tripped_mm, self.minus.tripped_mm) {
-            (Some(p), Some(m)) => Some((p + m) / 2.0),
-            _ => None,
-        }
+        self.walls_mm().map(|(p, m, _)| (p + m) / 2.0)
     }
 
     /// One line saying which of the three things happened.
     pub fn summary(&self) -> String {
         let label = &self.label;
-        match (self.plus.tripped_mm, self.minus.tripped_mm) {
-            (Some(p), Some(m)) => format!(
-                "{label}: walls at {p:+.3} and {:+.3} mm -> centre {:+.3} mm, \
+        match (
+            self.walls_mm(),
+            self.plus.tripped_mm(),
+            self.minus.tripped_mm(),
+        ) {
+            (Some((p, m, how)), _, _) => format!(
+                "{label}: walls at {p:+.3} and {:+.3} mm ({how}) -> centre {:+.3} mm, \
                  clearance {:.3} mm per side",
                 -m,
                 self.centre_mm().unwrap_or(f64::NAN),
                 self.half_gap_mm().unwrap_or(f64::NAN),
             ),
-            (None, None) => format!(
+            (None, None, None) => format!(
                 "{label}: nothing within {:.2} mm either way — no wall to measure from",
                 self.travel_mm
             ),
-            (Some(p), None) => format!(
+            (None, Some(p), None) => format!(
                 "{label}: only the + side touched, at {p:+.3} mm — one wall is not a centre"
             ),
-            (None, Some(m)) => format!(
+            (None, None, Some(m)) => format!(
                 "{label}: only the - side touched, at {:+.3} mm — one wall is not a centre",
                 -m
             ),
+            // Unreachable: both sides tripping is the first arm.
+            (None, Some(_), Some(_)) => unreachable!("both sides tripped but neither wall placed"),
         }
     }
 }
@@ -273,6 +358,9 @@ pub struct ProbeLimits {
     /// Force change that aborts the probe outright, N. Above the threshold
     /// so one hard step cannot be mistaken for the gentle contact.
     pub abort_n: f64,
+    /// Steps to keep taking after contact, so the ramp the wall is fitted
+    /// from has more than one sample in it.
+    pub overtravel_steps: usize,
     /// Velocity scale for each step.
     pub velocity_scale: f64,
 }
@@ -285,6 +373,7 @@ impl ProbeLimits {
             travel_mm: axis.travel_mm,
             threshold_n: axis.threshold_n,
             abort_n: axis.abort_n,
+            overtravel_steps: axis.overtravel_steps,
             velocity_scale,
         }
     }
@@ -299,11 +388,18 @@ impl Motion<'_> {
     /// with the arm stationary — see the module doc for why that is the
     /// whole design and not an implementation detail.
     ///
-    /// Returns as soon as the threshold trips, having taken at most one
-    /// step past first contact. Running out of `travel_mm` without a trip
-    /// is not an error: "nothing within 0.6 mm" is an answer about the
-    /// clearance, and the caller is the one that knows whether it expected
-    /// to touch.
+    /// Returns once the threshold has tripped and `overtravel_steps`
+    /// further steps have been taken, so the worst case is
+    /// `1 + overtravel_steps` steps of travel past first contact — still
+    /// bounded by `step_mm` by construction rather than by tuning, and
+    /// still under `abort_n`, which is checked on every one of them.
+    /// Those steps are what [`Contact::wall_mm`] fits: with the lateral
+    /// threshold at 0.5 N and a wall this stiff, contact goes from noise
+    /// to tripped in one step, and one sample is not a slope.
+    ///
+    /// Running out of `travel_mm` without a trip is not an error:
+    /// "nothing within 0.6 mm" is an answer about the clearance, and the
+    /// caller is the one that knows whether it expected to touch.
     ///
     /// Exceeding `abort_n` *is* an error. It means a step met something
     /// much harder than a bore wall — the floor while probing sideways, a
@@ -330,7 +426,7 @@ impl Motion<'_> {
             travel_mm: Vec::new(),
             lateral_n: Vec::new(),
             along_n: Vec::new(),
-            tripped_mm: None,
+            tripped: None,
             visited: Vec::new(),
         };
         let stepping = self.step_until_contact(dir, limits, label, &mut out);
@@ -399,7 +495,21 @@ impl Motion<'_> {
         out.visited.push(start_joints.clone());
 
         let mut previous = 0.0;
-        for _ in 1..=steps {
+        // Steps taken before contact, against the travel allowance, and
+        // steps taken after it, against `overtravel_steps`. Two counters
+        // because they are bounded by two different things: the allowance
+        // says how far the arm may go looking for a wall, the overtravel
+        // says how far past one it may push to measure it.
+        let mut taken = 0usize;
+        let mut extra = 0usize;
+        loop {
+            let overtravelling = out.tripped.is_some();
+            if !overtravelling && taken >= steps {
+                break;
+            }
+            if overtravelling && extra >= limits.overtravel_steps {
+                break;
+            }
             let d = unit * limits.step_mm;
             self.probe_step(d.x, d.y, d.z, limits.velocity_scale)?;
 
@@ -412,6 +522,10 @@ impl Motion<'_> {
             // arm somewhere and then tripped the abort limit still has to
             // be walked back out of.
             out.visited.push(here_joints.clone());
+            taken += 1;
+            if overtravelling {
+                extra += 1;
+            }
             let df = Vector3::new(
                 now[0] - start_wrench[0],
                 now[1] - start_wrench[1],
@@ -437,12 +551,16 @@ impl Motion<'_> {
                     limits.abort_n
                 )));
             }
-            if reading.is_contact(limits.threshold_n) {
-                out.tripped_mm = Some(travel);
+            if !overtravelling && reading.is_contact(limits.threshold_n) {
+                out.tripped = Some(out.travel_mm.len() - 1);
                 log::info(&format!("  {label}: contact at {travel:+.3} mm"));
-                return Ok(());
             }
-            if travel - previous < limits.step_mm * STEP_TAKEN_FRACTION {
+            // Only while the arm is still looking for the wall. Past
+            // contact a step that does not fully execute is the servo
+            // giving up ground to something solid, which is the
+            // measurement rather than a fault — the same reasoning the
+            // guard's own doc gives for why contact returns before it.
+            if out.tripped.is_none() && travel - previous < limits.step_mm * STEP_TAKEN_FRACTION {
                 return Err(SequencerError(format!(
                     "{label}: commanded {:.3} mm and moved {:.3} mm with only {load:.2} N \
                      pushing back — the step did not execute, so any clearance reported \
@@ -453,10 +571,12 @@ impl Motion<'_> {
             }
             previous = travel;
         }
-        log::info(&format!(
-            "  {label}: no contact within {:.2} mm",
-            limits.travel_mm
-        ));
+        if out.tripped.is_none() {
+            log::info(&format!(
+                "  {label}: no contact within {:.2} mm",
+                limits.travel_mm
+            ));
+        }
         Ok(())
     }
 
@@ -610,62 +730,109 @@ mod tests {
         }
     }
 
-    /// Samples as the arm would record them pushing down: force stays at
-    /// the noise until the floor, then grows against the motion, so the
-    /// component along the probe direction is negative.
-    fn contact(travel: &[f64], along: &[f64]) -> Contact {
+    /// Samples as the arm would record them: force sits at whatever level
+    /// it was already at, then grows against the motion once the probe
+    /// meets something.
+    fn contact(travel: &[f64], along: &[f64], tripped: Option<usize>) -> Contact {
         Contact {
             travel_mm: travel.to_vec(),
             lateral_n: vec![0.0; travel.len()],
             along_n: along.to_vec(),
-            tripped_mm: travel.last().copied(),
+            tripped,
             visited: Vec::new(),
         }
     }
 
-    /// The point of the fit: the intercept is where the force would have
-    /// been zero, which is the floor, not the 1.0 N line the probe
-    /// happened to stop at.
+    /// The point of the fit: the wall is where the force left the level it
+    /// was sitting at, not the 1.0 N line the probe happened to stop at.
     #[test]
     fn the_fit_recovers_the_floor_the_threshold_overshot() {
-        let c = contact(&[0.1, 0.2, 0.3, 0.4, 0.5], &[0.0, 0.0, -1.0, -3.0, -5.0]);
-        let touch = c.touch_at(1.0).expect("three rising samples are a slope");
-        assert!(
-            (touch - 0.25).abs() < 1e-9,
-            "floor at {touch:.6} mm, expected 0.25"
+        let c = contact(
+            &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
+            &[0.0, 0.0, 0.0, 0.0, -1.0, -3.0, -5.0],
+            Some(4),
         );
-        assert_eq!(c.tripped_mm, Some(0.5), "and the trip point is later");
+        let wall = c.wall_mm().expect("three rising samples are a slope");
+        assert!(
+            (wall - 0.45).abs() < 1e-9,
+            "floor at {wall:.6} mm, expected 0.45"
+        );
+        assert_eq!(c.tripped_mm(), Some(0.5), "and the trip point is later");
+    }
+
+    /// A probe that is dragging something reads a steady force before it
+    /// meets anything — `base x+` sat at 0.22-0.27 N for 0.7 mm on
+    /// 2026-08-18. The wall is where the ramp leaves *that* level; against
+    /// zero the same samples put it short.
+    #[test]
+    fn the_wall_is_measured_against_the_drag_not_against_zero() {
+        let c = contact(
+            &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+            &[0.24, 0.26, 0.25, 0.24, 0.26, 0.25, 0.55, 0.95],
+            Some(6),
+        );
+        let wall = c.wall_mm().expect("two ramp samples are a slope");
+        assert!(
+            (wall - 0.625).abs() < 1e-9,
+            "wall at {wall:.6} mm, expected 0.625"
+        );
+        // The same ramp extrapolated to zero force, which is what ignoring
+        // the drag would give.
+        assert!(wall > 0.5625, "and that is later than the zero intercept");
     }
 
     #[test]
-    fn one_rising_sample_is_not_a_slope() {
-        let c = contact(&[0.1, 0.2, 0.3], &[0.0, 0.0, -1.0]);
-        assert_eq!(c.touch_at(1.0), None);
+    fn one_ramp_sample_is_not_a_slope() {
+        let c = contact(&[0.1, 0.2, 0.3, 0.4], &[0.0, 0.0, 0.0, -1.0], Some(3));
+        assert_eq!(c.wall_mm(), None);
     }
 
     /// Force that falls as the probe pushes deeper is drift or a grip
     /// letting go. Extrapolating it would put the "floor" above the arm.
     #[test]
-    fn a_backwards_slope_is_not_a_floor() {
-        let c = contact(&[0.3, 0.4, 0.5], &[-5.0, -3.0, -1.0]);
-        assert_eq!(c.touch_at(1.0), None);
+    fn a_backwards_slope_is_not_a_wall() {
+        let c = contact(
+            &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+            &[0.0, 0.0, 0.0, -5.0, -3.0, -1.0],
+            Some(3),
+        );
+        assert_eq!(c.wall_mm(), None);
     }
 
-    /// Every rising sample at the same depth: the arm stopped advancing
+    /// Every ramp sample at the same depth: the arm stopped advancing
     /// while the force kept climbing, which is a stall, not a fit.
     #[test]
     fn no_spread_in_depth_is_not_a_fit() {
-        let c = contact(&[0.3, 0.3], &[-1.0, -3.0]);
-        assert_eq!(c.touch_at(1.0), None);
+        let c = contact(
+            &[0.1, 0.2, 0.3, 0.3, 0.3],
+            &[0.0, 0.0, 0.0, -1.0, -3.0],
+            Some(3),
+        );
+        assert_eq!(c.wall_mm(), None);
     }
 
+    /// A wall met on the second step has nothing to measure itself
+    /// against, and a baseline from one reading is that reading.
+    #[test]
+    fn too_few_samples_before_contact_have_no_baseline() {
+        let c = contact(&[0.1, 0.2, 0.3], &[0.0, -1.0, -3.0], Some(1));
+        assert_eq!(c.wall_mm(), None);
+    }
+
+    /// Nothing tripped, so nothing is a wall — however the force behaved.
+    #[test]
+    fn no_contact_is_no_wall() {
+        let c = contact(&[0.1, 0.2, 0.3, 0.4], &[0.0, 0.0, 0.1, 0.2], None);
+        assert_eq!(c.wall_mm(), None);
+        assert_eq!(c.tripped_mm(), None);
+    }
+
+    /// Trip points only, no ramp to fit either side: the bracket falls
+    /// back and says so.
     fn bracket(plus: Option<f64>, minus: Option<f64>) -> Bracket {
-        let side = |t: Option<f64>| Contact {
-            travel_mm: Vec::new(),
-            lateral_n: Vec::new(),
-            along_n: Vec::new(),
-            tripped_mm: t,
-            visited: Vec::new(),
+        let side = |t: Option<f64>| match t {
+            Some(travel) => contact(&[travel], &[9.0], Some(0)),
+            None => contact(&[], &[], None),
         };
         Bracket {
             label: "base x".into(),
@@ -684,6 +851,52 @@ mod tests {
         let b = bracket(Some(0.6), Some(0.4));
         assert!((b.centre_mm().unwrap() - 0.1).abs() < 1e-12);
         assert!((b.half_gap_mm().unwrap() - 0.5).abs() < 1e-12);
+    }
+
+    /// One side fitted and the other read off its trip point differ by
+    /// that side's overshoot alone, and the midpoint would carry all of
+    /// it. Both sides use the estimator that both sides can support.
+    #[test]
+    fn a_bracket_never_mixes_a_fitted_wall_with_a_trip_point() {
+        let fitted = contact(
+            &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
+            &[0.0, 0.0, 0.0, 0.0, 1.0, 3.0, 5.0],
+            Some(4),
+        );
+        assert!(fitted.wall_mm().is_some(), "the plus side can be fitted");
+        let b = Bracket {
+            label: "base x".into(),
+            travel_mm: 1.5,
+            plus: fitted,
+            minus: contact(&[0.4], &[9.0], Some(0)),
+        };
+        assert_eq!(b.minus.wall_mm(), None, "the minus side cannot");
+        // 0.5 and 0.4, the two trip points, giving 0.05 — not the fitted
+        // 0.45 against the same 0.4, which would give 0.025.
+        assert!((b.centre_mm().unwrap() - 0.05).abs() < 1e-12);
+        assert!(b.summary().contains("trip point"), "{}", b.summary());
+    }
+
+    /// Both sides fitted: the report says so, and the numbers are the
+    /// fitted ones.
+    #[test]
+    fn two_fitted_walls_are_reported_as_fitted() {
+        let side = |sign: f64| {
+            contact(
+                &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
+                &[0.0, 0.0, 0.0, 0.0, sign, sign * 3.0, sign * 5.0],
+                Some(4),
+            )
+        };
+        let b = Bracket {
+            label: "base x".into(),
+            travel_mm: 1.5,
+            plus: side(1.0),
+            minus: side(-1.0),
+        };
+        assert!((b.centre_mm().unwrap()).abs() < 1e-12);
+        assert!((b.half_gap_mm().unwrap() - 0.45).abs() < 1e-12);
+        assert!(b.summary().contains("fitted"), "{}", b.summary());
     }
 
     /// The defect this type was introduced for: the first free-air run

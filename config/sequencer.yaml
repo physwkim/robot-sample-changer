@@ -311,8 +311,15 @@ probe:
     abort_n: 5.0          # a rubbing insert was measured at 8-23 N. That is the
                           # force this mode exists to stop the sequence applying,
                           # not a level to probe up to.
+    overtravel_steps: 3   # steps taken after contact so the wall comes from a
+                          # slope, not from the trip point. A bore wall trips in
+                          # one step (0.17 -> 0.59 N, doc §16.8) and one sample is
+                          # not a slope. 0.15 mm further in, abort still checked
   depth:                  # downward, toward the seat floor
     step_mm: 0.10
     travel_mm: 4.0
     threshold_n: 1.0      # the puck's own weight is already on the floor
     abort_n: 8.0
+    overtravel_steps: 0   # the floor's ramp already shows up below the threshold
+                          # (0.33/0.32/0.62 N), and three more steps into it would
+                          # reach the abort limit instead of a better fit

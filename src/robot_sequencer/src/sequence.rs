@@ -619,7 +619,7 @@ impl<'a> Sequencer<'a> {
         // Both are printed because they disagreeing by more than a step
         // is how a floor that was already loaded before the probe began
         // announces itself.
-        match (floor.tripped_mm, floor.touch_at(depth.threshold_n)) {
+        match (floor.tripped_mm(), floor.wall_mm()) {
             (Some(t), Some(f)) => log::info(&format!(
                 "  base z: floor at {f:+.3} mm from the force-versus-depth fit, \
                  tripped at {t:+.3} mm"

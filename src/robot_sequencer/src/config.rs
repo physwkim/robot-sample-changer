@@ -272,6 +272,17 @@ pub struct ProbeAxisConfig {
     pub threshold_n: f64,
     /// Force change that aborts the probe outright, N.
     pub abort_n: f64,
+    /// Steps to keep taking after the contact threshold trips, so the wall
+    /// can be fitted from a slope instead of read off the trip point,
+    /// which carries the threshold and up to one step of overshoot in it.
+    ///
+    /// Zero where the ramp already appears below the threshold: the depth
+    /// probe's 1.0 N sits above four rising samples (0.33, 0.32, 0.62 N,
+    /// 2026-08-18), and three more 0.10 mm steps into a floor that stiff
+    /// would reach the abort limit instead. Nonzero where it does not:
+    /// laterally the same day, contact went from 0.17 N to 0.59 N in one
+    /// 0.05 mm step, and one sample is not a slope.
+    pub overtravel_steps: usize,
 }
 
 /// Force-stopped seat probing (`CalibMode` = Seat Probe). Commissioning
@@ -344,12 +355,19 @@ impl Default for ProbeConfig {
                 // exists to stop the sequence from applying, not a level
                 // to probe up to.
                 abort_n: 5.0,
+                // A wall this stiff trips in one step, so the fit would
+                // have a single sample without these. Three of them at
+                // 0.05 mm is 0.15 mm further into a bore wall, and the
+                // abort limit is checked on every one.
+                overtravel_steps: 3,
             },
             depth: ProbeAxisConfig {
                 step_mm: 0.10,
                 travel_mm: 4.0,
                 threshold_n: 1.0,
                 abort_n: 8.0,
+                // The floor's ramp is already below the 1.0 N threshold.
+                overtravel_steps: 0,
             },
         }
     }
@@ -495,6 +513,15 @@ impl Config {
             if axis.abort_n <= axis.threshold_n {
                 return Err(SequencerError(format!(
                     "{name}.abort_n must be above {name}.threshold_n"
+                )));
+            }
+            // Each one is another step driven into something already known
+            // to be there, so this is a push limit like the rest of the
+            // block rather than a fit-quality knob.
+            if axis.overtravel_steps > 10 {
+                return Err(SequencerError(format!(
+                    "{name}.overtravel_steps must be at most 10 (each one pushes further \
+                     into a sample that is already in contact)"
                 )));
             }
         }
@@ -655,6 +682,13 @@ mod tests {
                 "velocity_hi",
                 "probe:\n  velocity_scale: 0.5\n",
                 "probe.velocity_scale",
+            ),
+            // Each of these is a step driven into something already known
+            // to be in contact, so the count is a push limit like the rest.
+            (
+                "overtravel_deep",
+                "probe:\n  lateral:\n    overtravel_steps: 11\n",
+                "probe.lateral.overtravel_steps",
             ),
             // A slipped decimal point here opens the fingers 12 mm over an
             // open rack with a sample in them.
