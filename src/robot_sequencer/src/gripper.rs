@@ -164,10 +164,21 @@ impl Gripper {
     /// before [`Gripper::loosen_by`]: a Hand-E commanded to where the puck
     /// already is holds it with whatever force that costs, which is not the
     /// grip the arm then lifts the puck out with.
-    pub fn regrip(&mut self, epics: &Epics) {
+    /// Returns where the fingers settled, so the caller holding the
+    /// pre-loosen width can tell whether the same object is back between
+    /// the pads.
+    pub fn regrip(&mut self, epics: &Epics) -> f64 {
         log::info("Restoring the grip");
         self.settle_to(self.close_position, self.grip, epics);
-        log::info(&format!("  Grip restored at {:.4} m", self.position()));
+        let settled = self.position();
+        log::info(&format!("  Grip restored at {settled:.4} m"));
+        settled
+    }
+
+    /// The band [`Gripper::settle_at`] treats as "the same place", for
+    /// callers comparing two settle positions.
+    pub fn reach_tolerance(&self) -> f64 {
+        self.reach_tolerance
     }
 
     /// Port of the C++ `wait_gripper_reached`: block until the gripper

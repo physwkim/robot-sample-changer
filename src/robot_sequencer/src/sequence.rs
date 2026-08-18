@@ -698,9 +698,10 @@ impl<'a> Sequencer<'a> {
     /// walls. The `Option<SequencerError>` keeps "how much was measured"
     /// apart from "where is the arm": `None` measured everything,
     /// `Some(e)` was stopped by `e` but the arm is back at the entry
-    /// pose with the grip on the puck, and the outer `Err` means even
-    /// the walk back failed, so the arm is somewhere a caller must not
-    /// build on.
+    /// pose — with the grip back on the puck unless `e` is the regrip
+    /// check itself reporting the puck lost — and the outer `Err` means
+    /// even the walk back failed, so the arm is somewhere a caller must
+    /// not build on.
     #[allow(clippy::type_complexity)]
     fn seat_probe_here(
         &mut self,
@@ -729,7 +730,7 @@ impl<'a> Sequencer<'a> {
         // instead of them: a bracket that aborted at the bottom of a
         // ladder does not make the heights above it unmeasured, and this
         // mode's whole output is what it printed.
-        let (play_mm, (levels, walked, returned)) =
+        let (play_mm, grip_lost, (levels, walked, returned)) =
             self.with_grip_loosened(|s| Ok(s.sweep_heights(limits)))?;
 
         // The trigger-pose level is the taught seat pose, so its bracket
@@ -812,7 +813,10 @@ impl<'a> Sequencer<'a> {
                 Ok(()) => back,
             });
         }
-        Ok((seat, walked.err()))
+        // The grip check outranks the sweep's own failure: brackets swept
+        // with the puck dragging along the fingers are free travel, not
+        // walls, and the loss is what explains them.
+        Ok((seat, grip_lost.or(walked.err())))
     }
 
     /// Holder map (`CalibMode = 6`): one trigger probes one holder's
@@ -1182,15 +1186,25 @@ impl<'a> Sequencer<'a> {
     /// a panic, which takes the daemon down with it — and a daemon that
     /// dies holding a sample is already the documented hazard, because its
     /// successor's activation stroke opens the fingers.
+    ///
+    /// The restore is verified, not assumed: fingers that do not settle
+    /// back at the width they held before the loosen closed on something
+    /// other than the puck — a probe can drag a puck out of a seat that
+    /// holds it more weakly than the pads push it (measured at holder 2:
+    /// held at 11.4 mm, "restored" at 3.9 mm over an emptied seat). The
+    /// loss travels in the middle of the returned triple rather than as
+    /// the outer error because the arm is back at the entry pose and the
+    /// caller's safe epilogue should still run before the run fails.
     fn with_grip_loosened<T>(
         &mut self,
         probe: impl FnOnce(&mut Self) -> Result<T, SequencerError>,
-    ) -> Result<(f64, T), SequencerError> {
+    ) -> Result<(f64, Option<SequencerError>, T), SequencerError> {
         // One value decides both halves. Reading it once and gating the
         // restore on the same answer is what keeps "a loosened grip is
         // always restored" true without making it depend on how much play
         // the fingers actually managed to open.
         let loosening = self.config.probe.loosen_mm > 0.0;
+        let held_m = self.gripper.position();
         let play_mm = if loosening {
             self.gripper
                 .loosen_by(self.config.probe.loosen_mm / 1000.0, &self.epics)
@@ -1199,10 +1213,20 @@ impl<'a> Sequencer<'a> {
             0.0
         };
         let out = probe(self);
+        let mut lost = None;
         if loosening {
-            self.gripper.regrip(&self.epics);
+            let settled_m = self.gripper.regrip(&self.epics);
+            if (settled_m - held_m).abs() > self.gripper.reach_tolerance() {
+                let msg = format!(
+                    "the restored grip settled at {:.1} mm where the puck was                      held at {:.1} mm — the puck is no longer between the                      fingers; find it before the next trigger",
+                    settled_m * 1000.0,
+                    held_m * 1000.0
+                );
+                log::error(&msg);
+                lost = Some(SequencerError(msg));
+            }
         }
-        out.map(|t| (play_mm, t))
+        out.map(|t| (play_mm, lost, t))
     }
 
     /// Puts the arm back where this mode was entered from.
