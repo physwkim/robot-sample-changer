@@ -96,6 +96,20 @@ const SAMPLES_PER_READING: usize = 25;
 /// meaning what it meant before — one step meeting something much harder
 /// than the step before it.
 const OVERTRAVEL_LOAD_FRACTION: f64 = 0.5;
+/// Slack on the step count so a travel that is an exact multiple of the
+/// step in decimal is not one step short in binary.
+const STEP_COUNT_EPSILON: f64 = 1e-9;
+
+/// How many whole steps fit in `travel_mm`.
+///
+/// Rounded before flooring: 0.3 mm of travel in 0.1 mm steps is
+/// 2.9999999999999996 in binary, and a bare floor turns a move asked for
+/// in tenths into one step short of where it was sent — which for
+/// [`Motion::probe_reposition`] is a height the caller then reports
+/// wrongly.
+fn steps_in(travel_mm: f64, step_mm: f64) -> usize {
+    (travel_mm / step_mm + STEP_COUNT_EPSILON).floor() as usize
+}
 
 /// What ends a run of steps — the question the run is asking.
 ///
@@ -555,7 +569,7 @@ impl Motion<'_> {
         // axis for every step, and using one axis for both the travel and
         // the force projection is what keeps the slope fit meaningful.
         let base_dir = start_pose.rotation * unit;
-        let steps = (limits.travel_mm / limits.step_mm).floor() as usize;
+        let steps = steps_in(limits.travel_mm, limits.step_mm);
         let stopping = match stop {
             StopAt::Contact(n) => format!("contact at {n:.2} N"),
             StopAt::Travel => "no contact stop — this is a move".to_string(),
@@ -915,6 +929,19 @@ mod tests {
         let releasing = Reading::new(Vector3::new(0.0, 0.0, -5.0), &up);
         assert!(StopAt::Contact(1.0).reached(&releasing));
         assert!(!StopAt::Travel.reached(&releasing));
+    }
+
+    /// Tenths of a millimetre are not exact in binary, and a move that
+    /// stops one step short puts the whole level at the wrong height.
+    #[test]
+    fn a_travel_in_tenths_is_not_a_step_short() {
+        assert_eq!(steps_in(0.3, 0.1), 3);
+        assert_eq!(steps_in(0.5, 0.1), 5);
+        assert_eq!(steps_in(3.0, 0.1), 30);
+        assert_eq!(steps_in(1.5, 0.05), 30);
+        // Not rounding up: a travel allowance is a bound, and 0.35 mm
+        // buys three whole steps of 0.1, not four.
+        assert_eq!(steps_in(0.35, 0.1), 3);
     }
 
     /// The point of the fit: the wall is where the force left the level it
