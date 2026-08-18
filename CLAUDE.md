@@ -84,8 +84,8 @@ holder-map persist와 같은 규율이라 동시 쓰기에 안전).
 자동 기동(procServ 콘솔 20003, systemd 유닛 없음).
 
 구 Python GUI(silx/PyQt6/pyepics, conda env `robot_gui`)도 그대로 실행
-가능: `cd ~/ws/src && python -m robot_gui.main`. 단 yaml 저장 시 주석이
-날아가므로(yaml.dump) 오프셋 편집은 RsDM GUI를 쓰세요.
+가능: `cd ~/ws/src && python -m robot_gui.main`. 오프셋 저장은 RsDM
+GUI와 같은 텍스트 편집(주석 보존, tmp+rename, 재파싱 검증)입니다.
 
 ### 4. UR 모니터링 IOC (선택, 읽기 전용)
 

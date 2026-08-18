@@ -258,6 +258,112 @@ class CoordinateLegend(qt.QWidget):
         layout.addStretch()
 
 
+
+def _round7(v):
+    """The write grain shared with the daemon's persist: 7 decimals."""
+    return round(float(v), 7)
+
+
+def _set_scalar_line(text, key, value):
+    """Replace the value on the single `key:` line, keeping everything else."""
+    prefix = key + ':'
+    out, hit = [], False
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith(prefix):
+            if hit:
+                raise ValueError(f"'{key}' appears more than once")
+            float(stripped[len(prefix):].strip())  # must already be a scalar
+            indent = line[:len(line) - len(stripped)]
+            out.append(f"{indent}{key}: {value!r}")
+            hit = True
+            continue
+        out.append(line)
+    if not hit:
+        raise ValueError(f"key '{key}' not found")
+    return "\n".join(out) + "\n"
+
+
+def _set_list_entry(text, key, index, value):
+    """Replace one entry of the flow list at `key:`, re-emitting it on one
+    line (wrapped continuations are consumed up to the closing bracket)."""
+    prefix = key + ':'
+    src = text.splitlines()
+    out, hit, i = [], False, 0
+    while i < len(src):
+        line = src[i]
+        stripped = line.lstrip()
+        if not stripped.startswith(prefix):
+            out.append(line)
+            i += 1
+            continue
+        if hit:
+            raise ValueError(f"'{key}' appears more than once")
+        indent = line[:len(line) - len(stripped)]
+        body = stripped[len(prefix):].strip()
+        while not body.endswith(']'):
+            i += 1
+            if i >= len(src):
+                raise ValueError(f"list '{key}' is not closed with ']'")
+            body += ' ' + src[i].strip()
+        if not (body.startswith('[') and body.endswith(']')):
+            raise ValueError(f"'{key}' is not a flow list")
+        values = [float(part) for part in body[1:-1].split(',')]
+        if index >= len(values):
+            raise ValueError(f"'{key}' has {len(values)} entries, wanted index {index}")
+        values[index] = value
+        joined = ", ".join(repr(v) for v in values)
+        out.append(f"{indent}{key}: [{joined}]")
+        hit = True
+        i += 1
+    if not hit:
+        raise ValueError(f"key '{key}' not found")
+    return "\n".join(out) + "\n"
+
+
+def _yaml_params_of(root):
+    if isinstance(root, dict):
+        if '/**' in root and 'ros__parameters' in root['/**']:
+            return root['/**']['ros__parameters']
+        if 'ros__parameters' in root:
+            return root['ros__parameters']
+    return root
+
+
+def _apply_edits_textually(path, slots):
+    """Write the edited slots into the file by textual substitution, the
+    same discipline as the daemon's holder-map persist: comments and
+    untouched lines survive, the edited text is parsed back and the
+    touched slots verified, and the replacement is tmp + atomic rename.
+    Applied to the text on disk NOW, so a trim another writer landed
+    since our load survives by construction."""
+    with open(path) as f:
+        text = f.read()
+    for kind, key, index, value in slots:
+        value = _round7(value)
+        if kind == 'scalar':
+            text = _set_scalar_line(text, key, value)
+        else:
+            text = _set_list_entry(text, key, index, value)
+    tmp = path + '.new'
+    with open(tmp, 'w') as f:
+        f.write(text)
+    try:
+        with open(tmp) as f:
+            params = _yaml_params_of(yaml.safe_load(f))
+        for kind, key, index, value in slots:
+            expected = _round7(value)
+            got = params.get(key) if kind == 'scalar' else params.get(key, [])[index]
+            if got != expected:
+                raise ValueError(
+                    f"verify failed for {key}[{index}]: wrote {expected!r}, "
+                    f"read back {got!r}")
+    except Exception:
+        os.unlink(tmp)
+        raise
+    os.replace(tmp, path)
+
+
 class OffsetTableWidget(qt.QWidget):
     """Table-based offset editor for all holders."""
 
@@ -460,65 +566,60 @@ class OffsetTableWidget(qt.QWidget):
         loaded = self._loaded_mm.get((row, col))
         return loaded is None or self._get_cell_value(row, col) != loaded
 
+    def get_edited_slots(self):
+        """The edited cells as write slots: ('scalar'|'list', key, index,
+        file-unit value). The one mapping between table cells and YAML
+        keys — both the merge view and the textual save consume it."""
+        slots = []
+        single_fields = [
+            ('sample_holder_on_position_x_offset', 0, 1, 1e-3),
+            ('sample_holder_on_position_y_offset', 0, 2, 1e-3),
+            ('sample_holder_on_position_z_offset', 0, 3, 1e-3),
+            ('holder1_on_position_x_offset', 1, 1, 1e-3),
+            ('holder1_on_position_y_offset', 1, 2, 1e-3),
+            ('holder1_on_position_z_offset', 1, 3, 1e-3),
+            # Tilt bases are degrees, not mm: no scaling.
+            ('holder_on_position_tilt_x_deg', 1, 4, 1.0),
+            ('holder_on_position_tilt_z_deg', 1, 5, 1.0),
+        ]
+        for key, row, col, scale in single_fields:
+            if self._cell_edited(row, col):
+                slots.append(('scalar', key, None,
+                              self._get_cell_value(row, col) * scale))
+        list_fields = [
+            ('holder_multi_x_offsets', 1, 1e-3),
+            ('holder_multi_y_offsets', 2, 1e-3),
+            ('holder_multi_z_offsets', 3, 1e-3),
+            ('holder_multi_tilt_x_deg', 4, 1.0),
+            ('holder_multi_tilt_z_deg', 5, 1.0),
+        ]
+        for i in range(9):
+            row = i + 2
+            for key, col, scale in list_fields:
+                if self._cell_edited(row, col):
+                    slots.append(('list', key, i,
+                                  self._get_cell_value(row, col) * scale))
+        return slots
+
     def get_updated_params(self, base=None):
         """Get updated parameters from table.
 
         Only fields whose cell was actually edited are overwritten; untouched
         fields keep their original full-precision YAML value. `base` (when
         given) supplies those untouched values instead of the load-time
-        snapshot — the save path passes a fresh read of the file so a value
-        someone else wrote since our load (the daemon's holder-map trim
-        persist) survives a save from this window.
+        snapshot — a fresh read of the file lets a value someone else wrote
+        since our load (the daemon's holder-map trim persist) survive.
         """
         params = dict(self._params if base is None else base)
-
-        single_fields = [
-            ('sample_holder_on_position_x_offset', 0, 1),
-            ('sample_holder_on_position_y_offset', 0, 2),
-            ('sample_holder_on_position_z_offset', 0, 3),
-            ('holder1_on_position_x_offset', 1, 1),
-            ('holder1_on_position_y_offset', 1, 2),
-            ('holder1_on_position_z_offset', 1, 3),
-        ]
-        for key, row, col in single_fields:
-            if self._cell_edited(row, col):
-                params[key] = self._get_cell_value(row, col) / 1000.0
-
-        # Tilt bases are degrees, not mm: no scaling.
-        if self._cell_edited(1, 4):
-            params['holder_on_position_tilt_x_deg'] = self._get_cell_value(1, 4)
-        if self._cell_edited(1, 5):
-            params['holder_on_position_tilt_z_deg'] = self._get_cell_value(1, 5)
-
-        # Holder 2-10 (X/Y/Z mm lists, tilt deg list). Preserve original
-        # list entries, replacing only the elements whose cell was edited.
-        x_offsets = list(params.get('holder_multi_x_offsets', [0.0] * 9))
-        y_offsets = list(params.get('holder_multi_y_offsets', [0.0] * 9))
-        z_offsets = list(params.get('holder_multi_z_offsets', [0.0] * 9))
-        tilts = list(params.get('holder_multi_tilt_x_deg', [0.0] * 9))
-        tilts_z = list(params.get('holder_multi_tilt_z_deg', [0.0] * 9))
-        for lst in (x_offsets, y_offsets, z_offsets, tilts, tilts_z):
-            while len(lst) < 9:
-                lst.append(0.0)
-        for i in range(9):
-            row = i + 2
-            if self._cell_edited(row, 1):
-                x_offsets[i] = self._get_cell_value(row, 1) / 1000.0
-            if self._cell_edited(row, 2):
-                y_offsets[i] = self._get_cell_value(row, 2) / 1000.0
-            if self._cell_edited(row, 3):
-                z_offsets[i] = self._get_cell_value(row, 3) / 1000.0
-            if self._cell_edited(row, 4):
-                tilts[i] = self._get_cell_value(row, 4)
-            if self._cell_edited(row, 5):
-                tilts_z[i] = self._get_cell_value(row, 5)
-
-        params['holder_multi_x_offsets'] = x_offsets
-        params['holder_multi_y_offsets'] = y_offsets
-        params['holder_multi_z_offsets'] = z_offsets
-        params['holder_multi_tilt_x_deg'] = tilts
-        params['holder_multi_tilt_z_deg'] = tilts_z
-
+        for kind, key, index, value in self.get_edited_slots():
+            if kind == 'scalar':
+                params[key] = value
+            else:
+                lst = list(params.get(key, [0.0] * 9))
+                while len(lst) < 9:
+                    lst.append(0.0)
+                lst[index] = value
+                params[key] = lst
         return params
 
     def get_selected_offsets_mm(self):
@@ -635,43 +736,38 @@ class YamlOffsetEditor(qt.QGroupBox):
         if not self._yaml_path:
             return
 
-        # The daemon's holder map writes this file too (trim persist), so
-        # merge the edited cells over what is on disk NOW, not over the
-        # snapshot taken when this window loaded it — saving over the
-        # snapshot would silently undo trims written since.
+        # Textual edit of only the edited slots (comments survive, unlike
+        # yaml.dump), applied to the text on disk NOW — the daemon's
+        # holder map writes this file too, and a trim it landed since our
+        # load must not be undone by this save.
+        slots = self.offset_table.get_edited_slots()
+        if not slots:
+            qt.QMessageBox.information(
+                self, "Saved", "No edited cells — file untouched.")
+            return
+        try:
+            _apply_edits_textually(self._yaml_path, slots)
+        except Exception as e:
+            qt.QMessageBox.critical(self, "Error", f"Failed to save YAML:\n{e}")
+            return
+
+        # Re-seed the table from what was actually written, so cells that
+        # picked up on-disk changes display them and the edit snapshot
+        # resets.
         try:
             with open(self._yaml_path) as f:
                 fresh = yaml.safe_load(f)
         except Exception as e:
             qt.QMessageBox.critical(
-                self, "Error", f"Failed to re-read YAML before saving:\n{e}")
+                self, "Error", f"Saved, but failed to re-read YAML:\n{e}")
             return
-        if '/**' in fresh and 'ros__parameters' in fresh['/**']:
-            fresh_params = fresh['/**']['ros__parameters']
-        elif 'ros__parameters' in fresh:
-            fresh_params = fresh['ros__parameters']
-        else:
-            fresh_params = fresh
-
-        updated_params = self.offset_table.get_updated_params(fresh_params)
-        fresh_params.update(updated_params)
+        fresh_params = _yaml_params_of(fresh)
         self._yaml_data = fresh
         self._params = fresh_params
-
-        try:
-            with open(self._yaml_path, 'w') as f:
-                yaml.dump(fresh, f, default_flow_style=None, allow_unicode=True, sort_keys=False)
-
-            # Re-seed the table from what was actually written, so cells that
-            # picked up on-disk changes display them and the edit snapshot
-            # resets.
-            self.offset_table.set_params(fresh_params)
-            self.path_label.setText(os.path.basename(self._yaml_path))
-            self.path_label.setStyleSheet("color: #4CAF50; font-size: 9px;")
-            qt.QMessageBox.information(self, "Saved", "YAML saved!\n다음 로봇 트리거 시 적용됩니다.")
-
-        except Exception as e:
-            qt.QMessageBox.critical(self, "Error", f"Failed to save YAML:\n{e}")
+        self.offset_table.set_params(fresh_params)
+        self.path_label.setText(os.path.basename(self._yaml_path))
+        self.path_label.setStyleSheet("color: #4CAF50; font-size: 9px;")
+        qt.QMessageBox.information(self, "Saved", "YAML saved!\n다음 로봇 트리거 시 적용됩니다.")
 
 
 def _repo_config_dir():
