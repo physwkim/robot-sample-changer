@@ -276,8 +276,19 @@ class OffsetTableWidget(qt.QWidget):
 
         # Create table
         self.table = qt.QTableWidget()
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["Target", "X (mm)", "Y (mm)", "Z (mm)"])
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(
+            ["Target", "X (mm)", "Y (mm)", "Z (mm)", "Tilt (deg)"]
+        )
+        self.table.horizontalHeaderItem(2).setToolTip(
+            "Tool y. For holders 2-10: per-holder insertion-depth trim,\n"
+            "positive = deeper (holder_multi_y_offsets)."
+        )
+        self.table.horizontalHeaderItem(4).setToolTip(
+            "Seat lean about tool x (deg). The Holder 1 row is the base\n"
+            "applied to every holder (holder_on_position_tilt_x_deg);\n"
+            "rows 2-10 add their own trim on top (holder_multi_tilt_x_deg)."
+        )
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.horizontalHeader().setSectionResizeMode(qt.QHeaderView.Stretch)
         self.table.verticalHeader().setVisible(False)
@@ -322,26 +333,32 @@ class OffsetTableWidget(qt.QWidget):
                 name_item.setBackground(qt.QColor(65, 65, 75))  # Holder 2-10 - gray
             self.table.setItem(row, 0, name_item)
 
-            # X, Y, Z spinboxes
-            for col in range(1, 4):
+            # X, Y, Z (mm) and tilt (deg) spinboxes
+            for col in range(1, 5):
                 spin = qt.QDoubleSpinBox()
-                spin.setRange(-50.0, 50.0)
-                spin.setSingleStep(0.1)
+                if col == 4:
+                    spin.setRange(-5.0, 5.0)
+                    spin.setSingleStep(0.05)
+                else:
+                    spin.setRange(-50.0, 50.0)
+                    spin.setSingleStep(0.1)
                 spin.setDecimals(3)
                 spin.setSuffix("")
                 spin.setButtonSymbols(qt.QAbstractSpinBox.NoButtons)
                 spin.setAlignment(qt.Qt.AlignRight)
-                
+
                 # Color coding
                 if col == 1:  # X
                     spin.setStyleSheet("QDoubleSpinBox { color: #FF8888; background: #454545; border: 1px solid #555; }")
                 elif col == 2:  # Y
                     spin.setStyleSheet("QDoubleSpinBox { color: #88FF88; background: #454545; border: 1px solid #555; }")
-                else:  # Z
+                elif col == 3:  # Z
                     spin.setStyleSheet("QDoubleSpinBox { color: #88AAFF; background: #454545; border: 1px solid #555; }")
+                else:  # Tilt
+                    spin.setStyleSheet("QDoubleSpinBox { color: #FFCC66; background: #454545; border: 1px solid #555; }")
 
-                # Holder 2-10 don't have Y offset
-                if row >= 2 and col == 2:
+                # The stage seat has no tilt parameter
+                if row == 0 and col == 4:
                     spin.setEnabled(False)
                     spin.setStyleSheet("QDoubleSpinBox { color: #666; background: #3a3a3a; border: 1px solid #444; }")
 
@@ -371,16 +388,25 @@ class OffsetTableWidget(qt.QWidget):
         self._set_cell_value(1, 2, params.get('holder1_on_position_y_offset', 0) * 1000)
         self._set_cell_value(1, 3, params.get('holder1_on_position_z_offset', 0) * 1000)
 
+        # Tilt: base on the Holder 1 row, in degrees (no mm scaling)
+        self._set_cell_value(1, 4, params.get('holder_on_position_tilt_x_deg', 0))
+
         # Holder 2-10 (rows 2-10)
         x_offsets = params.get('holder_multi_x_offsets', [0] * 9)
+        y_offsets = params.get('holder_multi_y_offsets', [0] * 9)
         z_offsets = params.get('holder_multi_z_offsets', [0] * 9)
+        tilts = params.get('holder_multi_tilt_x_deg', [0] * 9)
 
         for i in range(9):
             row = i + 2
             if i < len(x_offsets):
                 self._set_cell_value(row, 1, x_offsets[i] * 1000)
+            if i < len(y_offsets):
+                self._set_cell_value(row, 2, y_offsets[i] * 1000)
             if i < len(z_offsets):
                 self._set_cell_value(row, 3, z_offsets[i] * 1000)
+            if i < len(tilts):
+                self._set_cell_value(row, 4, tilts[i])
 
         self.table.blockSignals(False)
 
@@ -389,7 +415,7 @@ class OffsetTableWidget(qt.QWidget):
         # the YAML untouched (e.g. don't rewrite Y when only X/Z were jogged).
         self._loaded_mm = {}
         for r in range(self.table.rowCount()):
-            for c in (1, 2, 3):
+            for c in (1, 2, 3, 4):
                 widget = self.table.cellWidget(r, c)
                 if widget is not None:
                     self._loaded_mm[(r, c)] = widget.value()
@@ -443,23 +469,34 @@ class OffsetTableWidget(qt.QWidget):
             if self._cell_edited(row, col):
                 params[key] = self._get_cell_value(row, col) / 1000.0
 
-        # Holder 2-10 (X, Z lists). Preserve original list entries, replacing
-        # only the elements whose cell was edited.
+        # Tilt base is degrees, not mm: no scaling.
+        if self._cell_edited(1, 4):
+            params['holder_on_position_tilt_x_deg'] = self._get_cell_value(1, 4)
+
+        # Holder 2-10 (X/Y/Z mm lists, tilt deg list). Preserve original
+        # list entries, replacing only the elements whose cell was edited.
         x_offsets = list(params.get('holder_multi_x_offsets', [0.0] * 9))
+        y_offsets = list(params.get('holder_multi_y_offsets', [0.0] * 9))
         z_offsets = list(params.get('holder_multi_z_offsets', [0.0] * 9))
-        while len(x_offsets) < 9:
-            x_offsets.append(0.0)
-        while len(z_offsets) < 9:
-            z_offsets.append(0.0)
+        tilts = list(params.get('holder_multi_tilt_x_deg', [0.0] * 9))
+        for lst in (x_offsets, y_offsets, z_offsets, tilts):
+            while len(lst) < 9:
+                lst.append(0.0)
         for i in range(9):
             row = i + 2
             if self._cell_edited(row, 1):
                 x_offsets[i] = self._get_cell_value(row, 1) / 1000.0
+            if self._cell_edited(row, 2):
+                y_offsets[i] = self._get_cell_value(row, 2) / 1000.0
             if self._cell_edited(row, 3):
                 z_offsets[i] = self._get_cell_value(row, 3) / 1000.0
+            if self._cell_edited(row, 4):
+                tilts[i] = self._get_cell_value(row, 4)
 
         params['holder_multi_x_offsets'] = x_offsets
+        params['holder_multi_y_offsets'] = y_offsets
         params['holder_multi_z_offsets'] = z_offsets
+        params['holder_multi_tilt_x_deg'] = tilts
 
         return params
 
