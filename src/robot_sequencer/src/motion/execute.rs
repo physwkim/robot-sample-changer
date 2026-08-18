@@ -39,8 +39,9 @@ fn accepted<E: std::fmt::Display>(
         Err(e) => Err(SequencerError(format!("{label}: {what}: {e}"))),
         Ok(false) => Err(SequencerError(format!(
             "{label}: {what} was not accepted — the external-control program \
-             is not running. Freedrive and a pendant stop both end it; \
-             restart the daemon to send it again."
+             is not running. Freedrive and a pendant stop both end it; the \
+             next trigger resends it (a protective stop needs CalibMode=4 \
+             Recover first)."
         ))),
         Ok(true) => Ok(()),
     }
@@ -131,7 +132,9 @@ impl Motion<'_> {
                     RobotReceiveTimeout::millisec(200),
                 );
                 return Err(SequencerError(format!(
-                    "{label}: trajectory did not finish within TOTG duration + {}s",
+                    "{label}: trajectory did not finish within TOTG duration + {}s \
+                     — a protective stop pauses the program mid-move; trigger \
+                     CalibMode=4 (Recover) to unlock it and resend the program",
                     EXECUTE_TIMEOUT_MARGIN.as_secs()
                 )));
             }

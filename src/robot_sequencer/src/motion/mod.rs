@@ -130,10 +130,16 @@ pub struct Motion<'m> {
     model: &'m Model,
     reverse: Arc<ReverseInterface>,
     trajectory: Arc<TrajectoryPointInterface>,
-    _script_command: Arc<ScriptCommandInterface>,
+    script_command: Arc<ScriptCommandInterface>,
     // Held for its side effect: the primary stream carries the running
     // program.
     _primary: TcpStream,
+    /// The address and rendered headless program from bring-up, kept so
+    /// a dead program can be resent without restarting the daemon (a
+    /// restart re-activates the Hand-E, which can open the fingers on a
+    /// gripped sample).
+    robot_ip: String,
+    full_program: String,
     rtde: RtdeStream,
     program_running: Arc<AtomicBool>,
     trajectory_done: Arc<AtomicBool>,

@@ -260,6 +260,24 @@ impl<'a> Sequencer<'a> {
 
             self.epics.write_wait(0);
 
+            // A protective stop, pendant stop, or freedrive ends the
+            // external-control program, and nothing moves until it is
+            // sent again. Heal that here, before any step runs. The
+            // unlock is gated on the Recover trigger: releasing a
+            // protective stop is the operator's decision, and Recover
+            // is how they say it.
+            if let Err(e) = self
+                .motion
+                .ensure_program(matches!(calib_mode, CalibMode::Recover))
+            {
+                log::error(&format!(
+                    "Sequence #{} not started: {e}",
+                    self.sequence_count
+                ));
+                log::error("Nothing moved; CurrentStep and StartStep kept.");
+                continue;
+            }
+
             log::info("Reloading waypoints from YAML...");
             let waypoints = match WaypointData::load(&self.config.sequence.waypoints_yaml) {
                 Ok(data) => data,

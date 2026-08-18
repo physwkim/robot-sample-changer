@@ -139,21 +139,14 @@ impl<'m> Motion<'m> {
         primary
             .write_all(full_program.as_bytes())
             .map_err(|e| SequencerError(format!("send program: {e}")))?;
+        let robot_ip = ip.clone();
 
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !program_running.load(Ordering::SeqCst)
-            || !trajectory.is_connected()
-            || !script_command.client_connected()
-        {
-            if Instant::now() > deadline {
-                return Err(SequencerError(
-                    "robot did not connect to the reverse/trajectory/script-command \
-                     interfaces within 10 s"
-                        .into(),
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        wait_for_program(
+            &program_running,
+            &trajectory,
+            &script_command,
+            Duration::from_secs(10),
+        )?;
 
         let trajectory_done = Arc::new(AtomicBool::new(false));
         let last_result = Arc::new(AtomicI32::new(TrajectoryResult::Unknown as i32));
@@ -170,8 +163,10 @@ impl<'m> Motion<'m> {
             model,
             reverse,
             trajectory,
-            _script_command: script_command,
+            script_command,
             _primary: primary,
+            robot_ip,
+            full_program,
             rtde,
             program_running,
             trajectory_done,
@@ -215,20 +210,22 @@ fn read_recipe(path: &std::path::Path) -> Result<Vec<String>, SequencerError> {
         .collect())
 }
 
+/// Asks the dashboard whether the robot is in PROTECTIVE_STOP.
+fn protective_stopped(dashboard: &mut DashboardClient) -> Result<bool, SequencerError> {
+    let status = dashboard
+        .command_safety_status()
+        .map_err(|e| SequencerError(format!("safety status: {e}")))?;
+    Ok(matches!(
+        status.data.get("safety_status"),
+        Some(DashboardValue::Str(s)) if s == "PROTECTIVE_STOP"
+    ))
+}
+
 /// Releases a leftover protective stop (e.g. from a crash mid-motion) the
 /// way ur-rs's live-robot helper does: the controller refuses the unlock
 /// within 5 s of the stop event, hence the retry loop; the stop also
 /// leaves the previous program paused, so drop it.
 fn clear_protective_stop(dashboard: &mut DashboardClient) -> Result<(), SequencerError> {
-    let protective_stopped = |dashboard: &mut DashboardClient| -> Result<bool, SequencerError> {
-        let status = dashboard
-            .command_safety_status()
-            .map_err(|e| SequencerError(format!("safety status: {e}")))?;
-        Ok(matches!(
-            status.data.get("safety_status"),
-            Some(DashboardValue::Str(s)) if s == "PROTECTIVE_STOP"
-        ))
-    };
     if !protective_stopped(dashboard)? {
         return Ok(());
     }
@@ -257,4 +254,134 @@ fn clear_protective_stop(dashboard: &mut DashboardClient) -> Result<(), Sequence
         )));
     }
     Ok(())
+}
+
+/// Waits for a freshly (re)sent program to call back on the reverse,
+/// trajectory, and script-command interfaces.
+fn wait_for_program(
+    program_running: &AtomicBool,
+    trajectory: &TrajectoryPointInterface,
+    script_command: &ScriptCommandInterface,
+    timeout: Duration,
+) -> Result<(), SequencerError> {
+    let deadline = Instant::now() + timeout;
+    while !program_running.load(Ordering::SeqCst)
+        || !trajectory.is_connected()
+        || !script_command.client_connected()
+    {
+        if Instant::now() > deadline {
+            return Err(SequencerError(format!(
+                "robot did not connect to the reverse/trajectory/script-command \
+                 interfaces within {} s",
+                timeout.as_secs()
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+impl Motion<'_> {
+    /// True while the external-control program holds all three of its
+    /// callback connections. A paused program keeps them, so this alone
+    /// does not mean the program can execute anything — pair it with the
+    /// dashboard's `running` answer for the robot-side truth.
+    fn program_alive(&self) -> bool {
+        self.program_running.load(Ordering::SeqCst)
+            && self.trajectory.is_connected()
+            && self.script_command.client_connected()
+    }
+
+    /// Heals a dead external-control program before a sequence runs.
+    ///
+    /// A protective stop, a pendant stop, and freedrive all end the
+    /// program, and until it is sent again every trajectory is refused.
+    /// The old answer was "restart the daemon" — the restart the gripper
+    /// forbids while it holds a sample. Instead this resends the same
+    /// program bring-up sent and waits for the robot to call back.
+    ///
+    /// The unlock is gated: with `allow_unlock` false a protective stop
+    /// is an error, because it means the arm hit something and releasing
+    /// it is the operator's decision. The Recover trigger is how the
+    /// operator says so.
+    pub fn ensure_program(&mut self, allow_unlock: bool) -> Result<(), SequencerError> {
+        let mut dashboard = DashboardClient::new(&self.robot_ip);
+        if let Err(e) = dashboard.connect(2, Duration::from_secs(1)) {
+            if self.program_alive() {
+                log::warn(&format!(
+                    "dashboard unreachable ({e}); the program looks alive, continuing"
+                ));
+                return Ok(());
+            }
+            return Err(SequencerError(format!(
+                "dashboard connect to {}: {e}",
+                self.robot_ip
+            )));
+        }
+        if protective_stopped(&mut dashboard)? {
+            if !allow_unlock {
+                return Err(SequencerError(
+                    "robot is in PROTECTIVE_STOP — check what the arm hit, then \
+                     trigger CalibMode=4 (Recover) to unlock it and resend the \
+                     program"
+                        .into(),
+                ));
+            }
+            clear_protective_stop(&mut dashboard)?;
+        }
+        // The robot-side answer, not the daemon-side flags: a paused
+        // program keeps its sockets (and `program_running`) while it can
+        // no longer execute anything.
+        let running = dashboard
+            .command_running()
+            .map_err(|e| SequencerError(format!("dashboard running query: {e}")))?;
+        if matches!(
+            running.data.get("running"),
+            Some(DashboardValue::Bool(true))
+        ) && self.program_alive()
+        {
+            return Ok(());
+        }
+        log::warn("External-control program is not running — resending it");
+        // Drop whatever half-dead program remains so the resend does not
+        // race it for the callback ports.
+        let _ = dashboard.command_stop();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while self.program_alive() {
+            if Instant::now() > deadline {
+                log::warn("old program connections did not drop within 5 s; resending anyway");
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        self.resend_program()
+    }
+
+    /// Sends the stored program over a fresh primary connection and
+    /// restores the bring-up invariants (parked program, speed slider at
+    /// 1.0). The connection is dropped right after the write, like the
+    /// hand-run `nc` procedure this replaces.
+    fn resend_program(&mut self) -> Result<(), SequencerError> {
+        {
+            let mut primary = TcpStream::connect((self.robot_ip.as_str(), 30001)).map_err(|e| {
+                SequencerError(format!("primary connect to {}:30001: {e}", self.robot_ip))
+            })?;
+            primary
+                .write_all(self.full_program.as_bytes())
+                .map_err(|e| SequencerError(format!("resend program: {e}")))?;
+        }
+        wait_for_program(
+            &self.program_running,
+            &self.trajectory,
+            &self.script_command,
+            Duration::from_secs(10),
+        )?;
+        self.park()?;
+        self.rtde.send_speed_slider(1.0)?;
+        self.rtde
+            .session()?
+            .wait_for_f64("target_speed_fraction", 1.0, Duration::from_secs(5))?;
+        log::info("External-control program resent (running, speed slider at 1.0)");
+        Ok(())
+    }
 }

@@ -105,6 +105,12 @@ robot_ioc 말고도 있습니다(d435i-ioc 등). 브로드캐스트 search는 �
 3. 티치펜던트에서 보호정지 해제.
 4. `Robot:Trigger=1` 재개 (StartStep 미만 스텝 자동 skip).
 
+보호정지(충격감지)는 **데몬 재시작 없이** 복구됩니다: external-control
+프로그램이 죽어도 다음 트리거가 자동 재전송하고(`ensure_program`),
+보호정지 해제는 CalibMode=4(Recover) 트리거에 게이트되어 unlock →
+재전송 → 스탠바이 복귀가 한 번에 됩니다. 펜던트도, 데몬 재시작도
+필요 없습니다(재시작은 Hand-E 재활성화로 파지를 풀 수 있어 금지).
+
 ## 구조
 
 ```
