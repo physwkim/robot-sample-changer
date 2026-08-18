@@ -155,10 +155,35 @@ pub struct GripperConfig {
     /// inside what the settle wait needs.
     #[serde(default = "default_gripper_poll_hz")]
     pub poll_hz: u32,
+    /// How hard the fingers close on a sample, on [0, 1] of the Hand-E's
+    /// 20-185 N.
+    ///
+    /// Full scale is what every close used to send, and it is 185 N onto
+    /// a puck that then has to fit a bore with 0.50 mm of nominal radial
+    /// clearance. The gripped puck was measured held within 0.05 mm in
+    /// all six directions at the taught seat pose while a free one has
+    /// ten times that (doc §16.12), so how hard it is squeezed is not a
+    /// detail of the grip — it is part of whether the puck fits.
+    #[serde(default = "default_grip_force")]
+    pub grip_force: f64,
+    /// How fast the fingers move, on [0, 1] of the Hand-E's 20-150 mm/s.
+    ///
+    /// The close is commanded to `close_position` and stalls on the
+    /// sample, so this is the speed the pads arrive at it with.
+    #[serde(default = "default_grip_speed")]
+    pub grip_speed: f64,
 }
 
 fn default_gripper_poll_hz() -> u32 {
     50
+}
+
+fn default_grip_force() -> f64 {
+    0.3
+}
+
+fn default_grip_speed() -> f64 {
+    0.2
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -657,6 +682,19 @@ impl Config {
                 "probe.lift_abort_n must be within 1..25 N (a lift the arm cannot make \
                  is not a measurement, and 23 N is a rubbing insert)"
                     .into(),
+            ));
+        }
+        // Both ends of each range are real commands on a Hand-E: 0.0 is
+        // its 20 N / 20 mm/s minimum, not a gripper that does nothing.
+        // Out of range is what has no meaning.
+        if !(0.0..=1.0).contains(&config.gripper.grip_force) {
+            return Err(SequencerError(
+                "gripper.grip_force must be within 0..1 (0 is the Hand-E's 20 N minimum)".into(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&config.gripper.grip_speed) {
+            return Err(SequencerError(
+                "gripper.grip_speed must be within 0..1 (0 is the Hand-E's 20 mm/s minimum)".into(),
             ));
         }
         let centring = &config.probe.centring;

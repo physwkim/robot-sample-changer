@@ -7,6 +7,7 @@
 use std::time::{Duration, Instant};
 
 use robotiq_hande::driver::{HandeDriver, HandeDriverConfig};
+use robotiq_hande::gripper::Grip;
 
 use crate::config::{Config, GripperMode};
 use crate::epics::Epics;
@@ -26,9 +27,6 @@ const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(10);
 /// scale a release that met the holder would push on it with everything the
 /// Hand-E has. The floor is the gripper's own minimum, not zero.
 const RELEASE_FORCE: f64 = 0.0;
-/// Force scale for closing on a sample — production's value, kept for the
-/// restore so the puck ends held the way the sequence holds it.
-const GRIP_FORCE: f64 = 1.0;
 
 enum Backend {
     Hande(Box<HandeDriver>),
@@ -47,6 +45,11 @@ pub struct Gripper {
     reach_tolerance: f64,
     settle_timeout: Duration,
     open_threshold: f64,
+    /// How hard and how fast the fingers move on a sample. One value for
+    /// every command that closes or opens on one, so that "how the
+    /// sequence grips" is a single configured thing rather than a
+    /// constant per call site.
+    grip: Grip,
     last_rbv: Option<i32>,
 }
 
@@ -83,6 +86,10 @@ impl Gripper {
             reach_tolerance: g.reach_tolerance,
             settle_timeout: Duration::from_secs_f64(g.settle_timeout),
             open_threshold: g.open_threshold,
+            grip: Grip {
+                force: g.grip_force,
+                speed: g.grip_speed,
+            },
             last_rbv: None,
         })
     }
@@ -104,7 +111,7 @@ impl Gripper {
         };
         log::info(&format!("Sending gripper command: position={target:.3}"));
         match &mut self.backend {
-            Backend::Hande(driver) => driver.set_position(target, 1.0),
+            Backend::Hande(driver) => driver.set_position(target, self.grip),
             Backend::Simulated { position } => *position = target,
         }
     }
@@ -137,7 +144,14 @@ impl Gripper {
         let from = self.position();
         let target = (from + by_m).min(self.open_position);
         log::info(&format!("Loosening the grip: {from:.4} -> {target:.4} m"));
-        self.settle_to(target, RELEASE_FORCE, epics);
+        self.settle_to(
+            target,
+            Grip {
+                force: RELEASE_FORCE,
+                speed: self.grip.speed,
+            },
+            epics,
+        );
         let play = self.position() - from;
         log::info(&format!("  Grip loosened, {play:.4} m of play"));
         play
@@ -152,7 +166,7 @@ impl Gripper {
     /// grip the arm then lifts the puck out with.
     pub fn regrip(&mut self, epics: &Epics) {
         log::info("Restoring the grip");
-        self.settle_to(self.close_position, GRIP_FORCE, epics);
+        self.settle_to(self.close_position, self.grip, epics);
         log::info(&format!("  Grip restored at {:.4} m", self.position()));
     }
 
@@ -180,9 +194,9 @@ impl Gripper {
     /// Waiting for the
     /// stall instead costs the ~0.55 s the stall dwell takes and answers
     /// the question actually being asked — where did they end up.
-    fn settle_to(&mut self, target: f64, force: f64, epics: &Epics) {
+    fn settle_to(&mut self, target: f64, grip: Grip, epics: &Epics) {
         match &mut self.backend {
-            Backend::Hande(driver) => driver.set_position(target, force),
+            Backend::Hande(driver) => driver.set_position(target, grip),
             Backend::Simulated { position } => *position = target,
         }
         self.settle_at(target, 0.0, epics);
