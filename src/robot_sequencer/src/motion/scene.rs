@@ -549,11 +549,12 @@ mod run_waypoint_goals {
 
         let mut previous = h_standby0.clone();
         for holder in 1i32..=10 {
-            let y = f64::from(holder - 1) * config.sequence.holder_offset;
+            let mut y = f64::from(holder - 1) * config.sequence.holder_offset;
             let (mut x, mut z) = (0.0, 0.0);
             if (2..=10).contains(&holder) {
                 let i = (holder - 2) as usize;
                 x = w.holder_multi_x_offsets.get(i).copied().unwrap_or(0.0);
+                y += w.holder_multi_y_offsets.get(i).copied().unwrap_or(0.0);
                 z = w.holder_multi_z_offsets.get(i).copied().unwrap_or(0.0);
             }
             // The compute_run_waypoints chain, holder-10 end nudge included.

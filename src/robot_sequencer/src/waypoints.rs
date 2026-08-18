@@ -61,6 +61,11 @@ pub struct WaypointData {
     pub sample_holder_on_y_offset: f64,
     pub sample_holder_on_z_offset: f64,
     pub holder_multi_x_offsets: Vec<f64>,
+    /// Per-holder insertion-depth trim, tool-frame y (base −z), meters,
+    /// holder N at index N-2: positive is deeper. The rail step itself is
+    /// exact 30 mm; this carries each seat's own depth error, which the
+    /// x/z trims cannot reach.
+    pub holder_multi_y_offsets: Vec<f64>,
     pub holder_multi_z_offsets: Vec<f64>,
     /// Per-holder trim added to [`Self::holder_on_tilt_x_deg`], deg,
     /// holder N at index N-2 like the multi offsets. Each holder's seat
@@ -141,6 +146,7 @@ impl WaypointData {
             sample_holder_on_y_offset: f64_at(params, "sample_holder_on_position_y_offset", 0.0),
             sample_holder_on_z_offset: f64_at(params, "sample_holder_on_position_z_offset", 0.0),
             holder_multi_x_offsets: vec_at_or(params, "holder_multi_x_offsets", 9),
+            holder_multi_y_offsets: vec_at_or(params, "holder_multi_y_offsets", 9),
             holder_multi_z_offsets: vec_at_or(params, "holder_multi_z_offsets", 9),
             holder_multi_tilt_x_deg: vec_at_or(params, "holder_multi_tilt_x_deg", 9),
             wrist3_rotation_offset: f64_at(params, "wrist3_rotation_offset", 0.0),

@@ -20,6 +20,9 @@
     sample_holder_on_position_z_offset: 0.0005
     holder_multi_x_offsets: [0.0003, 0.0005, 0.0015, 0.0015, 0.003, 0.003, 0.003,
       0.003, 0.003]
+    # Insertion-depth trim, tool y (base -z), m, holder N at index N-2;
+    # positive is deeper.
+    holder_multi_y_offsets: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     holder_multi_z_offsets: [0.0, 0.0, 0.0, 0.0002, 0.00025, 0.0004, 0.00045, 0.00045,
       0.00045]
     # Per-holder trim on holder_on_position_tilt_x_deg, deg, holder N at

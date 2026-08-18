@@ -2006,13 +2006,16 @@ impl<'a> Sequencer<'a> {
         base: &BaseWaypoints,
         holder_number: i32,
     ) -> Result<RunWaypoints, SequencerError> {
-        let y_offset = f64::from(holder_number - 1) * self.config.sequence.holder_offset;
+        let mut y_offset = f64::from(holder_number - 1) * self.config.sequence.holder_offset;
         let mut x_offset = 0.0;
         let mut z_offset = 0.0;
         if (2..=10).contains(&holder_number) {
             let idx = (holder_number - 2) as usize;
             if let Some(x) = w.holder_multi_x_offsets.get(idx) {
                 x_offset = *x;
+            }
+            if let Some(y) = w.holder_multi_y_offsets.get(idx) {
+                y_offset += *y;
             }
             if let Some(z) = w.holder_multi_z_offsets.get(idx) {
                 z_offset = *z;
