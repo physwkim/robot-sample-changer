@@ -343,6 +343,17 @@ pub struct ProbeConfig {
     /// cannot represent a bore, so from a seated pose every jog is
     /// refused before it starts.
     pub heights_mm: Vec<f64>,
+    /// Force allowed while moving between heights, N.
+    ///
+    /// Separate from the probes' own aborts because it bounds a different
+    /// act. A probe's abort says how hard the arm may lean on a bore wall
+    /// it is trying to find. This one says how hard it may pull a gripped
+    /// puck out of the seat it is sitting in — which is not a fault
+    /// condition at all: the sequence's own pick does it on every run, and
+    /// borrowing the depth probe's 8.00 N stopped every lift at
+    /// +0.31 mm with 7.6-8.2 N sideways (three repeats, doc §16.12) before
+    /// any height above that could be measured.
+    pub lift_abort_n: f64,
     /// Sideways, toward a bore wall.
     pub lateral: ProbeAxisConfig,
     /// Downward, toward the seat floor.
@@ -359,6 +370,12 @@ impl Default for ProbeConfig {
             // ruled out by a margin.
             loosen_mm: 2.5,
             heights_mm: Vec::new(),
+            // Above the 10.14 N the first lift reached, so the force
+            // through that feature can be recorded rather than aborted
+            // at, and below the 23 N a rubbing insert was measured at
+            // (doc §16.2) — the level this whole mode exists to keep the
+            // sequence away from.
+            lift_abort_n: 15.0,
             lateral: ProbeAxisConfig {
                 // Ten steps to a wall at the nominal 0.50 mm radial
                 // clearance, and 0.05 mm of overshoot past it.
@@ -580,6 +597,13 @@ impl Config {
                 "probe.heights_mm entries must be within -2..10 mm of the trigger pose".into(),
             ));
         }
+        if !(1.0..=25.0).contains(&config.probe.lift_abort_n) {
+            return Err(SequencerError(
+                "probe.lift_abort_n must be within 1..25 N (a lift the arm cannot make \
+                 is not a measurement, and 23 N is a rubbing insert)"
+                    .into(),
+            ));
+        }
         if !(0.0..=5.0).contains(&config.probe.loosen_mm) {
             return Err(SequencerError(
                 "probe.loosen_mm must be within 0..5 (the fingers must find the sample again)"
@@ -736,6 +760,13 @@ mod tests {
                 "overtravel_deep",
                 "probe:\n  lateral:\n    overtravel_steps: 11\n",
                 "probe.lateral.overtravel_steps",
+            ),
+            // The move between heights carries a gripped sample out of a
+            // seat, so its ceiling is bounded like every other force here.
+            (
+                "lift_abort_high",
+                "probe:\n  lift_abort_n: 30.0\n",
+                "probe.lift_abort_n",
             ),
             // A slipped decimal point here opens the fingers 12 mm over an
             // open rack with a sample in them.

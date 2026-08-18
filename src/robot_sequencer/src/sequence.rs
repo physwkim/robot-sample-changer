@@ -96,6 +96,19 @@ struct RunWaypoints {
 /// translation: the tool orientation does not change, so the axes do not
 /// either, and one set for the whole run is what makes `from_trigger`
 /// add up.
+/// The three limits the seat probe works under: measuring sideways,
+/// measuring down, and moving between heights.
+///
+/// One value rather than three arguments because every step of the sweep
+/// needs all three, and which one applies is a property of what the arm
+/// is doing, not of who is calling.
+#[derive(Clone, Copy)]
+struct Limits {
+    lateral: ProbeLimits,
+    depth: ProbeLimits,
+    lift: ProbeLimits,
+}
+
 struct Axes {
     x: Vector3,
     y: Vector3,
@@ -618,15 +631,24 @@ impl<'a> Sequencer<'a> {
         self.wait_for_trigger(true);
 
         let p = &self.config.probe;
-        let lateral = ProbeLimits::new(&p.lateral, p.velocity_scale);
         let depth = ProbeLimits::new(&p.depth, p.velocity_scale);
+        let limits = Limits {
+            lateral: ProbeLimits::new(&p.lateral, p.velocity_scale),
+            depth,
+            // The moves between heights are stepped like the depth probe
+            // but bounded like a pick, not like a push onto a floor.
+            lift: ProbeLimits {
+                abort_n: p.lift_abort_n,
+                ..depth
+            },
+        };
 
         // The sweep's own failure travels beside its results rather than
         // instead of them: a bracket that aborted at the bottom of a
         // ladder does not make the heights above it unmeasured, and this
         // mode's whole output is what it printed.
         let (play_mm, (levels, outcome)) =
-            self.with_grip_loosened(|s| Ok(s.sweep_heights(lateral, depth)))?;
+            self.with_grip_loosened(|s| Ok(s.sweep_heights(limits)))?;
 
         log::info("========================================");
         log::info("SEAT PROBE RESULT (measured from the pose the probe started at)");
@@ -702,11 +724,7 @@ impl<'a> Sequencer<'a> {
     /// sequence by lifting it from there. So the return is one call after
     /// the walk, on both paths, and what the walk had already measured
     /// survives the failure that stopped it.
-    fn sweep_heights(
-        &mut self,
-        lateral: ProbeLimits,
-        depth: ProbeLimits,
-    ) -> (Vec<Level>, Result<(), SequencerError>) {
+    fn sweep_heights(&mut self, limits: Limits) -> (Vec<Level>, Result<(), SequencerError>) {
         let axes = match Axes::in_tool(&mut self.motion) {
             Ok(axes) => axes,
             Err(e) => return (Vec::new(), Err(e)),
@@ -721,15 +739,8 @@ impl<'a> Sequencer<'a> {
         // move this mode makes goes through it, so the way back is one
         // subtraction rather than a history to replay.
         let mut from_trigger = Vector3::zeros();
-        let walked = self.walk_heights(
-            &heights,
-            &axes,
-            lateral,
-            depth,
-            &mut from_trigger,
-            &mut levels,
-        );
-        let returned = Self::return_to_trigger(&mut self.motion, &axes, &mut from_trigger, depth);
+        let walked = self.walk_heights(&heights, &axes, limits, &mut from_trigger, &mut levels);
+        let returned = Self::return_to_trigger(&mut self.motion, &axes, &mut from_trigger, limits);
         let outcome = match (walked, returned) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(e), Ok(())) => Err(e),
@@ -750,15 +761,18 @@ impl<'a> Sequencer<'a> {
         &mut self,
         heights: &[f64],
         axes: &Axes,
-        lateral: ProbeLimits,
-        depth: ProbeLimits,
+        limits: Limits,
         from_trigger: &mut Vector3,
         levels: &mut Vec<Level>,
     ) -> Result<(), SequencerError> {
         for &height in heights {
             let climb = height - from_trigger.z;
-            self.motion
-                .probe_reposition(axes.up, climb, depth, &format!("to {height:+.2} mm"))?;
+            self.motion.probe_reposition(
+                axes.up,
+                climb,
+                limits.lift,
+                &format!("to {height:+.2} mm"),
+            )?;
             from_trigger.z = height;
             levels.push(Level {
                 height_mm: height,
@@ -770,8 +784,8 @@ impl<'a> Sequencer<'a> {
             // fault part way through a level still leaves the axes it had
             // already measured in the report. This mode writes nothing
             // else — what it printed is the whole of it.
-            Self::measure_level(&mut self.motion, axes, level, lateral, depth)?;
-            Self::centre_here(&mut self.motion, axes, level, from_trigger, lateral)?;
+            Self::measure_level(&mut self.motion, axes, level, limits)?;
+            Self::centre_here(&mut self.motion, axes, level, from_trigger, limits.lateral)?;
         }
         Ok(())
     }
@@ -829,7 +843,7 @@ impl<'a> Sequencer<'a> {
         motion: &mut Motion<'a>,
         axes: &Axes,
         from_trigger: &mut Vector3,
-        depth: ProbeLimits,
+        limits: Limits,
     ) -> Result<(), SequencerError> {
         for (dir, component, what) in [
             (axes.x, 0, "base x"),
@@ -840,7 +854,7 @@ impl<'a> Sequencer<'a> {
             if back.abs() < f64::EPSILON {
                 continue;
             }
-            motion.probe_reposition(dir, back, depth, &format!("return the {what}"))?;
+            motion.probe_reposition(dir, back, limits.lift, &format!("return the {what}"))?;
             from_trigger[component] = 0.0;
         }
         Ok(())
@@ -854,20 +868,19 @@ impl<'a> Sequencer<'a> {
         motion: &mut Motion<'a>,
         axes: &Axes,
         level: &mut Level,
-        lateral: ProbeLimits,
-        depth: ProbeLimits,
+        limits: Limits,
     ) -> Result<(), SequencerError> {
         for (name, dir) in [("base x", axes.x), ("base y", axes.y)] {
             level
                 .brackets
-                .push(motion.bracket_axis(dir, lateral, name)?);
+                .push(motion.bracket_axis(dir, limits.lateral, name)?);
         }
         // Straight down in base, not along whichever tool axis happens
         // to point that way: the seat floor is horizontal and the puck's
         // own weight is already resting on it, so the probe has to push
         // along the same line that weight acts on for the slope to mean
         // depth.
-        level.floor = Some(motion.probe_until_contact(-axes.up, depth, "base z-")?);
+        level.floor = Some(motion.probe_until_contact(-axes.up, limits.depth, "base z-")?);
         Ok(())
     }
 
