@@ -33,6 +33,16 @@ pub struct WaypointData {
     pub sample_holder_on_position: Vec<f64>,
     pub above_y_offset: f64,
     pub retreat_z_offset: f64,
+    /// How far the holder seat sits above the taught pose, m.
+    ///
+    /// Its own field and not part of the shared trim above, because that
+    /// trim is applied to the standby pose as well and the standby pose
+    /// cannot be planned to: it reads as a collision against the convex
+    /// stage, and the sequence only gets away with it by being already
+    /// there. Move it by a tenth of a millimetre and step 1 stops being
+    /// a no-op and starts being a planning failure (measured
+    /// 2026-08-18).
+    pub holder_on_lift: f64,
     pub holder1_on_x_offset: f64,
     pub holder1_on_y_offset: f64,
     pub holder1_on_z_offset: f64,
@@ -89,6 +99,7 @@ impl WaypointData {
             sample_holder_on_position: vec_at(params, "sample_holder_on_position")?,
             above_y_offset: f64_at(params, "above_y_offset", -0.005),
             retreat_z_offset: f64_at(params, "retreat_z_offset", -0.05),
+            holder_on_lift: f64_at(params, "holder_on_position_lift", 0.0),
             holder1_on_x_offset: f64_at(params, "holder1_on_position_x_offset", 0.0),
             holder1_on_y_offset: f64_at(params, "holder1_on_position_y_offset", 0.0),
             holder1_on_z_offset: f64_at(params, "holder1_on_position_z_offset", 0.0),
@@ -142,6 +153,7 @@ mod tests {
         assert_eq!(data.above_y_offset, -0.005);
         assert_eq!(data.retreat_z_offset, -0.05);
         assert_eq!(data.holder1_on_y_offset, 0.0005);
+        assert_eq!(data.holder_on_lift, 0.00015);
         assert_eq!(data.holder_multi_x_offsets.len(), 9);
         assert_eq!(data.wrist3_rotation_offset, 0.0);
     }

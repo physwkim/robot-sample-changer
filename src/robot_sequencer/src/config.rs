@@ -359,6 +359,40 @@ impl Default for CentringConfig {
     }
 }
 
+/// Turning the sample in its seat instead of pushing it around in it.
+///
+/// Off by default (`sweep_deg` 0): it is the answer to a question a
+/// bracket raised — a sample pinched at every position may be held
+/// crooked rather than held tight — and it turns a gripped sample inside
+/// a seat, which is not something to do on the way past.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct TiltConfig {
+    /// One tilt step, deg.
+    pub step_deg: f64,
+    /// How far each way from the pose the level was measured at, deg.
+    /// Zero runs no tilt at all.
+    pub sweep_deg: f64,
+    /// Force change that ends a direction, N.
+    pub abort_n: f64,
+    /// Torque change that ends it, Nm. A tilt loads a seat in torque
+    /// before it loads it in force, so the force limit alone would let
+    /// the arm pry.
+    pub abort_nm: f64,
+}
+
+impl Default for TiltConfig {
+    fn default() -> Self {
+        Self {
+            step_deg: 0.05,
+            // Off unless a config asks for it.
+            sweep_deg: 0.0,
+            abort_n: 5.0,
+            abort_nm: 0.5,
+        }
+    }
+}
+
 /// Force-stopped seat probing (`CalibMode` = Seat Probe). Commissioning
 /// only: it measures where a bore actually is, which a taught pose only
 /// records an operator's belief about.
@@ -428,6 +462,9 @@ pub struct ProbeConfig {
     pub lateral: ProbeAxisConfig,
     /// Downward, toward the seat floor.
     pub depth: ProbeAxisConfig,
+    /// Turning the sample in place at every level, instead of pushing it
+    /// around.
+    pub tilt: TiltConfig,
     /// Keeping the sideways force at nothing while changing height.
     ///
     /// A straight climb out of the taught seat pose built 14.30 N in
@@ -495,6 +532,7 @@ impl Default for ProbeConfig {
                 overtravel_steps: 2,
             },
             centring: CentringConfig::default(),
+            tilt: TiltConfig::default(),
         }
     }
 }
@@ -697,6 +735,36 @@ impl Config {
                 "gripper.grip_speed must be within 0..1 (0 is the Hand-E's 20 mm/s minimum)".into(),
             ));
         }
+        let tilt = &config.probe.tilt;
+        // A quarter of a degree already swings the far edge of a 20 mm
+        // puck by 0.04 mm, which is the whole of the freedom one was
+        // measured to have in its seat. Past a degree this is not a tilt
+        // scan, it is levering.
+        if !(0.0..=1.0).contains(&tilt.sweep_deg) {
+            return Err(SequencerError(
+                "probe.tilt.sweep_deg must be within 0..1 deg (0 runs no tilt)".into(),
+            ));
+        }
+        if !(0.005..=0.2).contains(&tilt.step_deg) {
+            return Err(SequencerError(
+                "probe.tilt.step_deg must be within 0.005..0.2 deg".into(),
+            ));
+        }
+        if tilt.sweep_deg > 0.0 && tilt.sweep_deg < tilt.step_deg {
+            return Err(SequencerError(
+                "probe.tilt.sweep_deg must be at least one probe.tilt.step_deg".into(),
+            ));
+        }
+        if !(1.0..=15.0).contains(&tilt.abort_n) {
+            return Err(SequencerError(
+                "probe.tilt.abort_n must be within 1..15 N".into(),
+            ));
+        }
+        if !(0.05..=2.0).contains(&tilt.abort_nm) {
+            return Err(SequencerError(
+                "probe.tilt.abort_nm must be within 0.05..2 Nm".into(),
+            ));
+        }
         let centring = &config.probe.centring;
         // Below the arm's own scatter standing still (0.073 N, §16.1)
         // there is no load to null; above a lateral probe's contact
@@ -889,6 +957,21 @@ mod tests {
                 "lift_abort_high",
                 "probe:\n  lift_abort_n: 30.0\n",
                 "probe.lift_abort_n",
+            ),
+            (
+                "tilt_sweep_too_wide",
+                "probe:\n  tilt:\n    sweep_deg: 2.0\n",
+                "probe.tilt.sweep_deg",
+            ),
+            (
+                "tilt_sweep_under_one_step",
+                "probe:\n  tilt:\n    step_deg: 0.1\n    sweep_deg: 0.05\n",
+                "probe.tilt.sweep_deg",
+            ),
+            (
+                "tilt_torque_limit_high",
+                "probe:\n  tilt:\n    abort_nm: 3.0\n",
+                "probe.tilt.abort_nm",
             ),
             // The climb's correction has the same shape of risk as the
             // probes' own numbers: it moves a gripped sample sideways

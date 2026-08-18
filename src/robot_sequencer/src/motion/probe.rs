@@ -179,6 +179,86 @@ pub struct Climbed {
     pub load: Vector3,
 }
 
+/// One tilt sweep: how far it turns, in what steps, and what stops it.
+///
+/// A sweep and not a probe: it is not looking for a wall, it is asking
+/// at which angle the load is least, so it traverses the whole sweep and
+/// only an abort ends it early.
+#[derive(Debug, Clone, Copy)]
+pub struct TiltLimits {
+    pub step_rad: f64,
+    /// Each way from the pose it starts at, rad.
+    pub sweep_rad: f64,
+    /// Force change that ends the sweep, N.
+    pub abort_n: f64,
+    /// Torque change that ends the sweep, Nm. A tilt loads the seat in
+    /// torque before it loads it in force, so the force limit alone
+    /// would not stop it prying.
+    pub abort_nm: f64,
+    pub velocity_scale: f64,
+}
+
+/// One end of a tilt sweep: how far it turned and what that cost.
+#[derive(Debug, Clone, Copy)]
+pub struct Turned {
+    pub deg: f64,
+    /// Force change against the pose the sweep started at, N.
+    pub force_n: f64,
+    /// Torque change against it, Nm.
+    pub torque_nm: f64,
+}
+
+/// What one tilt sweep found.
+///
+/// Not "which angle has the least load" — the sweep measures against the
+/// pose it starts at, so that angle is always the start by construction.
+/// What it can say is what turning *costs* each way: a sample with room
+/// to turn builds nothing, a pinched one builds torque immediately, and
+/// a sample held crooked builds it faster toward the side it is already
+/// jammed against. The asymmetry is the finding.
+#[derive(Debug, Clone)]
+pub struct Tilted {
+    label: String,
+    plus: Option<Turned>,
+    minus: Option<Turned>,
+    /// Why a direction stopped short, if one did.
+    stopped: Vec<String>,
+}
+
+impl Tilted {
+    pub fn summary(&self) -> String {
+        let one = |end: &Option<Turned>| match end {
+            Some(t) => format!(
+                "{:+.2} deg cost {:.2} N / {:.3} Nm",
+                t.deg, t.force_n, t.torque_nm
+            ),
+            None => "did not turn at all".to_string(),
+        };
+        let mut out = format!("{}: {}, {}", self.label, one(&self.plus), one(&self.minus));
+        if let (Some(p), Some(m)) = (self.plus, self.minus) {
+            // Per degree, because an abort can leave the two ends at
+            // different angles and the raw pair would then compare
+            // nothing.
+            let rate = |t: &Turned| {
+                if t.deg.abs() < f64::EPSILON {
+                    0.0
+                } else {
+                    t.torque_nm / t.deg.abs()
+                }
+            };
+            let (rp, rm) = (rate(&p), rate(&m));
+            let softer = if rp < rm { "+" } else { "-" };
+            out.push_str(&format!(
+                " -> {rp:.3} against {rm:.3} Nm/deg, softer toward {softer}"
+            ));
+        }
+        for why in &self.stopped {
+            out.push_str(&format!("; {why}"));
+        }
+        out
+    }
+}
+
 /// What ends a run of steps — the question the run is asking.
 ///
 /// A probe asks *where* something is, and stops the moment the force
@@ -1173,6 +1253,127 @@ impl Motion<'_> {
             offset: spent.net,
             load,
         })
+    }
+
+    /// Turns the tool both ways about `axis` and reports what each way
+    /// cost.
+    ///
+    /// The question is the one a bracket cannot answer. A bracket says
+    /// how much room the sample has, and finds none when the sample is
+    /// pinched — but a sample held crooked is pinched at every position,
+    /// so no amount of moving it sideways lets go, and the bracket reads
+    /// the same either way. Turning is the motion that can tell them
+    /// apart: it costs nothing when the sample has room to turn, and it
+    /// costs asymmetrically when the sample is already leaning on one
+    /// side of its seat.
+    ///
+    /// Everything is against the pose it starts at, and the arm is put
+    /// back there before it returns — on the abort path too. The
+    /// payload's own weight turns with the tool, but over a sweep this
+    /// small (a third of a degree moves a 1 kg tool's gravity projection
+    /// by 0.05 N) that is under what this rig scatters standing still.
+    pub fn tilt_scan(
+        &mut self,
+        axis: Vector3,
+        limits: TiltLimits,
+        label: &str,
+    ) -> Result<Tilted, SequencerError> {
+        let steps = (limits.sweep_rad / limits.step_rad + STEP_COUNT_EPSILON).floor() as usize;
+        log::info(&format!(
+            "{label}: tilting {:+.3} deg each way in {steps} steps of {:.3} deg, \
+             abort at {:.2} N / {:.3} Nm",
+            limits.sweep_rad.to_degrees(),
+            limits.step_rad.to_degrees(),
+            limits.abort_n,
+            limits.abort_nm
+        ));
+        let (start_q, reference) = self
+            .rtde
+            .session()?
+            .mean_q_and_wrench(SAMPLES_PER_READING)?;
+        let home = q_to_map(&start_q);
+        let mut out = Tilted {
+            label: label.to_string(),
+            plus: None,
+            minus: None,
+            stopped: Vec::new(),
+        };
+        for sign in [1.0, -1.0] {
+            let end = self.turn_one_way(axis, sign, limits, reference, &home, label, &mut out)?;
+            if sign > 0.0 {
+                out.plus = end;
+            } else {
+                out.minus = end;
+            }
+        }
+        Ok(out)
+    }
+
+    /// One direction of [`Motion::tilt_scan`], including the return.
+    ///
+    /// A load abort ends this direction and is recorded; it does not end
+    /// the scan, because the other direction is the one turning away from
+    /// whatever was met. A motion failure is different and propagates:
+    /// the arm did not do what it was told.
+    #[allow(clippy::too_many_arguments)]
+    fn turn_one_way(
+        &mut self,
+        axis: Vector3,
+        sign: f64,
+        limits: TiltLimits,
+        reference: [f64; 6],
+        home: &JointMap,
+        label: &str,
+        out: &mut Tilted,
+    ) -> Result<Option<Turned>, SequencerError> {
+        let steps = (limits.sweep_rad / limits.step_rad + STEP_COUNT_EPSILON).floor() as usize;
+        let mut visited = vec![home.clone()];
+        let mut end = None;
+        for step in 1..=steps {
+            let turned = self.probe_twist(axis, sign * limits.step_rad, limits.velocity_scale);
+            if let Err(e) = turned {
+                let back: Vec<JointMap> = visited.iter().rev().cloned().collect();
+                self.retrace(&back, limits.velocity_scale, label)?;
+                return Err(e);
+            }
+            let deg = sign * (step as f64) * limits.step_rad.to_degrees();
+            let (q, now) = self
+                .rtde
+                .session()?
+                .mean_q_and_wrench(SAMPLES_PER_READING)?;
+            visited.push(q_to_map(&q));
+            let df = Vector3::new(
+                now[0] - reference[0],
+                now[1] - reference[1],
+                now[2] - reference[2],
+            );
+            let dt = Vector3::new(
+                now[3] - reference[3],
+                now[4] - reference[4],
+                now[5] - reference[5],
+            );
+            log::info(&format!(
+                "  {label}: {deg:+.3} deg | base force ({:+.2}, {:+.2}, {:+.2}) N, \
+                 torque ({:+.3}, {:+.3}, {:+.3}) Nm",
+                df.x, df.y, df.z, dt.x, dt.y, dt.z
+            ));
+            end = Some(Turned {
+                deg,
+                force_n: df.norm(),
+                torque_nm: dt.norm(),
+            });
+            if df.norm() >= limits.abort_n || dt.norm() >= limits.abort_nm {
+                out.stopped.push(format!(
+                    "{deg:+.3} deg stopped at {:.2} N / {:.3} Nm",
+                    df.norm(),
+                    dt.norm()
+                ));
+                break;
+            }
+        }
+        let back: Vec<JointMap> = visited.iter().rev().cloned().collect();
+        self.retrace(&back, limits.velocity_scale, label)?;
+        Ok(end)
     }
 
     /// Both walls along one tool axis, and the middle between them.

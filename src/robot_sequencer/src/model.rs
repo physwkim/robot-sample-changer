@@ -392,6 +392,9 @@ mod tests {
         let h_on0 = model
             .apply_cartesian_offset(&taught(&w.holder1_on_position), ho, false, "o")
             .unwrap();
+        let h_on0 = model
+            .apply_cartesian_offset(&h_on0, [0.0, -w.holder_on_lift, 0.0], false, "olift")
+            .unwrap();
         let sh_standby = taught(&w.sample_holder_standby);
         let sh_on = model
             .apply_cartesian_offset(&taught(&w.sample_holder_on_position), sho, false, "sho")

@@ -22,7 +22,7 @@ use crate::gripper::Gripper;
 use crate::handeye;
 use crate::log;
 use crate::model::{JointMap, Model};
-use crate::motion::{Bracket, Centring, Motion, ProbeLimits, Probed};
+use crate::motion::{Bracket, Centring, Motion, ProbeLimits, Probed, TiltLimits, Tilted};
 use crate::waypoints::WaypointData;
 
 const POLL: Duration = Duration::from_millis(100);
@@ -107,6 +107,7 @@ struct Limits {
     lateral: ProbeLimits,
     depth: ProbeLimits,
     lift: ProbeLimits,
+    tilt: TiltLimits,
 }
 
 struct Axes {
@@ -137,6 +138,8 @@ struct Level {
     brackets: Vec<Bracket>,
     /// `None` when the level did not get as far as the floor.
     floor: Option<Probed>,
+    /// One per axis turned, empty when no tilt was asked for.
+    tilts: Vec<Tilted>,
 }
 
 pub struct Sequencer<'a> {
@@ -647,6 +650,13 @@ impl<'a> Sequencer<'a> {
                 abort_n: p.lift_abort_n,
                 ..depth
             },
+            tilt: TiltLimits {
+                step_rad: p.tilt.step_deg.to_radians(),
+                sweep_rad: p.tilt.sweep_deg.to_radians(),
+                abort_n: p.tilt.abort_n,
+                abort_nm: p.tilt.abort_nm,
+                velocity_scale: p.velocity_scale,
+            },
         };
 
         // The sweep's own failure travels beside its results rather than
@@ -684,6 +694,9 @@ impl<'a> Sequencer<'a> {
             }
             for bracket in level.brackets {
                 log::info(&format!("    {}", bracket.summary()));
+            }
+            for tilt in level.tilts {
+                log::info(&format!("    {}", tilt.summary()));
             }
             // The trip point carries the threshold in it; the fit does
             // not. Both are printed because they disagreeing by more than
@@ -810,6 +823,7 @@ impl<'a> Sequencer<'a> {
                 load: (climb.abs() > f64::EPSILON).then_some(climbed.load),
                 brackets: Vec::new(),
                 floor: None,
+                tilts: Vec::new(),
             });
             let level = levels.last_mut().expect("just pushed");
             // Pushed before it is filled, and filled in place, so that a
@@ -906,6 +920,18 @@ impl<'a> Sequencer<'a> {
             level
                 .brackets
                 .push(motion.bracket_axis(dir, limits.lateral, name)?);
+        }
+        // Turning is last: it is the only motion here that changes the
+        // tool's orientation, and every bracket above measures along an
+        // axis derived from it.
+        if limits.tilt.sweep_rad > 0.0 {
+            for (name, axis) in [
+                ("tilt about base x", axes.x),
+                ("tilt about base y", axes.y),
+                ("tilt about base z", axes.up),
+            ] {
+                level.tilts.push(motion.tilt_scan(axis, limits.tilt, name)?);
+            }
         }
         // Straight down in base, not along whichever tool axis happens
         // to point that way: the seat floor is horizontal and the puck's
@@ -1776,6 +1802,15 @@ impl<'a> Sequencer<'a> {
             holder_offsets,
             false,
             "holder1_on_position",
+        )?;
+        // Up, off the seat: tool y is base -z here. Applied after the
+        // shared trim and only to this pose, so that raising the seat
+        // does not move the standby pose the shared trim also carries.
+        let holder_on = self.model.apply_cartesian_offset(
+            &holder_on,
+            [0.0, -w.holder_on_lift, 0.0],
+            false,
+            "holder_seat_lift",
         )?;
         let sample_holder_standby = taught(&w.sample_holder_standby);
         let sample_holder_on = self.model.apply_cartesian_offset(

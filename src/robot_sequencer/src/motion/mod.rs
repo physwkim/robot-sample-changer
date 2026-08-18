@@ -18,7 +18,7 @@
 mod bringup;
 mod execute;
 mod probe;
-pub use probe::{Bracket, Centring, Probed};
+pub use probe::{Bracket, Centring, Probed, TiltLimits, Tilted};
 mod scene;
 
 pub(crate) use probe::ProbeLimits;
@@ -42,7 +42,7 @@ use cspace_planning::{PlannerConfigurationMap, PlanningRequest, generate_plan};
 // PLANNER_MANAGERS via linkme; without this the linker drops the
 // registration and resolve_planner("rrt_connect") fails.
 use cspace_planners as _;
-use nalgebra::Translation3;
+use nalgebra::{Translation3, UnitQuaternion};
 
 use ur_driver::control::reverse_interface::ReverseInterface;
 use ur_driver::control::script_command_interface::ScriptCommandInterface;
@@ -592,7 +592,74 @@ impl<'m> Motion<'m> {
         let offset_base = tcp_tf.rotation * offset_tcp;
         let target = Translation3::from(offset_base) * tcp_tf;
 
-        let (mut states, mut fraction) = self.interpolate(&start_state, &target, "jog")?;
+        self.fly_to(
+            &start_state,
+            &target,
+            velocity_scale,
+            guard,
+            min_angle_change,
+            "TCP Jog",
+        )
+    }
+
+    /// One step of a tilt probe: turn the tool `rad` about `axis`, a
+    /// direction in the `ik_frame`, without moving the TCP.
+    ///
+    /// About the tool point and not the flange, because the question a
+    /// tilt asks is whether the *sample* is square to its seat and the
+    /// sample is held at the tool point. Turning about the flange would
+    /// swing it through millimetres of arc and answer a different one.
+    ///
+    /// Guarded by contact like [`Motion::probe_step`], and for the same
+    /// reason: inside a seat the scene cannot say what is clear.
+    pub fn probe_twist(
+        &mut self,
+        axis: Vector3,
+        rad: f64,
+        velocity_scale: f64,
+    ) -> Result<(), SequencerError> {
+        if rad == 0.0 {
+            return Ok(());
+        }
+        log::info(&format!(
+            "TCP Twist: {:+.3} deg about tool ({:+.2}, {:+.2}, {:+.2})",
+            rad.to_degrees(),
+            axis.x,
+            axis.y,
+            axis.z
+        ));
+        let start = self.fresh_q()?;
+        let mut start_state = self.model.state_with_joints(&q_to_map(&start))?;
+        let tcp_tf = start_state
+            .update()
+            .global_link_transform(&self.model.ik_frame)
+            .map_err(|e| SequencerError(format!("twist: FK failed: {e}")))?;
+        let turn = UnitQuaternion::from_scaled_axis(axis.normalize() * rad);
+        // Post-multiplied: the axis is the tool's and the centre is the
+        // tool origin, so the TCP stays exactly where it is.
+        let target = tcp_tf * Isometry3::from_parts(Translation3::identity().vector.into(), turn);
+        self.fly_to(
+            &start_state,
+            &target,
+            velocity_scale,
+            Guard::ContactForce,
+            FINE_MIN_ANGLE_CHANGE,
+            "TCP Twist",
+        )
+    }
+
+    /// The half of a jog or a twist that is the same for both: check the
+    /// line, then fly it.
+    fn fly_to(
+        &mut self,
+        start_state: &RobotState<'m>,
+        target: &Isometry3,
+        velocity_scale: f64,
+        guard: Guard,
+        min_angle_change: f64,
+        label: &str,
+    ) -> Result<(), SequencerError> {
+        let (mut states, mut fraction) = self.interpolate(start_state, target, "jog")?;
 
         // The C++ jog went through move_group's Cartesian-path service,
         // whose avoid_collisions default validity-checks every
@@ -618,7 +685,7 @@ impl<'m> Motion<'m> {
         }
         if fraction < self.min_fraction {
             return Err(SequencerError(format!(
-                "TCP Jog: Cartesian path only {:.1}% achieved",
+                "{label}: Cartesian path only {:.1}% achieved",
                 fraction * 100.0
             )));
         }
@@ -631,7 +698,7 @@ impl<'m> Motion<'m> {
             velocity_scale,
             velocity_scale,
             min_angle_change,
-            "TCP Jog",
+            label,
         )
     }
 }
