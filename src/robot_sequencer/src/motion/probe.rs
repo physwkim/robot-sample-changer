@@ -97,6 +97,40 @@ const SAMPLES_PER_READING: usize = 25;
 /// than the step before it.
 const OVERTRAVEL_LOAD_FRACTION: f64 = 0.5;
 
+/// What ends a run of steps — the question the run is asking.
+///
+/// A probe asks *where* something is, and stops the moment the force
+/// says it is here. A move asks to *be* somewhere, and force along the
+/// way is only the abort's business. They cannot share one rule: leaving
+/// a preloaded pose changes the force by as much as touching a wall
+/// does, and the first 0.1 mm of a lift off the taught seat pose
+/// released 5.00 N — five times the depth threshold — with nothing in
+/// the way at all (measured 2026-08-18, doc §16.10).
+#[derive(Debug, Clone, Copy)]
+enum StopAt {
+    /// Force along the axis reaching this, N.
+    Contact(f64),
+    /// The commanded travel, however the force behaves getting there.
+    Travel,
+}
+
+impl StopAt {
+    fn reached(&self, reading: &Reading) -> bool {
+        match self {
+            Self::Contact(threshold_n) => reading.is_contact(*threshold_n),
+            Self::Travel => false,
+        }
+    }
+
+    /// The force this run calls contact, if it is looking for any.
+    fn threshold_n(&self) -> Option<f64> {
+        match self {
+            Self::Contact(n) => Some(*n),
+            Self::Travel => None,
+        }
+    }
+}
+
 /// One probe's worth of stepping: where it started, every place it stood,
 /// and what pushed back there.
 #[derive(Debug, Clone)]
@@ -110,12 +144,11 @@ pub struct Contact {
     pub lateral_n: Vec<f64>,
     /// Force along the probe direction relative to the start pose, N.
     pub along_n: Vec<f64>,
-    /// The force change that counted as contact for this probe, N. Carried
-    /// with the samples because it is what "out of the noise" means for
-    /// them: it was chosen for this axis, against this sample, and
-    /// [`Contact::wall_mm`] needs it to tell a ramp from a rise that is
-    /// still nothing.
-    pub threshold_n: f64,
+    /// What ended this run. Carried with the samples because it is what
+    /// makes them mean anything: a run that was never looking for a wall
+    /// has not found one, and [`Contact::wall_mm`] needs the threshold to
+    /// tell a ramp from a rise that is still nothing.
+    stop: StopAt,
     /// Index into the sample vectors of the step that tripped the contact
     /// threshold, or `None` if the probe ran out of allowance without
     /// touching anything.
@@ -138,12 +171,12 @@ pub struct Contact {
 
 impl Contact {
     /// An empty record for a probe that is about to run.
-    fn new(threshold_n: f64) -> Self {
+    fn new(stop: StopAt) -> Self {
         Self {
             travel_mm: Vec::new(),
             lateral_n: Vec::new(),
             along_n: Vec::new(),
-            threshold_n,
+            stop,
             tripped: None,
             visited: Vec::new(),
         }
@@ -181,6 +214,7 @@ impl Contact {
     /// slope), or the fit comes out flat or backwards (drift, or a grip
     /// letting go — pushing further in must read harder).
     pub fn wall_mm(&self) -> Option<f64> {
+        let threshold_n = self.stop.threshold_n()?;
         let trip = self.tripped?;
         let force: Vec<f64> = self.along_n.iter().map(|f| f.abs()).collect();
         let before = &force[..trip];
@@ -196,7 +230,7 @@ impl Contact {
         // that is not the floor into the fit and halved the slope
         // (2026-08-18). The threshold alone is not enough either: it is
         // what the lateral ramp clears in a single step.
-        let quiet = baseline + (NOISE_MADS * median(&deviations)).max(self.threshold_n / 2.0);
+        let quiet = baseline + (NOISE_MADS * median(&deviations)).max(threshold_n / 2.0);
 
         // The ramp is the run of samples at the end that are out of the
         // noise, found from the last sample backwards: everything after
@@ -461,8 +495,14 @@ impl Motion<'_> {
         limits: ProbeLimits,
         label: &str,
     ) -> Result<Contact, SequencerError> {
-        let mut out = Contact::new(limits.threshold_n);
-        let stepping = self.step_until_contact(dir, limits, label, &mut out);
+        let mut out = Contact::new(StopAt::Contact(limits.threshold_n));
+        let stepping = self.step_along(
+            dir,
+            limits,
+            StopAt::Contact(limits.threshold_n),
+            label,
+            &mut out,
+        );
         // Reversed, so it leaves from where the arm is standing now and
         // ends at the pose the probe began from.
         let back: Vec<JointMap> = out.visited.iter().rev().cloned().collect();
@@ -480,13 +520,15 @@ impl Motion<'_> {
         }
     }
 
-    /// The stepping half of [`Motion::probe_until_contact`], which owns
-    /// the return. Split out so that every way this can leave — including
-    /// `?` on an RTDE read — is a return into code that walks the arm back.
-    fn step_until_contact(
+    /// The stepping half of [`Motion::probe_until_contact`] and of
+    /// [`Motion::probe_reposition`], which own the return. Split out so
+    /// that every way this can leave — including `?` on an RTDE read — is
+    /// a return into code that walks the arm back.
+    fn step_along(
         &mut self,
         dir: Vector3,
         limits: ProbeLimits,
+        stop: StopAt,
         label: &str,
         out: &mut Contact,
     ) -> Result<(), SequencerError> {
@@ -514,10 +556,14 @@ impl Motion<'_> {
         // the force projection is what keeps the slope fit meaningful.
         let base_dir = start_pose.rotation * unit;
         let steps = (limits.travel_mm / limits.step_mm).floor() as usize;
+        let stopping = match stop {
+            StopAt::Contact(n) => format!("contact at {n:.2} N"),
+            StopAt::Travel => "no contact stop — this is a move".to_string(),
+        };
         log::info(&format!(
             "{label}: probing up to {:.2} mm in {} steps of {:.3} mm, \
-             contact at {:.2} N, abort at {:.2} N",
-            limits.travel_mm, steps, limits.step_mm, limits.threshold_n, limits.abort_n
+             {stopping}, abort at {:.2} N",
+            limits.travel_mm, steps, limits.step_mm, limits.abort_n
         ));
 
         out.travel_mm.reserve(steps);
@@ -591,7 +637,7 @@ impl Motion<'_> {
                     limits.abort_n
                 )));
             }
-            if !overtravelling && reading.is_contact(limits.threshold_n) {
+            if !overtravelling && stop.reached(&reading) {
                 out.tripped = Some(out.travel_mm.len() - 1);
                 log::info(&format!("  {label}: contact at {travel:+.3} mm"));
             }
@@ -621,7 +667,7 @@ impl Motion<'_> {
     }
 
     /// Moves `mm` along `dir` in probe-sized steps and **stays there**,
-    /// failing if anything pushes back on the way.
+    /// failing if the arm cannot get there.
     ///
     /// The one motion in this mode that is not a measurement. It exists
     /// because the operator jog cannot do it: [`Motion::jog`] gates on the
@@ -633,11 +679,13 @@ impl Motion<'_> {
     /// that means anything inside a bore, so the height change is made of
     /// probe steps.
     ///
-    /// Contact is a *failure* here, and the inversion is the point:
-    /// arriving is the goal, so meeting something on the way means the
-    /// arm is not where the next measurement would assume. The arm is
-    /// walked back out before the error returns, as everywhere else in
-    /// this file.
+    /// Arriving is the goal, so this asks nothing about where a wall is
+    /// and takes no contact threshold ([`StopAt::Travel`]). What is left
+    /// is the pair of guards that answer "did the arm get there": every
+    /// step must actually execute, and the abort force still bounds how
+    /// hard the arm may lean on the way. A jam trips one or the other —
+    /// the arm stops moving, or it shoves. The arm is walked back out
+    /// before the error returns, as everywhere else in this file.
     pub fn probe_reposition(
         &mut self,
         dir: Vector3,
@@ -655,25 +703,19 @@ impl Motion<'_> {
             ..limits
         };
         let dir = if mm < 0.0 { -dir } else { dir };
-        let mut out = Contact::new(limits.threshold_n);
-        let stepping = self.step_until_contact(dir, limits, label, &mut out);
-        let arrived = stepping.is_ok() && out.tripped.is_none();
-        if arrived {
+        let mut out = Contact::new(StopAt::Travel);
+        let Err(why) = self.step_along(dir, limits, StopAt::Travel, label, &mut out) else {
             return Ok(());
-        }
-        let back: Vec<JointMap> = out.visited.iter().rev().cloned().collect();
-        let returned = self.retrace(&back, limits.velocity_scale, label);
-        let why = match (stepping, out.tripped_mm()) {
-            (Err(e), _) => e.to_string(),
-            (Ok(()), Some(at)) => {
-                format!("something pushed back {at:+.3} mm in, so the move did not finish")
-            }
-            (Ok(()), None) => "the move did not finish".to_string(),
         };
-        Err(SequencerError(match returned {
-            Ok(()) => format!("{label}: {why}"),
-            Err(b) => format!("{label}: {why} — and the arm could not be walked back out: {b}"),
-        }))
+        let back: Vec<JointMap> = out.visited.iter().rev().cloned().collect();
+        Err(SequencerError(
+            match self.retrace(&back, limits.velocity_scale, label) {
+                Ok(()) => format!("{label}: {why}"),
+                Err(b) => {
+                    format!("{label}: {why} — and the arm could not be walked back out: {b}")
+                }
+            },
+        ))
     }
 
     /// Both walls along one tool axis, and the middle between them.
@@ -843,10 +885,36 @@ mod tests {
             travel_mm: travel.to_vec(),
             lateral_n: vec![0.0; travel.len()],
             along_n: along.to_vec(),
-            threshold_n,
+            stop: StopAt::Contact(threshold_n),
             tripped,
             visited: Vec::new(),
         }
+    }
+
+    /// A move is not a measurement. The samples can look exactly like a
+    /// wall — they will, on the way out of a preloaded seat — and there
+    /// is still no wall in them, because nothing was looking for one.
+    #[test]
+    fn a_move_has_no_wall_however_its_force_behaved() {
+        let mut c = with_threshold(
+            &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
+            &[0.0, 0.0, 0.0, 0.0, -1.0, -3.0, -5.0],
+            Some(4),
+            1.0,
+        );
+        assert!(c.wall_mm().is_some());
+        c.stop = StopAt::Travel;
+        assert!(c.wall_mm().is_none());
+    }
+
+    /// The force that ends a probe does not end a move: releasing a 5 N
+    /// preload reads the same as meeting something.
+    #[test]
+    fn a_move_does_not_stop_for_force() {
+        let up = Vector3::z();
+        let releasing = Reading::new(Vector3::new(0.0, 0.0, -5.0), &up);
+        assert!(StopAt::Contact(1.0).reached(&releasing));
+        assert!(!StopAt::Travel.reached(&releasing));
     }
 
     /// The point of the fit: the wall is where the force left the level it
