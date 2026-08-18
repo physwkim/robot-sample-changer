@@ -1754,10 +1754,11 @@ impl<'a> Sequencer<'a> {
         if !self.step_prologue(step, name, start) {
             return Ok(());
         }
+        let gentle = self.config.sequence.cartesian_velocity_scale;
         self.motion.move_cartesian(
             goal,
-            self.config.sequence.velocity_scale,
-            self.config.sequence.acceleration_scale,
+            self.config.sequence.velocity_scale * gentle,
+            self.config.sequence.acceleration_scale * gentle,
             name,
         )?;
         log::info("  -> Completed (Cartesian)");

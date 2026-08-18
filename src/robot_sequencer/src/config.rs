@@ -145,6 +145,18 @@ pub struct SequenceConfig {
     #[serde(default)]
     pub level_tool: LevelToolConfig,
     pub jog_velocity_scale: f64,
+    /// Extra scale on every Cartesian step. The Cartesian steps are the
+    /// choreography around the rack and the stage — approach, insert,
+    /// extract, retreat — while the free-air transits (steps 1, 7, 18)
+    /// are planned moves; this multiplies
+    /// `velocity_scale`/`acceleration_scale` on the former only, so the
+    /// arm moves gently near hardware and keeps its pace between.
+    #[serde(default = "default_cartesian_velocity_scale")]
+    pub cartesian_velocity_scale: f64,
+}
+
+fn default_cartesian_velocity_scale() -> f64 {
+    1.0
 }
 
 #[derive(Debug, Deserialize)]

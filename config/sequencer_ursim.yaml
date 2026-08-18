@@ -60,6 +60,7 @@ sequence:
   cartesian_rotation_step: 0.05
   cartesian_min_fraction: 0.95
   jog_velocity_scale: 0.1
+  cartesian_velocity_scale: 0.2   # as production: gentle around hardware
 
 gripper:
   mode: "simulated"

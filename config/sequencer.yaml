@@ -66,6 +66,11 @@ sequence:
   cartesian_rotation_step: 0.05       # rad
   cartesian_min_fraction: 0.95        # below this: fall back to planned move
   jog_velocity_scale: 0.1             # calibration jog runs slow
+  cartesian_velocity_scale: 0.2       # extra scale on every Cartesian step
+                                      # (the approach/insert/extract legs
+                                      # around the rack and the stage). The
+                                      # planned transits (steps 1/7/18)
+                                      # keep velocity_scale.
 
   # Keep the gripper level through joint-space plans (steps 7 and 18).
   # Those two only constrain the goal, so the planner is free to roll the
