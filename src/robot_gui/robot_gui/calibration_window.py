@@ -460,13 +460,17 @@ class OffsetTableWidget(qt.QWidget):
         loaded = self._loaded_mm.get((row, col))
         return loaded is None or self._get_cell_value(row, col) != loaded
 
-    def get_updated_params(self):
+    def get_updated_params(self, base=None):
         """Get updated parameters from table.
 
         Only fields whose cell was actually edited are overwritten; untouched
-        fields keep their original full-precision YAML value.
+        fields keep their original full-precision YAML value. `base` (when
+        given) supplies those untouched values instead of the load-time
+        snapshot — the save path passes a fresh read of the file so a value
+        someone else wrote since our load (the daemon's holder-map trim
+        persist) survives a save from this window.
         """
-        params = dict(self._params)
+        params = dict(self._params if base is None else base)
 
         single_fields = [
             ('sample_holder_on_position_x_offset', 0, 1),
@@ -631,21 +635,37 @@ class YamlOffsetEditor(qt.QGroupBox):
         if not self._yaml_path:
             return
 
-        # Update params from table
-        updated_params = self.offset_table.get_updated_params()
-
-        # Merge back to yaml data
-        if '/**' in self._yaml_data and 'ros__parameters' in self._yaml_data['/**']:
-            self._yaml_data['/**']['ros__parameters'].update(updated_params)
-        elif 'ros__parameters' in self._yaml_data:
-            self._yaml_data['ros__parameters'].update(updated_params)
+        # The daemon's holder map writes this file too (trim persist), so
+        # merge the edited cells over what is on disk NOW, not over the
+        # snapshot taken when this window loaded it — saving over the
+        # snapshot would silently undo trims written since.
+        try:
+            with open(self._yaml_path) as f:
+                fresh = yaml.safe_load(f)
+        except Exception as e:
+            qt.QMessageBox.critical(
+                self, "Error", f"Failed to re-read YAML before saving:\n{e}")
+            return
+        if '/**' in fresh and 'ros__parameters' in fresh['/**']:
+            fresh_params = fresh['/**']['ros__parameters']
+        elif 'ros__parameters' in fresh:
+            fresh_params = fresh['ros__parameters']
         else:
-            self._yaml_data.update(updated_params)
+            fresh_params = fresh
+
+        updated_params = self.offset_table.get_updated_params(fresh_params)
+        fresh_params.update(updated_params)
+        self._yaml_data = fresh
+        self._params = fresh_params
 
         try:
             with open(self._yaml_path, 'w') as f:
-                yaml.dump(self._yaml_data, f, default_flow_style=None, allow_unicode=True, sort_keys=False)
+                yaml.dump(fresh, f, default_flow_style=None, allow_unicode=True, sort_keys=False)
 
+            # Re-seed the table from what was actually written, so cells that
+            # picked up on-disk changes display them and the edit snapshot
+            # resets.
+            self.offset_table.set_params(fresh_params)
             self.path_label.setText(os.path.basename(self._yaml_path))
             self.path_label.setStyleSheet("color: #4CAF50; font-size: 9px;")
             qt.QMessageBox.information(self, "Saved", "YAML saved!\n다음 로봇 트리거 시 적용됩니다.")
