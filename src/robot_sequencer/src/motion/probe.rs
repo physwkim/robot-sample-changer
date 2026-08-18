@@ -453,6 +453,11 @@ impl Bracket {
         self.walls_mm().map(|(p, m, _)| (p + m) / 2.0)
     }
 
+    /// What this axis is called in the log.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
     /// The directions this axis gave up on at the abort force.
     fn too_hard(&self) -> Vec<&str> {
         [self.plus.too_hard(), self.minus.too_hard()]

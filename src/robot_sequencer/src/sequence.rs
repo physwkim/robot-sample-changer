@@ -89,6 +89,29 @@ struct RunWaypoints {
 
 /// One height's worth of seat probing: where the arm stood, and what it
 /// found from there.
+/// The three base directions the sweep moves along, expressed in the
+/// tool frame of the pose the mode was triggered at.
+///
+/// Taken once, at that pose, because every move here is a pure
+/// translation: the tool orientation does not change, so the axes do not
+/// either, and one set for the whole run is what makes `from_trigger`
+/// add up.
+struct Axes {
+    x: Vector3,
+    y: Vector3,
+    up: Vector3,
+}
+
+impl Axes {
+    fn in_tool(motion: &mut Motion<'_>) -> Result<Self, SequencerError> {
+        Ok(Self {
+            x: motion.base_dir_in_tool(&Vector3::x())?,
+            y: motion.base_dir_in_tool(&Vector3::y())?,
+            up: motion.base_dir_in_tool(&Vector3::z())?,
+        })
+    }
+}
+
 struct Level {
     /// Height above the pose the mode was triggered at, mm.
     height_mm: f64,
@@ -684,21 +707,29 @@ impl<'a> Sequencer<'a> {
         lateral: ProbeLimits,
         depth: ProbeLimits,
     ) -> (Vec<Level>, Result<(), SequencerError>) {
-        let up = match self.motion.base_dir_in_tool(&Vector3::z()) {
-            Ok(up) => up,
+        let axes = match Axes::in_tool(&mut self.motion) {
+            Ok(axes) => axes,
             Err(e) => return (Vec::new(), Err(e)),
         };
-        let heights: Vec<f64> = if self.config.probe.heights_mm.is_empty() {
-            vec![0.0]
-        } else {
-            self.config.probe.heights_mm.clone()
-        };
+        // The trigger pose is level zero and is always measured: it is the
+        // taught pose the sequence itself uses, and the first vertical
+        // move has to start from a centre like every other one.
+        let mut heights = vec![0.0];
+        heights.extend_from_slice(&self.config.probe.heights_mm);
         let mut levels = Vec::new();
-        let mut at = 0.0;
-        let walked = self.walk_heights(&heights, up, lateral, depth, &mut at, &mut levels);
-        let returned = self
-            .motion
-            .probe_reposition(up, -at, depth, "return to the trigger pose");
+        // Where the arm is relative to the trigger pose, in base mm. Every
+        // move this mode makes goes through it, so the way back is one
+        // subtraction rather than a history to replay.
+        let mut from_trigger = Vector3::zeros();
+        let walked = self.walk_heights(
+            &heights,
+            &axes,
+            lateral,
+            depth,
+            &mut from_trigger,
+            &mut levels,
+        );
+        let returned = Self::return_to_trigger(&mut self.motion, &axes, &mut from_trigger, depth);
         let outcome = match (walked, returned) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(e), Ok(())) => Err(e),
@@ -711,26 +742,24 @@ impl<'a> Sequencer<'a> {
     }
 
     /// The walking half of [`Sequence::sweep_heights`], split out so that
-    /// every way it can leave is a return into code that lowers the arm
-    /// back. `at` is where the arm is, in mm above the trigger pose, and
-    /// is updated only by a move that finished.
+    /// every way it can leave is a return into code that puts the arm
+    /// back. `from_trigger` is where the arm stands relative to the pose
+    /// the mode was triggered at, in base mm, and every component is
+    /// updated only by a move that finished.
     fn walk_heights(
         &mut self,
         heights: &[f64],
-        up: Vector3,
+        axes: &Axes,
         lateral: ProbeLimits,
         depth: ProbeLimits,
-        at: &mut f64,
+        from_trigger: &mut Vector3,
         levels: &mut Vec<Level>,
     ) -> Result<(), SequencerError> {
         for &height in heights {
-            self.motion.probe_reposition(
-                up,
-                height - *at,
-                depth,
-                &format!("to {height:+.2} mm"),
-            )?;
-            *at = height;
+            let climb = height - from_trigger.z;
+            self.motion
+                .probe_reposition(axes.up, climb, depth, &format!("to {height:+.2} mm"))?;
+            from_trigger.z = height;
             levels.push(Level {
                 height_mm: height,
                 brackets: Vec::new(),
@@ -741,7 +770,68 @@ impl<'a> Sequencer<'a> {
             // fault part way through a level still leaves the axes it had
             // already measured in the report. This mode writes nothing
             // else — what it printed is the whole of it.
-            Self::measure_level(&mut self.motion, level, lateral, depth)?;
+            Self::measure_level(&mut self.motion, axes, level, lateral, depth)?;
+            Self::centre_here(&mut self.motion, axes, level, from_trigger, lateral)?;
+        }
+        Ok(())
+    }
+
+    /// Moves the arm to the middle of the walls this level measured.
+    ///
+    /// Done after every level because the next thing that happens is a
+    /// vertical move, and a lift that starts off-centre spends the bore's
+    /// clearance sideways on the way up: from the taught pose a straight
+    /// 3 mm lift met 8.17 N of lateral force by +0.316 mm and stopped
+    /// (doc §16.11). A height only means something once x and y are in
+    /// the middle of what is holding the puck.
+    ///
+    /// An axis with no centre — nothing found, one wall only, a direction
+    /// given up on at the abort force — is left alone rather than guessed
+    /// at.
+    fn centre_here(
+        motion: &mut Motion<'a>,
+        axes: &Axes,
+        level: &Level,
+        from_trigger: &mut Vector3,
+        lateral: ProbeLimits,
+    ) -> Result<(), SequencerError> {
+        for (component, (bracket, dir)) in level.brackets.iter().zip([axes.x, axes.y]).enumerate() {
+            let Some(centre) = bracket.centre_mm() else {
+                continue;
+            };
+            if centre.abs() < f64::EPSILON {
+                continue;
+            }
+            let label = format!("centre {} by {centre:+.3} mm", bracket.label());
+            motion.probe_reposition(dir, centre, lateral, &label)?;
+            from_trigger[component] += centre;
+        }
+        Ok(())
+    }
+
+    /// Undoes every move the sweep made, laterally first and then down.
+    ///
+    /// That order and not the other: the lateral offsets were measured at
+    /// height, where the clearance to move in them exists, and lowering
+    /// first would ask the arm to slide sideways with the puck pressed
+    /// back into its seat.
+    fn return_to_trigger(
+        motion: &mut Motion<'a>,
+        axes: &Axes,
+        from_trigger: &mut Vector3,
+        depth: ProbeLimits,
+    ) -> Result<(), SequencerError> {
+        for (dir, component, what) in [
+            (axes.x, 0, "base x"),
+            (axes.y, 1, "base y"),
+            (axes.up, 2, "height"),
+        ] {
+            let back = -from_trigger[component];
+            if back.abs() < f64::EPSILON {
+                continue;
+            }
+            motion.probe_reposition(dir, back, depth, &format!("return the {what}"))?;
+            from_trigger[component] = 0.0;
         }
         Ok(())
     }
@@ -752,12 +842,12 @@ impl<'a> Sequencer<'a> {
     /// live alongside it.
     fn measure_level(
         motion: &mut Motion<'a>,
+        axes: &Axes,
         level: &mut Level,
         lateral: ProbeLimits,
         depth: ProbeLimits,
     ) -> Result<(), SequencerError> {
-        for (name, axis) in [("base x", Vector3::x()), ("base y", Vector3::y())] {
-            let dir = motion.base_dir_in_tool(&axis)?;
+        for (name, dir) in [("base x", axes.x), ("base y", axes.y)] {
             level
                 .brackets
                 .push(motion.bracket_axis(dir, lateral, name)?);
@@ -767,8 +857,7 @@ impl<'a> Sequencer<'a> {
         // own weight is already resting on it, so the probe has to push
         // along the same line that weight acts on for the slope to mean
         // depth.
-        let down = motion.base_dir_in_tool(&(-Vector3::z()))?;
-        level.floor = Some(motion.probe_until_contact(down, depth, "base z-")?);
+        level.floor = Some(motion.probe_until_contact(-axes.up, depth, "base z-")?);
         Ok(())
     }
 
