@@ -1811,6 +1811,21 @@ impl<'a> Sequencer<'a> {
             false,
             "holder_seat_lift",
         )?;
+        // The shared angle is the rack's rigid-body pitch, so it is
+        // applied to the holder-1 pose BEFORE the per-holder
+        // translation on purpose: the 30(N-1) mm step then runs along
+        // the tilted tool y, landing holder N where a rack pitched by
+        // the same angle physically puts it (0.157 mm per holder at
+        // 0.3 deg). Translating untilted instead was tried 2026-08-18
+        // and pushed holder 2 into its +y wall at +0.5 mm while
+        // holder 4 measures centred only with the pitched placement —
+        // the sideways drift is the rack, not an artifact.
+        let holder_on = self.model.apply_tool_point_rotation(
+            &holder_on,
+            [1.0, 0.0, 0.0],
+            w.holder_on_tilt_x_deg.to_radians(),
+            "holder_rack_pitch",
+        )?;
         let sample_holder_standby = taught(&w.sample_holder_standby);
         let sample_holder_on = self.model.apply_cartesian_offset(
             &taught(&w.sample_holder_on_position),
@@ -1898,18 +1913,17 @@ impl<'a> Sequencer<'a> {
             false,
             "on_position",
         )?;
-        // Turned about this holder's own grasp point, after the holder
-        // translation, so the pitch correction moves no position: with
-        // the tilt applied first, the translation runs along the tilted
-        // tool y and drags holder N sideways by 30(N-1)*sin(tilt) mm --
-        // 0.157 mm per holder at 0.3 deg, three times the seat
-        // clearance. The above pose derives from this one and inherits
-        // the pitch, which is what makes the approach come down already
-        // square instead of twisting at the bottom.
+        // The per-holder trim is a local seat error, not rack
+        // geometry, so unlike the shared pitch above it is turned about
+        // this holder's own grasp point after the translation and moves
+        // no position: a trim change tunes only the angle. The above
+        // pose derives from this one and inherits the pitch, which is
+        // what makes the approach come down already square instead of
+        // twisting at the bottom.
         let on_pos = apply_wrist3(self.model.apply_tool_point_rotation(
             &on_pos,
             [1.0, 0.0, 0.0],
-            w.holder_tilt_x_deg(holder_number).to_radians(),
+            w.holder_tilt_x_trim_deg(holder_number).to_radians(),
             "holder_seat_tilt",
         )?);
         let above = apply_wrist3(self.model.apply_cartesian_offset(

@@ -71,18 +71,19 @@ pub struct WaypointData {
 }
 
 impl WaypointData {
-    /// The grip-pose pitch for one holder: the shared angle plus that
-    /// holder's trim.
-    pub fn holder_tilt_x_deg(&self, holder: i32) -> f64 {
-        let trim = if (2..=10).contains(&holder) {
+    /// One holder's own seat-lean trim, deg. The shared
+    /// [`Self::holder_on_tilt_x_deg`] is the rack's rigid-body pitch
+    /// and is applied to the base waypoints; this is only what that
+    /// holder's seat adds on top.
+    pub fn holder_tilt_x_trim_deg(&self, holder: i32) -> f64 {
+        if (2..=10).contains(&holder) {
             self.holder_multi_tilt_x_deg
                 .get((holder - 2) as usize)
                 .copied()
                 .unwrap_or(0.0)
         } else {
             0.0
-        };
-        self.holder_on_tilt_x_deg + trim
+        }
     }
 }
 
@@ -191,7 +192,7 @@ mod tests {
         assert_eq!(data.holder_on_tilt_x_deg, 0.3);
         assert_eq!(data.holder_multi_x_offsets.len(), 9);
         assert_eq!(data.holder_multi_tilt_x_deg.len(), 9);
-        assert_eq!(data.holder_tilt_x_deg(1), data.holder_on_tilt_x_deg);
+        assert_eq!(data.holder_tilt_x_trim_deg(1), 0.0);
         assert_eq!(data.wrist3_rotation_offset, 0.0);
     }
 

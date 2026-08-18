@@ -438,6 +438,14 @@ mod tests {
         let h_on0 = model
             .apply_cartesian_offset(&h_on0, [0.0, -w.holder_on_lift, 0.0], false, "olift")
             .unwrap();
+        let h_on0 = model
+            .apply_tool_point_rotation(
+                &h_on0,
+                [1.0, 0.0, 0.0],
+                w.holder_on_tilt_x_deg.to_radians(),
+                "opitch",
+            )
+            .unwrap();
         let sh_standby = taught(&w.sample_holder_standby);
         let sh_on = model
             .apply_cartesian_offset(&taught(&w.sample_holder_on_position), sho, false, "sho")
@@ -470,13 +478,13 @@ mod tests {
             let on = model
                 .apply_cartesian_offset(&h_on0, [x, y, z], false, "on")
                 .unwrap();
-            // Mirrors compute_run_waypoints: translated untilted, then
-            // pitched about this holder's own grasp point.
+            // Mirrors compute_run_waypoints: rack pitch rides the
+            // base pose, the per-holder trim turns here.
             let on = model
                 .apply_tool_point_rotation(
                     &on,
                     [1.0, 0.0, 0.0],
-                    w.holder_tilt_x_deg(holder).to_radians(),
+                    w.holder_tilt_x_trim_deg(holder).to_radians(),
                     "otilt",
                 )
                 .unwrap();
