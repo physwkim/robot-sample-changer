@@ -101,15 +101,18 @@ gripper:
   reach_tolerance: 0.0015        # m
   settle_timeout: 5.0            # s
   open_threshold: 0.02           # m, Gripper_RBV open/close boundary
-  grip_force: 0.3                # of the Hand-E's 20-185 N, so ~70 N. Full
-                                 # scale is 185 N onto a puck that then has
-                                 # to fit a bore with 0.50 mm of nominal
-                                 # radial clearance, and the gripped puck
-                                 # measures 0.05 mm of freedom in the seat
-                                 # against a free puck's ten times that.
-  grip_speed: 0.2                # of 20-150 mm/s. The close stalls on the
-                                 # sample, so this is the speed the pads
-                                 # arrive at it with.
+  grip_force: 0.05               # of the Hand-E's 20-185 N, so ~28 N, just
+                                 # above the 20 N register floor. The puck
+                                 # hangs in the finger detent, so carrying
+                                 # it needs almost nothing, and the softer
+                                 # the squeeze the less the puck is sprung
+                                 # against its seat (a gripped puck measures
+                                 # 0.05 mm of freedom in the seat against a
+                                 # free puck's ten times that).
+  grip_speed: 0.0                # the Hand-E's own floor, ~20 mm/s. The
+                                 # close stalls on the sample, so this is
+                                 # the speed the pads arrive at it with;
+                                 # the open leaves it at the same pace.
   poll_hz: 50                    # Hand-E background comm rate. The tool-
                                  # comm bridge drops ~1 transaction in a
                                  # few thousand (measured); each cycle is

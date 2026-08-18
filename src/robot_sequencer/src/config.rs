@@ -200,11 +200,11 @@ fn default_gripper_poll_hz() -> u32 {
 }
 
 fn default_grip_force() -> f64 {
-    0.3
+    0.05
 }
 
 fn default_grip_speed() -> f64 {
-    0.2
+    0.0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
