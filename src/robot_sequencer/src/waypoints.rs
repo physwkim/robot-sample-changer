@@ -43,6 +43,17 @@ pub struct WaypointData {
     /// a no-op and starts being a planning failure (measured
     /// 2026-08-18).
     pub holder_on_lift: f64,
+    /// How far the grip pose is turned about base +x before the fingers
+    /// close, deg, positive toward the direction the tilt scan found
+    /// soft.
+    ///
+    /// The scan that motivated it (2026-08-18, gentle grip, raised
+    /// seat): from the seated grip, -0.05 deg about base x met 0.386 Nm
+    /// at once — 7.7 Nm/deg — while +0.30 deg swept clean at a ninth of
+    /// that rate. The taught orientation holds the puck pitched against
+    /// one side of its seat, and closing the fingers on that pitch is
+    /// what loads base y at every height the bracket can reach.
+    pub holder_on_tilt_x_deg: f64,
     pub holder1_on_x_offset: f64,
     pub holder1_on_y_offset: f64,
     pub holder1_on_z_offset: f64,
@@ -100,6 +111,7 @@ impl WaypointData {
             above_y_offset: f64_at(params, "above_y_offset", -0.005),
             retreat_z_offset: f64_at(params, "retreat_z_offset", -0.05),
             holder_on_lift: f64_at(params, "holder_on_position_lift", 0.0),
+            holder_on_tilt_x_deg: f64_at(params, "holder_on_position_tilt_x_deg", 0.0),
             holder1_on_x_offset: f64_at(params, "holder1_on_position_x_offset", 0.0),
             holder1_on_y_offset: f64_at(params, "holder1_on_position_y_offset", 0.0),
             holder1_on_z_offset: f64_at(params, "holder1_on_position_z_offset", 0.0),
@@ -154,6 +166,7 @@ mod tests {
         assert_eq!(data.retreat_z_offset, -0.05);
         assert_eq!(data.holder1_on_y_offset, 0.0005);
         assert_eq!(data.holder_on_lift, 0.00015);
+        assert_eq!(data.holder_on_tilt_x_deg, 0.3);
         assert_eq!(data.holder_multi_x_offsets.len(), 9);
         assert_eq!(data.wrist3_rotation_offset, 0.0);
     }

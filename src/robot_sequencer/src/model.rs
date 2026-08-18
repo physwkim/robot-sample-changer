@@ -167,6 +167,49 @@ impl Model {
         }
     }
 
+    /// Turns `ik_frame` about a base-frame axis through its own origin
+    /// and solves IK back to joints, leaving the tool point where it is.
+    ///
+    /// About the tool point and not the flange, because the corrections
+    /// this exists for are angular teaching errors at the grasp: the
+    /// grasp point is right, the approach angle is not. Same IK-failure
+    /// contract as [`Model::apply_cartesian_offset`]: warn and return
+    /// the original joints.
+    pub fn apply_tool_point_rotation(
+        &self,
+        original: &JointMap,
+        axis_base: [f64; 3],
+        rad: f64,
+        label: &str,
+    ) -> Result<JointMap, SequencerError> {
+        if rad.abs() < 1e-8 {
+            return Ok(original.clone());
+        }
+
+        let mut state = self.state_with_joints(original)?;
+        let current_pose = state
+            .update()
+            .global_link_transform(&self.ik_frame)
+            .map_err(|e| SequencerError(format!("FK to '{}' failed: {e}", self.ik_frame)))?;
+
+        let axis = nalgebra::Vector3::new(axis_base[0], axis_base[1], axis_base[2]);
+        let turn = nalgebra::UnitQuaternion::from_scaled_axis(axis.normalize() * rad);
+        // Rotation applied in base, position kept: the tool origin is the
+        // pivot.
+        let target_pose =
+            Isometry3::from_parts(current_pose.translation, turn * current_pose.rotation);
+
+        match self.ik_from_seed(original, &target_pose, label)? {
+            Some(joints) => Ok(joints),
+            None => {
+                log::warn(&format!(
+                    "{label}: IK failed for tool-point rotation, using original joints"
+                ));
+                Ok(original.clone())
+            }
+        }
+    }
+
     /// Joints putting `ik_frame` at `target`, solved from `seed` so the
     /// result stays on the seed's IK branch — a UR3e pose has up to eight
     /// solutions, and the arm reaching the right point through the wrong
@@ -394,6 +437,14 @@ mod tests {
             .unwrap();
         let h_on0 = model
             .apply_cartesian_offset(&h_on0, [0.0, -w.holder_on_lift, 0.0], false, "olift")
+            .unwrap();
+        let h_on0 = model
+            .apply_tool_point_rotation(
+                &h_on0,
+                [1.0, 0.0, 0.0],
+                w.holder_on_tilt_x_deg.to_radians(),
+                "otilt",
+            )
             .unwrap();
         let sh_standby = taught(&w.sample_holder_standby);
         let sh_on = model

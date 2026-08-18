@@ -1812,6 +1812,16 @@ impl<'a> Sequencer<'a> {
             false,
             "holder_seat_lift",
         )?;
+        // Turned last, about the grasp point, so the pitch correction
+        // moves no position anyone taught. The above pose derives from
+        // this one and inherits it, which is what makes the approach
+        // come down already square instead of twisting at the bottom.
+        let holder_on = self.model.apply_tool_point_rotation(
+            &holder_on,
+            [1.0, 0.0, 0.0],
+            w.holder_on_tilt_x_deg.to_radians(),
+            "holder_seat_tilt",
+        )?;
         let sample_holder_standby = taught(&w.sample_holder_standby);
         let sample_holder_on = self.model.apply_cartesian_offset(
             &taught(&w.sample_holder_on_position),
