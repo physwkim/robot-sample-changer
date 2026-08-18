@@ -62,7 +62,28 @@ pub struct WaypointData {
     pub sample_holder_on_z_offset: f64,
     pub holder_multi_x_offsets: Vec<f64>,
     pub holder_multi_z_offsets: Vec<f64>,
+    /// Per-holder trim added to [`Self::holder_on_tilt_x_deg`], deg,
+    /// holder N at index N-2 like the multi offsets. Each holder's seat
+    /// leans by its own manufacturing error; the shared angle carries
+    /// what the puck geometry needs and this carries the rest.
+    pub holder_multi_tilt_x_deg: Vec<f64>,
     pub wrist3_rotation_offset: f64,
+}
+
+impl WaypointData {
+    /// The grip-pose pitch for one holder: the shared angle plus that
+    /// holder's trim.
+    pub fn holder_tilt_x_deg(&self, holder: i32) -> f64 {
+        let trim = if (2..=10).contains(&holder) {
+            self.holder_multi_tilt_x_deg
+                .get((holder - 2) as usize)
+                .copied()
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        self.holder_on_tilt_x_deg + trim
+    }
 }
 
 fn f64_at(params: &Value, key: &str, default: f64) -> f64 {
@@ -120,6 +141,7 @@ impl WaypointData {
             sample_holder_on_z_offset: f64_at(params, "sample_holder_on_position_z_offset", 0.0),
             holder_multi_x_offsets: vec_at_or(params, "holder_multi_x_offsets", 9),
             holder_multi_z_offsets: vec_at_or(params, "holder_multi_z_offsets", 9),
+            holder_multi_tilt_x_deg: vec_at_or(params, "holder_multi_tilt_x_deg", 9),
             wrist3_rotation_offset: f64_at(params, "wrist3_rotation_offset", 0.0),
         };
 
@@ -168,6 +190,8 @@ mod tests {
         assert_eq!(data.holder_on_lift, 0.00015);
         assert_eq!(data.holder_on_tilt_x_deg, 0.3);
         assert_eq!(data.holder_multi_x_offsets.len(), 9);
+        assert_eq!(data.holder_multi_tilt_x_deg.len(), 9);
+        assert_eq!(data.holder_tilt_x_deg(1), data.holder_on_tilt_x_deg);
         assert_eq!(data.wrist3_rotation_offset, 0.0);
     }
 
