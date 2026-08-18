@@ -507,3 +507,111 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod run_waypoint_goals {
+    use std::path::Path;
+
+    use super::*;
+    use crate::config::Config;
+    use crate::model::{JointMap, Model};
+    use crate::waypoints::WaypointData;
+
+    /// Every holder standby the run computes is a planned-move goal, so it
+    /// must stay on the taught configuration branch, land on its exact
+    /// target pose, and clear the scene. Regression for holder 10
+    /// (2026-08-18): its 275 mm standby offset failed the seed-local IK
+    /// solve, and a random restart converged onto a flipped configuration
+    /// (wrist_3 off by pi, forearm in the stage) — which planning then
+    /// rightly reported as "no goal state satisfying the goal
+    /// constraints", reading like an unreachable holder instead of what
+    /// it was.
+    #[test]
+    fn computed_standbys_stay_on_the_taught_branch_and_clear_the_scene() {
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/sequencer.yaml"
+        ));
+        let config = Config::load(path).expect("config");
+        let model = Model::load(&config).expect("model");
+        let w = WaypointData::load(&config.sequence.waypoints_yaml).expect("waypoints");
+        let assets = load_scene_assets(&config).expect("scene assets");
+        let taught = |v: &[f64]| -> JointMap { WaypointData::arm_joints(v).into_iter().collect() };
+
+        let ho = [
+            w.holder1_on_x_offset,
+            w.holder1_on_y_offset,
+            w.holder1_on_z_offset,
+        ];
+        let h_standby0 = model
+            .apply_cartesian_offset(&taught(&w.holder1_standby), ho, false, "holder1_standby")
+            .expect("h_standby0");
+
+        let mut previous = h_standby0.clone();
+        for holder in 1i32..=10 {
+            let y = f64::from(holder - 1) * config.sequence.holder_offset;
+            let (mut x, mut z) = (0.0, 0.0);
+            if (2..=10).contains(&holder) {
+                let i = (holder - 2) as usize;
+                x = w.holder_multi_x_offsets.get(i).copied().unwrap_or(0.0);
+                z = w.holder_multi_z_offsets.get(i).copied().unwrap_or(0.0);
+            }
+            // The compute_run_waypoints chain, holder-10 end nudge included.
+            let base = if holder == 10 {
+                model
+                    .apply_cartesian_offset(
+                        &h_standby0,
+                        [0.0, -0.005, 0.0],
+                        false,
+                        "holder10_standby",
+                    )
+                    .expect("s10 nudge")
+            } else {
+                h_standby0.clone()
+            };
+            let standby = model
+                .apply_cartesian_offset(&base, [x, y, z], false, "standby")
+                .expect("standby");
+
+            // On target: the silent IK-failure fallback returns the seed
+            // joints, which this catches as a pose mismatch.
+            let target = model.fk(&base).expect("fk base") * Translation3::new(x, y, z);
+            let pose = model.fk(&standby).expect("fk standby");
+            let miss = (pose.translation.vector - target.translation.vector).norm();
+            assert!(
+                miss < 1e-4 && pose.rotation.angle_to(&target.rotation) < 1e-3,
+                "holder {holder} standby missed its target by {:.3} mm",
+                miss * 1e3
+            );
+
+            // On branch: holders sit 30 mm apart, so adjacent standbys
+            // must be adjacent configurations — the measured progression
+            // moves no joint more than 0.21 rad per holder, while the
+            // restart flip jumped wrist_3 by pi and shoulder_lift by
+            // 1.1 rad between holders 9 and 10.
+            for (name, value) in &standby {
+                let step = (value - previous.get(name).unwrap()).abs();
+                assert!(
+                    step < 0.5,
+                    "holder {holder} standby left the taught branch: {name} moved \
+                     {step:.2} rad from holder {}",
+                    holder - 1
+                );
+            }
+            previous = standby.clone();
+
+            let states = [model.state_with_joints(&standby).expect("state")];
+            assert_eq!(
+                first_collision_index(
+                    &model,
+                    &assets,
+                    &config.scene.allow_collisions_with,
+                    &states
+                )
+                .expect("check"),
+                None,
+                "holder {holder} standby collides with the scene"
+            );
+        }
+    }
+}

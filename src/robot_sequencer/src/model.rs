@@ -23,6 +23,12 @@ use crate::error::SequencerError;
 use crate::log;
 use crate::waypoints::WAYPOINT_JOINT_ORDER;
 
+/// Recursion cap for [`Model::ik_from_seed`]'s bisection: 2^6 segments of
+/// the seed-to-target hop, ~4 mm each for the longest offset in use (the
+/// 275 mm holder-10 standby). A hop still failing at that grain is not a
+/// subdivision problem.
+const IK_BISECT_DEPTH: u32 = 6;
+
 /// Named joint positions, the C++ node's `std::map<std::string, double>`.
 pub type JointMap = BTreeMap<String, f64>;
 
@@ -113,10 +119,21 @@ impl Model {
         Ok(pose)
     }
 
-    /// Fresh IK solver for the arm group. Constructed per solve so results
-    /// do not depend on RNG state left behind by earlier solves.
+    /// Fresh IK solver for the arm group, with random restarts disabled.
+    /// Every solve in this daemon continues from a known state — a taught
+    /// pose being offset, or the previous step of an interpolation — and a
+    /// restart's answer is whichever configuration branch a random reseed
+    /// happens to converge to. Holder 10's standby (2026-08-18) came back
+    /// from a restart with wrist_3 flipped by pi and the forearm standing
+    /// in the stage; the planner then rightly refused it as a goal. With
+    /// no restarts a solve either tracks the seed's own branch or fails,
+    /// and failing is the answer the callers know how to handle.
     pub fn solver(&self) -> Result<NewtonRaphsonSolver, SequencerError> {
-        NewtonRaphsonSolver::new(&self.robot, &self.group, &SolverParams::default())
+        let params = SolverParams {
+            max_restarts: 0,
+            ..SolverParams::default()
+        };
+        NewtonRaphsonSolver::new(&self.robot, &self.group, &params)
             .map_err(|e| SequencerError(format!("cannot build IK solver: {e}")))
     }
 
@@ -225,6 +242,32 @@ impl Model {
         label: &str,
     ) -> Result<Option<JointMap>, SequencerError> {
         let mut state = self.state_with_joints(seed)?;
+        let seed_pose = state
+            .update()
+            .global_link_transform(&self.ik_frame)
+            .map_err(|e| SequencerError(format!("FK to '{}' failed: {e}", self.ik_frame)))?;
+        self.bisect_ik(seed, &seed_pose, target, IK_BISECT_DEPTH, label)
+    }
+
+    /// The continuation behind [`Model::ik_from_seed`]: a seed-local
+    /// solve, and when that fails, the hop split at its pose midpoint
+    /// and each half continued from the previous half's solution. The
+    /// solver never restarts (see [`Model::solver`]), so every accepted
+    /// solution is a Newton continuation of the seed — the largest hops
+    /// that converge, which for every offset short enough to solve
+    /// directly is bit-for-bit the single solve this replaces. A finer
+    /// fixed-step walk was tried first and slid across a wrist fold that
+    /// the direct hops never enter, landing holder 8's standby 1.17 rad
+    /// off the arm's own branch.
+    fn bisect_ik(
+        &self,
+        seed: &JointMap,
+        seed_pose: &Isometry3,
+        target: &Isometry3,
+        depth: u32,
+        label: &str,
+    ) -> Result<Option<JointMap>, SequencerError> {
+        let mut state = self.state_with_joints(seed)?;
         let mut solver = self.solver()?;
         let solved = set_from_ik(
             &mut state,
@@ -236,18 +279,30 @@ impl Model {
             &mut IkContext::default(),
         )
         .map_err(|e| SequencerError(format!("{label}: IK error: {e}")))?;
-        if !solved {
+        if solved {
+            let mut updated = JointMap::new();
+            for name in seed.keys() {
+                let value = state
+                    .variable_position(name)
+                    .map_err(|e| SequencerError(format!("cannot read joint '{name}': {e}")))?;
+                updated.insert(name.clone(), value);
+            }
+            return Ok(Some(updated));
+        }
+        if depth == 0 {
             return Ok(None);
         }
 
-        let mut updated = JointMap::new();
-        for name in seed.keys() {
-            let value = state
-                .variable_position(name)
-                .map_err(|e| SequencerError(format!("cannot read joint '{name}': {e}")))?;
-            updated.insert(name.clone(), value);
-        }
-        Ok(Some(updated))
+        let translation = seed_pose
+            .translation
+            .vector
+            .lerp(&target.translation.vector, 0.5);
+        let rotation = seed_pose.rotation.slerp(&target.rotation, 0.5);
+        let midpoint = Isometry3::from_parts(translation.into(), rotation);
+        let Some(at_mid) = self.bisect_ik(seed, seed_pose, &midpoint, depth - 1, label)? else {
+            return Ok(None);
+        };
+        self.bisect_ik(&at_mid, &midpoint, target, depth - 1, label)
     }
 }
 
