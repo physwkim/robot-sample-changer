@@ -59,10 +59,10 @@
 //! the default is set where contact is unambiguous rather than where the
 //! hardware would allow.
 
-use cspace_core::geometry::Vector3;
+use cspace_core::geometry::{Isometry3, Vector3};
 
 use super::{Motion, q_to_map};
-use crate::config::ProbeAxisConfig;
+use crate::config::{CentringConfig, ProbeAxisConfig};
 use crate::error::SequencerError;
 use crate::log;
 use crate::model::JointMap;
@@ -109,6 +109,74 @@ const STEP_COUNT_EPSILON: f64 = 1e-9;
 /// wrongly.
 fn steps_in(travel_mm: f64, step_mm: f64) -> usize {
     (travel_mm / step_mm + STEP_COUNT_EPSILON).floor() as usize
+}
+
+/// How much a compliant climb may move sideways, and what it is aiming
+/// for when it does.
+#[derive(Debug, Clone, Copy)]
+pub struct Centring {
+    /// Sideways force this calls settled, N.
+    pub settled_n: f64,
+    /// One sideways correction, mm.
+    pub step_mm: f64,
+    /// Total sideways path the whole climb may spend, mm.
+    pub travel_mm: f64,
+}
+
+impl Centring {
+    pub fn new(config: &CentringConfig) -> Self {
+        Self {
+            settled_n: config.settled_n,
+            step_mm: config.step_mm,
+            travel_mm: config.travel_mm,
+        }
+    }
+}
+
+/// What a climb has spent moving sideways, and what it has left.
+///
+/// The allowance is spent by path length, not by how far from the line
+/// the arm ended up: a correction that overshoots and comes back has
+/// used the arm's travel twice over, and bounding the net offset would
+/// let a step-for-step oscillation run for ever without ever going
+/// anywhere. Only the net is reported, because that is what the caller
+/// has to undo.
+#[derive(Debug)]
+struct Sideways {
+    net: Vector3,
+    used_mm: f64,
+    allowance_mm: f64,
+}
+
+impl Sideways {
+    fn new(allowance_mm: f64) -> Self {
+        Self {
+            net: Vector3::zeros(),
+            used_mm: 0.0,
+            allowance_mm,
+        }
+    }
+
+    fn room_for(&self, step_mm: f64) -> bool {
+        self.used_mm + step_mm <= self.allowance_mm
+    }
+
+    fn spend(&mut self, step: Vector3) {
+        self.used_mm += step.norm();
+        self.net += step;
+    }
+}
+
+/// Where a compliant climb ended up, and what it was still feeling when
+/// it got there.
+#[derive(Debug, Clone, Copy)]
+pub struct Climbed {
+    /// Sideways offset it spent, base mm, for the caller to undo.
+    pub offset: Vector3,
+    /// Force at the top against the pose it started from, base N. This
+    /// is the number that says whether what gets measured next is the
+    /// hole or the arm leaning on it.
+    pub load: Vector3,
 }
 
 /// What ends a run of steps — the question the run is asking.
@@ -727,6 +795,11 @@ impl Motion<'_> {
             // authors — the thing being pushed, or the arm not going
             // straight — and the force alone cannot name either.
             let drift = (moved - base_dir * moved.dot(&base_dir)) * 1000.0;
+            // And how far the tool has turned, in base mrad. The drift
+            // above is the TCP's, and the TCP is not the sample: a tool
+            // that tips while its origin holds still swings the puck
+            // sideways without changing the number above at all.
+            let twist = (here.rotation * start_pose.rotation.inverse()).scaled_axis() * 1000.0;
             out.travel_mm.push(travel);
             out.along_n.push(reading.along);
             out.lateral_n.push(reading.lateral);
@@ -736,8 +809,9 @@ impl Motion<'_> {
             let f = reading.df;
             log::info(&format!(
                 "  {label}: {travel:+.3} mm, along {:+.3} N | base force \
-                 ({:+.2}, {:+.2}, {:+.2}) N, base drift ({:+.3}, {:+.3}, {:+.3}) mm",
-                reading.along, f.x, f.y, f.z, drift.x, drift.y, drift.z
+                 ({:+.2}, {:+.2}, {:+.2}) N, base drift ({:+.3}, {:+.3}, {:+.3}) mm, \
+                 twist ({:+.2}, {:+.2}, {:+.2}) mrad",
+                reading.along, f.x, f.y, f.z, drift.x, drift.y, drift.z, twist.x, twist.y, twist.z
             ));
             if reading.is_overload(limits.abort_n) {
                 return Ok(Stopped::TooHard(format!(
@@ -842,6 +916,265 @@ impl Motion<'_> {
         })
     }
 
+    /// The force change against `reference`, base N, without moving or
+    /// recording anything.
+    fn wrench_change(&mut self, reference: [f64; 6]) -> Result<Vector3, SequencerError> {
+        let (_, now) = self
+            .rtde
+            .session()?
+            .mean_q_and_wrench(SAMPLES_PER_READING)?;
+        Ok(Vector3::new(
+            now[0] - reference[0],
+            now[1] - reference[1],
+            now[2] - reference[2],
+        ))
+    }
+
+    /// Reads where the arm is and what it feels, records it, and returns
+    /// the force change against `reference` in base coordinates.
+    fn record(
+        &mut self,
+        out: &mut Contact,
+        reference: [f64; 6],
+        base_dir: &Vector3,
+        start_pose: &Isometry3,
+        label: &str,
+    ) -> Result<Vector3, SequencerError> {
+        let (q, now) = self
+            .rtde
+            .session()?
+            .mean_q_and_wrench(SAMPLES_PER_READING)?;
+        let here_joints = q_to_map(&q);
+        out.visited.push(here_joints.clone());
+        let df = Vector3::new(
+            now[0] - reference[0],
+            now[1] - reference[1],
+            now[2] - reference[2],
+        );
+        let here = self.model.fk(&here_joints)?;
+        let moved = here.translation.vector - start_pose.translation.vector;
+        let travel = moved.dot(base_dir) * 1000.0;
+        out.travel_mm.push(travel);
+        out.along_n.push(df.dot(base_dir));
+        out.lateral_n
+            .push((df - base_dir * df.dot(base_dir)).norm());
+        log::info(&format!(
+            "  {label}: {travel:+.3} mm | base force ({:+.2}, {:+.2}, {:+.2}) N",
+            df.x, df.y, df.z
+        ));
+        Ok(df)
+    }
+
+    fn check_load(&self, df: &Vector3, abort_n: f64, label: &str) -> Result<(), SequencerError> {
+        if df.norm() >= abort_n {
+            return Err(SequencerError(format!(
+                "{label}: {:.2} N exceeds the {abort_n:.2} N abort limit",
+                df.norm()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Moves sideways until the load has settled, or until stepping
+    /// further stops relieving it.
+    ///
+    /// The direction that relieves a load is the one opposite the force
+    /// the arm reports: a probe driven into a wall in base x+ reads its
+    /// own push as +x, so yielding is -x. That is checked rather than
+    /// trusted, and checked against the resolution the arm actually has.
+    /// 0.05 mm is the smallest step it executes — 0.008 mm was commanded
+    /// and -0.004 mm moved (doc §16.4) — and against the 30 N/mm this
+    /// seat answered a lift with, one such step is 1.5 N. A settled
+    /// force below that is not reachable by stepping, however many steps
+    /// are taken, so two consecutive steps that fail to reduce the load
+    /// end the correction rather than fail it: that is the minimum this
+    /// rig can find, and the residual travels back with the level it was
+    /// measured at.
+    ///
+    /// Spending the whole sideways allowance is the other ending, and
+    /// that one is a failure — the puck is being driven somewhere
+    /// nothing asked it to go, and the arm should not climb further with
+    /// it.
+    #[allow(clippy::too_many_arguments)]
+    fn centre_out(
+        &mut self,
+        base_side: &[Vector3; 2],
+        centring: Centring,
+        lift: ProbeLimits,
+        reference: [f64; 6],
+        start_pose: &Isometry3,
+        label: &str,
+        out: &mut Contact,
+        spent: &mut Sideways,
+    ) -> Result<Vector3, SequencerError> {
+        let mut worse = 0;
+        let mut df = self.wrench_change(reference)?;
+        loop {
+            let (which, force) = base_side
+                .iter()
+                .enumerate()
+                .map(|(i, dir)| (i, df.dot(dir)))
+                .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
+                .expect("two axes");
+            if force.abs() <= centring.settled_n {
+                return Ok(df);
+            }
+            if !spent.room_for(centring.step_mm) {
+                return Err(SequencerError(format!(
+                    "{label}: {force:+.2} N sideways is still there after spending the \
+                     {:.2} mm of correction allowed — the climb is not going \
+                     to centre itself",
+                    centring.travel_mm
+                )));
+            }
+            // Yield: move the way the load is pushing, not into it.
+            let step = base_side[which] * (-force.signum() * centring.step_mm);
+            let d = start_pose.rotation.inverse() * step;
+            self.probe_step(d.x, d.y, d.z, lift.velocity_scale)?;
+            spent.spend(step);
+            df = self.record(
+                out,
+                reference,
+                &base_side[which],
+                start_pose,
+                &format!("{label} sideways"),
+            )?;
+            self.check_load(&df, lift.abort_n, label)?;
+            if df.dot(&base_side[which]).abs() >= force.abs() {
+                worse += 1;
+                if worse >= 2 {
+                    log::info(&format!(
+                        "  {label}: {force:+.2} N did not fall in two {:.3} mm steps \
+                         — this is as centred as the arm can step, and the level \
+                         below is measured carrying it",
+                        centring.step_mm
+                    ));
+                    return Ok(df);
+                }
+            } else {
+                worse = 0;
+            }
+        }
+    }
+
+    /// Climbs `mm` along `up`, stopping between steps to move sideways
+    /// until the force is back to nothing.
+    ///
+    /// A straight climb out of the seat does not stay straight. Lifting
+    /// off the taught pose, the base y force grew to 14.30 N by +0.5 mm
+    /// while the TCP stayed within 0.018 mm of the line it was sent along
+    /// and the tool within 0.4 mrad of its orientation — and the same
+    /// climb in free air stayed under 0.15 N on every axis (doc §16.13).
+    /// So the sideways load is something driving the puck, not the arm
+    /// wandering, and a bracket measured with 14 N of it applied measures
+    /// the arm's deflection rather than the hole.
+    ///
+    /// The force is read against one reference taken before the first
+    /// step, not against the previous step, so what is being nulled is
+    /// the whole load the climb has built rather than the last increment
+    /// of it. `settled_n` is what counts as nothing — the same figure the
+    /// lateral probe calls contact, because below that this rig cannot
+    /// tell a load from its own noise.
+    ///
+    /// Returns the sideways offset it spent, in base mm, so the caller
+    /// can put the arm back where it started, and the load it was
+    /// carrying when it arrived.
+    pub fn climb_centred(
+        &mut self,
+        up: Vector3,
+        sideways: [Vector3; 2],
+        mm: f64,
+        lift: ProbeLimits,
+        centring: Centring,
+        label: &str,
+    ) -> Result<Climbed, SequencerError> {
+        if mm.abs() < f64::EPSILON {
+            return Ok(Climbed {
+                offset: Vector3::zeros(),
+                load: Vector3::zeros(),
+            });
+        }
+        let mut out = Contact::new(StopAt::Travel);
+        match self.climb_steps(up, sideways, mm, lift, centring, label, &mut out) {
+            Ok(climbed) => Ok(climbed),
+            Err(e) => {
+                let back: Vec<JointMap> = out.visited.iter().rev().cloned().collect();
+                Err(match self.retrace(&back, lift.velocity_scale, label) {
+                    Ok(()) => e,
+                    Err(b) => SequencerError(format!(
+                        "{e} — and the arm could not be walked back out: {b}"
+                    )),
+                })
+            }
+        }
+    }
+
+    /// The stepping half of [`Motion::climb_centred`], which owns the
+    /// return.
+    #[allow(clippy::too_many_arguments)]
+    fn climb_steps(
+        &mut self,
+        up: Vector3,
+        sideways: [Vector3; 2],
+        mm: f64,
+        lift: ProbeLimits,
+        centring: Centring,
+        label: &str,
+        out: &mut Contact,
+    ) -> Result<Climbed, SequencerError> {
+        let up = if mm < 0.0 { -up } else { up };
+        let steps = (mm.abs() / lift.step_mm - STEP_COUNT_EPSILON)
+            .ceil()
+            .max(1.0);
+        let step_mm = mm.abs() / steps;
+        let (start_q, reference) = self
+            .rtde
+            .session()?
+            .mean_q_and_wrench(SAMPLES_PER_READING)?;
+        let start_joints = q_to_map(&start_q);
+        let start_pose = self.model.fk(&start_joints)?;
+        let base_up = start_pose.rotation * up;
+        let base_side = [
+            start_pose.rotation * sideways[0],
+            start_pose.rotation * sideways[1],
+        ];
+        out.visited.push(start_joints);
+        log::info(&format!(
+            "{label}: climbing {mm:+.2} mm in {steps} steps of {step_mm:.3} mm, \
+             keeping the sideways force under {:.2} N with up to {:.2} mm of \
+             correction, abort at {:.2} N",
+            centring.settled_n, centring.travel_mm, lift.abort_n
+        ));
+
+        let mut spent = Sideways::new(centring.travel_mm);
+        let mut load = Vector3::zeros();
+        for _ in 0..steps as usize {
+            let d = up * step_mm;
+            self.probe_step(d.x, d.y, d.z, lift.velocity_scale)?;
+            let df = self.record(out, reference, &base_up, &start_pose, label)?;
+            self.check_load(&df, lift.abort_n, label)?;
+            load = self.centre_out(
+                &base_side,
+                centring,
+                lift,
+                reference,
+                &start_pose,
+                label,
+                out,
+                &mut spent,
+            )?;
+        }
+        log::info(&format!(
+            "{label}: arrived carrying ({:+.2}, {:+.2}, {:+.2}) N after {:.3} mm \
+             of sideways correction, net ({:+.3}, {:+.3}) mm in base x and y",
+            load.x, load.y, load.z, spent.used_mm, spent.net.x, spent.net.y
+        ));
+        Ok(Climbed {
+            offset: spent.net,
+            load,
+        })
+    }
+
     /// Both walls along one tool axis, and the middle between them.
     ///
     /// Everything is measured from the pose the arm starts at.
@@ -896,6 +1229,26 @@ mod tests {
     use crate::config::Config;
     use crate::model::Model;
     use crate::waypoints::WaypointData;
+
+    /// A correction that steps one way and back has moved the arm
+    /// nowhere and spent two steps doing it. The allowance has to see
+    /// the two steps, because it is the only thing that ends a
+    /// correction the load will not settle under: bounded by the net
+    /// offset instead, a step-for-step oscillation never reaches the
+    /// limit and the climb never returns.
+    #[test]
+    fn an_oscillating_correction_spends_its_allowance() {
+        let mut spent = Sideways::new(0.10);
+        let step = Vector3::x() * 0.05;
+        assert!(spent.room_for(0.05));
+        spent.spend(step);
+        spent.spend(-step);
+        assert_eq!(spent.net, Vector3::zeros(), "back where it started");
+        assert!(
+            !spent.room_for(0.05),
+            "two 0.05 mm steps have spent a 0.10 mm allowance, however they cancelled"
+        );
+    }
 
     /// Why [`Motion::probe_step`] carries its own TOTG threshold, as an
     /// assertion rather than a comment: at the poses the probe actually

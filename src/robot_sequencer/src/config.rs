@@ -289,6 +289,51 @@ pub struct ProbeAxisConfig {
     pub overtravel_steps: usize,
 }
 
+/// How a climb between probe heights keeps the puck unloaded on the way.
+///
+/// Its own block because it is a controller, not a probe: it has no
+/// contact threshold and no travel to report, and the numbers it needs
+/// are what counts as nothing, how big a nudge is, and how far it may
+/// wander before the answer is that something is dragging the puck.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct CentringConfig {
+    /// Sideways force the climb calls settled, N.
+    ///
+    /// The floor is set by the arm, not by taste: 0.05 mm is the
+    /// smallest step it executes, and the seat answered a lift with
+    /// 30 N/mm, so one step is 1.5 N there and nothing below that is
+    /// reachable by stepping. This sits under that on purpose — the
+    /// correction stops on its own once two steps in a row fail to
+    /// relieve the load, and reports what is left — so that a direction
+    /// which *is* soft enough gets centred properly instead of stopping
+    /// at a threshold chosen for the stiff one. Free air, gripped and
+    /// clear of the holder, is 0.14 N (doc §16.13).
+    pub settled_n: f64,
+    /// One sideways correction, mm.
+    pub step_mm: f64,
+    /// Total sideways path one climb may spend, mm.
+    ///
+    /// Path, not net offset: an oscillation spends this without going
+    /// anywhere, which is what stops it running for ever.
+    pub travel_mm: f64,
+}
+
+impl Default for CentringConfig {
+    fn default() -> Self {
+        Self {
+            settled_n: 1.0,
+            // The lateral probe's step, and for the same reason: it is
+            // the smallest move this arm reliably executes.
+            step_mm: 0.05,
+            // Twice the nominal 0.50 mm radial clearance. Past that the
+            // puck is not being centred in its bore, it is being pushed
+            // somewhere else.
+            travel_mm: 1.0,
+        }
+    }
+}
+
 /// Force-stopped seat probing (`CalibMode` = Seat Probe). Commissioning
 /// only: it measures where a bore actually is, which a taught pose only
 /// records an operator's belief about.
@@ -358,6 +403,15 @@ pub struct ProbeConfig {
     pub lateral: ProbeAxisConfig,
     /// Downward, toward the seat floor.
     pub depth: ProbeAxisConfig,
+    /// Keeping the sideways force at nothing while changing height.
+    ///
+    /// A straight climb out of the taught seat pose built 14.30 N in
+    /// base y by +0.5 mm while the TCP stayed within 0.018 mm of the
+    /// line it was sent along, and the same climb in free air stayed
+    /// under 0.15 N (doc §16.13). Brackets measured at the top of the
+    /// straight climb measure the arm's deflection under that load; the
+    /// point of the correction is that they measure the hole instead.
+    pub centring: CentringConfig,
 }
 
 impl Default for ProbeConfig {
@@ -415,6 +469,7 @@ impl Default for ProbeConfig {
                 // sample in the hard part of the contact.
                 overtravel_steps: 2,
             },
+            centring: CentringConfig::default(),
         }
     }
 }
@@ -604,6 +659,35 @@ impl Config {
                     .into(),
             ));
         }
+        let centring = &config.probe.centring;
+        // Below the arm's own scatter standing still (0.073 N, §16.1)
+        // there is no load to null; above a lateral probe's contact
+        // threshold the climb would carry a load the brackets then call
+        // a wall.
+        if !(0.2..=5.0).contains(&centring.settled_n) {
+            return Err(SequencerError(
+                "probe.centring.settled_n must be within 0.2..5 N (below that is \
+                 the arm's own noise, above it is what a probe calls a wall)"
+                    .into(),
+            ));
+        }
+        // A correction below the smallest step the arm executes does not
+        // happen at all, and one above the radial clearance moves the
+        // puck across the bore in a single nudge.
+        if !(0.02..=0.5).contains(&centring.step_mm) {
+            return Err(SequencerError(
+                "probe.centring.step_mm must be within 0.02..0.5 mm".into(),
+            ));
+        }
+        // Zero would fail the first correction it needed rather than
+        // disable correcting, so the range starts at one step's worth.
+        if !(centring.step_mm..=3.0).contains(&centring.travel_mm) {
+            return Err(SequencerError(
+                "probe.centring.travel_mm must be within one step and 3 mm (a climb \
+                 that has moved further sideways than that is not centring)"
+                    .into(),
+            ));
+        }
         if !(0.0..=5.0).contains(&config.probe.loosen_mm) {
             return Err(SequencerError(
                 "probe.loosen_mm must be within 0..5 (the fingers must find the sample again)"
@@ -767,6 +851,24 @@ mod tests {
                 "lift_abort_high",
                 "probe:\n  lift_abort_n: 30.0\n",
                 "probe.lift_abort_n",
+            ),
+            // The climb's correction has the same shape of risk as the
+            // probes' own numbers: it moves a gripped sample sideways
+            // inside a bore on a force reading.
+            (
+                "centring_settled_under_noise",
+                "probe:\n  centring:\n    settled_n: 0.05\n",
+                "probe.centring.settled_n",
+            ),
+            (
+                "centring_step_too_small",
+                "probe:\n  centring:\n    step_mm: 0.005\n",
+                "probe.centring.step_mm",
+            ),
+            (
+                "centring_travel_under_one_step",
+                "probe:\n  centring:\n    step_mm: 0.1\n    travel_mm: 0.05\n",
+                "probe.centring.travel_mm",
             ),
             // A slipped decimal point here opens the fingers 12 mm over an
             // open rack with a sample in them.

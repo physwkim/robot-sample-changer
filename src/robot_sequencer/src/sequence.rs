@@ -22,7 +22,7 @@ use crate::gripper::Gripper;
 use crate::handeye;
 use crate::log;
 use crate::model::{JointMap, Model};
-use crate::motion::{Bracket, Motion, ProbeLimits, Probed};
+use crate::motion::{Bracket, Centring, Motion, ProbeLimits, Probed};
 use crate::waypoints::WaypointData;
 
 const POLL: Duration = Duration::from_millis(100);
@@ -128,6 +128,12 @@ impl Axes {
 struct Level {
     /// Height above the pose the mode was triggered at, mm.
     height_mm: f64,
+    /// What the arm was still feeling when it arrived here, base N, and
+    /// `None` at the level it was triggered at, which it did not climb
+    /// to. This is what says whether the brackets below it measured the
+    /// hole or the arm being leant on: in free air the same climb
+    /// carries 0.14 N (doc §16.13).
+    load: Option<Vector3>,
     brackets: Vec<Bracket>,
     /// `None` when the level did not get as far as the floor.
     floor: Option<Probed>,
@@ -670,6 +676,12 @@ impl<'a> Sequencer<'a> {
                     level.height_mm
                 ));
             }
+            if let Some(load) = level.load {
+                log::info(&format!(
+                    "    arrived carrying ({:+.2}, {:+.2}, {:+.2}) N in base x, y, z",
+                    load.x, load.y, load.z
+                ));
+            }
             for bracket in level.brackets {
                 log::info(&format!("    {}", bracket.summary()));
             }
@@ -739,7 +751,15 @@ impl<'a> Sequencer<'a> {
         // move this mode makes goes through it, so the way back is one
         // subtraction rather than a history to replay.
         let mut from_trigger = Vector3::zeros();
-        let walked = self.walk_heights(&heights, &axes, limits, &mut from_trigger, &mut levels);
+        let centring = Centring::new(&self.config.probe.centring);
+        let walked = self.walk_heights(
+            &heights,
+            &axes,
+            limits,
+            centring,
+            &mut from_trigger,
+            &mut levels,
+        );
         let returned = Self::return_to_trigger(&mut self.motion, &axes, &mut from_trigger, limits);
         let outcome = match (walked, returned) {
             (Ok(()), Ok(())) => Ok(()),
@@ -757,25 +777,37 @@ impl<'a> Sequencer<'a> {
     /// back. `from_trigger` is where the arm stands relative to the pose
     /// the mode was triggered at, in base mm, and every component is
     /// updated only by a move that finished.
+    #[allow(clippy::too_many_arguments)]
     fn walk_heights(
         &mut self,
         heights: &[f64],
         axes: &Axes,
         limits: Limits,
+        centring: Centring,
         from_trigger: &mut Vector3,
         levels: &mut Vec<Level>,
     ) -> Result<(), SequencerError> {
         for &height in heights {
             let climb = height - from_trigger.z;
-            self.motion.probe_reposition(
+            // Not a plain move: a lift out of the seat drags the puck
+            // sideways with 30 N/mm behind it, and a bracket measured
+            // under that load is the arm's deflection rather than the
+            // bore. The climb gives way to it step by step, so what it
+            // spends sideways is part of where the arm now stands.
+            let climbed = self.motion.climb_centred(
                 axes.up,
+                [axes.x, axes.y],
                 climb,
                 limits.lift,
+                centring,
                 &format!("to {height:+.2} mm"),
             )?;
+            from_trigger.x += climbed.offset.x;
+            from_trigger.y += climbed.offset.y;
             from_trigger.z = height;
             levels.push(Level {
                 height_mm: height,
+                load: (climb.abs() > f64::EPSILON).then_some(climbed.load),
                 brackets: Vec::new(),
                 floor: None,
             });
