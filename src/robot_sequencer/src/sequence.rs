@@ -1882,6 +1882,12 @@ impl<'a> Sequencer<'a> {
         }
         self.gripper.command(open);
         self.gripper.wait_reached(open, &self.epics);
+        if !open && let Some(settled) = self.gripper.empty_close() {
+            return Err(SequencerError(format!(
+                "{name}: the fingers closed to {:.1} mm — nothing was                  gripped; the seat this step picked from is empty",
+                settled * 1000.0
+            )));
+        }
         log::info("  -> Completed");
         self.step_epilogue(step)
     }

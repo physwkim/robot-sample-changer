@@ -193,6 +193,13 @@ pub struct GripperConfig {
     /// sample, so this is the speed the pads arrive at it with.
     #[serde(default = "default_grip_speed")]
     pub grip_speed: f64,
+    /// A sequence close that settles narrower than this gripped nothing
+    /// — the pads met each other, not a puck — and the step fails
+    /// instead of the run building on an empty hand. Metres; 0 disables.
+    /// Ignored by the simulated gripper, whose fingers always reach the
+    /// commanded position exactly.
+    #[serde(default)]
+    pub min_grip_position: f64,
 }
 
 fn default_gripper_poll_hz() -> u32 {

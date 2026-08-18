@@ -101,6 +101,11 @@ gripper:
   reach_tolerance: 0.0015        # m
   settle_timeout: 5.0            # s
   open_threshold: 0.02           # m, Gripper_RBV open/close boundary
+  min_grip_position: 0.008       # m; a sequence close settling narrower than
+                                 # this gripped nothing and the step fails.
+                                 # The puck neck grips at 11.4 mm; the close
+                                 # over holder 2's emptied seat settled at
+                                 # 3.9 mm (2026-08-19).
   grip_force: 0.05               # of the Hand-E's 20-185 N, so ~28 N, just
                                  # above the 20 N register floor. The puck
                                  # hangs in the finger detent, so carrying

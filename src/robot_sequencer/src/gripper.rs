@@ -50,6 +50,7 @@ pub struct Gripper {
     /// sequence grips" is a single configured thing rather than a
     /// constant per call site.
     grip: Grip,
+    min_grip_position: f64,
     last_rbv: Option<i32>,
 }
 
@@ -90,6 +91,7 @@ impl Gripper {
                 force: g.grip_force,
                 speed: g.grip_speed,
             },
+            min_grip_position: g.min_grip_position,
             last_rbv: None,
         })
     }
@@ -179,6 +181,19 @@ impl Gripper {
     /// callers comparing two settle positions.
     pub fn reach_tolerance(&self) -> f64 {
         self.reach_tolerance
+    }
+
+    /// After a close: `Some(settled_m)` when the fingers came to rest
+    /// narrower than `min_grip_position`, i.e. on each other rather than
+    /// on a puck. Only meaningful on the real gripper — the simulated
+    /// backend reaches the commanded position exactly, so it always
+    /// answers `None` — and only when the threshold is configured.
+    pub fn empty_close(&self) -> Option<f64> {
+        if matches!(self.backend, Backend::Simulated { .. }) || self.min_grip_position <= 0.0 {
+            return None;
+        }
+        let settled = self.position();
+        (settled < self.min_grip_position).then_some(settled)
     }
 
     /// Port of the C++ `wait_gripper_reached`: block until the gripper
