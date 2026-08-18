@@ -53,6 +53,13 @@ pub enum CalibMode {
     /// sequence; unlike every other mode it moves until something pushes
     /// back rather than to a pose.
     SeatProbe,
+    /// One trigger, one holder mapped: fetch the puck (from `MapSource`
+    /// through the sample holder, or in place when that is 0 or the
+    /// target itself), run the seat probe without a jog hold, and leave
+    /// the puck seated in the target. Replaces the external caput
+    /// orchestration that drove the same tour through
+    /// StartStep/PauseStep/Wait.
+    HolderMap,
 }
 
 /// `Robot:Vision:Kind` request codes (mbbo).
@@ -110,6 +117,7 @@ pub struct Epics {
     pause_step: CaChannel,
     calib_mode: CaChannel,
     loaded: CaChannel,
+    map_source: Option<CaChannel>,
     jog_x: Option<CaChannel>,
     jog_y: Option<CaChannel>,
     jog_z: Option<CaChannel>,
@@ -141,7 +149,8 @@ fn value_to_f64(value: &EpicsValue) -> Option<f64> {
 }
 
 impl Epics {
-    /// Connects every PV. The jog PVs are optional (warn and disable, as
+    /// Connects every PV. The jog and map-source PVs are optional (warn
+    /// and disable, as
     /// the C++ node did); all others are required. When `vision` is
     /// given (vision enabled), every vision PV is required too — failing
     /// at startup beats failing mid-sequence over a slot.
@@ -166,7 +175,9 @@ impl Epics {
             match rt.block_on(channel.wait_connected(CONNECT_TIMEOUT)) {
                 Ok(()) => Some(channel),
                 Err(_) => {
-                    log::warn(&format!("PV '{name}' not connected (jog disabled)"));
+                    log::warn(&format!(
+                        "PV '{name}' not connected — optional, continuing without it"
+                    ));
                     None
                 }
             }
@@ -200,6 +211,7 @@ impl Epics {
             pause_step: required(&config.pause_step_pv)?,
             calib_mode: required(&config.calib_mode_pv)?,
             loaded: required(&config.loaded_pv)?,
+            map_source: optional(&config.map_source_pv),
             jog_x: optional(&config.jog_x_pv),
             jog_y: optional(&config.jog_y_pv),
             jog_z: optional(&config.jog_z_pv),
@@ -265,6 +277,24 @@ impl Epics {
         holder
     }
 
+    /// Map-mode puck source holder; 0 — also a missing PV or a bad read
+    /// — means the target holder itself, probed in place.
+    pub fn read_map_source(&self) -> i32 {
+        let v = self
+            .map_source
+            .as_ref()
+            .and_then(|ch| self.get_i32(ch, GET_TIMEOUT))
+            .unwrap_or(0);
+        if (0..=10).contains(&v) {
+            v
+        } else {
+            log::warn(&format!(
+                "Invalid map source {v} from PV, using 0 (in place)"
+            ));
+            0
+        }
+    }
+
     pub fn read_stop(&self) -> i32 {
         self.get_i32(&self.stop, GET_TIMEOUT).unwrap_or(0)
     }
@@ -284,6 +314,7 @@ impl Epics {
             Some(3) => CalibMode::HandEye,
             Some(4) => CalibMode::Recover,
             Some(5) => CalibMode::SeatProbe,
+            Some(6) => CalibMode::HolderMap,
             _ => CalibMode::Normal,
         }
     }

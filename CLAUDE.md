@@ -135,9 +135,10 @@ ws/
 |---------|------|------|
 | Robot:Trigger | bo | 시퀀스 시작 트리거 (0=Off, 1=On) |
 | Robot:Wait | mbbo | 측정 대기 상태 (0=Wait, 1=Continue, 2=Abort) |
-| Robot:CalibMode | mbbo | 캘리브레이션 모드 (0=Normal, 1=Holder Calib, 2=Sample Holder Calib, 3=Hand-Eye Calib) |
+| Robot:CalibMode | mbbo | 캘리브레이션 모드 (0=Normal, 1=Holder Calib, 2=Sample Holder Calib, 3=Hand-Eye Calib, 4=Recover, 5=Seat Probe, 6=Holder Map) |
 | Robot:StartStep | longout | 시작 스텝 번호 (0-300) |
 | Robot:Holder | longout | 홀더 번호 (1-10) |
+| Robot:MapSource | longout | 홀더 맵 퍽 소스 홀더 (0=대상 홀더 자체, 1-10) |
 | Robot:Stop | bo | 일시정지 요청 (0=Run, 1=Pause) |
 | Robot:CurrentStep | longin | 현재 실행 중인 스텝 (0-30) |
 | Robot:PauseStep | longin | 지정 스텝에서 일시정지 |
@@ -181,6 +182,17 @@ Offset)를 측정해 다음 놓기 보정에 합산하고, 스텝 12/23 후 안�
 캘리브레이션 모드에는 훅이 없습니다(티칭 오차를 가리므로). 카메라 없는
 리허설은 `vision_sim` 바이너리가 비전 노드를 대신합니다
 (`vision_sim --dx 0.8 --grip-dx 0.3` 등, src/bin/vision_sim.rs).
+
+### 홀더 맵핑 (`CalibMode=6`)
+
+트리거 한 번으로 홀더 하나를 프로브: `MapSource`의 퍽을 스테이지
+경유로 `Holder`에 안착시키고(0 또는 대상과 같으면 제자리 퍽 사용),
+jog hold 없이 시트 프로브를 돌린 뒤 퍽을 그 자리에 남기고 스탠바이로
+복귀합니다. 스텝 번호와 웨이포인트는 Normal 시퀀스 그대로라
+PauseStep/CurrentStep이 평소처럼 동작합니다. StartStep은 0이어야
+하며(중간 재개는 빈 손 파지/빈 시트 프로브가 되므로 거부), 실패한
+맵은 CalibMode=4 후 새 트리거로 재시작합니다. 프로브가 도중에 끊겨도
+팔이 시트로 복귀돼 있으면 퍽을 놓고 후퇴한 뒤 실패로 보고합니다.
 
 ### Hand-eye 캘리브레이션 (`CalibMode=3`)
 

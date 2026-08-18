@@ -248,6 +248,7 @@ impl<'a> Sequencer<'a> {
                 CalibMode::SampleHolder => "SampleHolder",
                 CalibMode::HandEye => "HandEye",
                 CalibMode::SeatProbe => "SeatProbe",
+                CalibMode::HolderMap => "HolderMap",
                 CalibMode::Recover => "Recover",
                 CalibMode::Normal => "Normal",
             };
@@ -288,17 +289,28 @@ impl<'a> Sequencer<'a> {
                     continue;
                 }
             };
-            let attempt = self
-                .compute_base_waypoints(&waypoints)
-                .and_then(|base| self.compute_run_waypoints(&waypoints, &base, holder_number))
-                .and_then(|run| match calib_mode {
-                    CalibMode::Holder => self.run_calib_holder(&run, start_from_step),
-                    CalibMode::SampleHolder => self.run_calib_sample_holder(&run, start_from_step),
-                    CalibMode::HandEye => self.run_handeye(),
-                    CalibMode::SeatProbe => self.run_seat_probe(),
-                    CalibMode::Recover => self.run_recover(&run),
-                    CalibMode::Normal => self.run_normal(&run, start_from_step),
-                });
+            let attempt = self.compute_base_waypoints(&waypoints).and_then(|base| {
+                match calib_mode {
+                    // Needs waypoints for two holders (source and target),
+                    // so it owns its own compute_run_waypoints calls.
+                    CalibMode::HolderMap => {
+                        self.run_holder_map(&waypoints, &base, holder_number, start_from_step)
+                    }
+                    _ => self
+                        .compute_run_waypoints(&waypoints, &base, holder_number)
+                        .and_then(|run| match calib_mode {
+                            CalibMode::Holder => self.run_calib_holder(&run, start_from_step),
+                            CalibMode::SampleHolder => {
+                                self.run_calib_sample_holder(&run, start_from_step)
+                            }
+                            CalibMode::HandEye => self.run_handeye(),
+                            CalibMode::SeatProbe => self.run_seat_probe(),
+                            CalibMode::Recover => self.run_recover(&run),
+                            CalibMode::Normal => self.run_normal(&run, start_from_step),
+                            CalibMode::HolderMap => unreachable!("dispatched above"),
+                        }),
+                }
+            });
 
             // A failed step used to end the process. The arm is stopped
             // either way, but exiting drops the RTDE stream and runs the
@@ -339,6 +351,9 @@ impl<'a> Sequencer<'a> {
                 )),
                 (CalibMode::Recover, _) => log::info("Arm returned to holder standby"),
                 (CalibMode::SeatProbe, _) => log::info("Seat probe finished; nothing written"),
+                (CalibMode::HolderMap, _) => log::info(&format!(
+                    "Holder map finished for holder {holder_number}; nothing written"
+                )),
             }
             log::info("========================================");
 
@@ -658,7 +673,23 @@ impl<'a> Sequencer<'a> {
         log::info("  not in the seat, or the fingers are empty, stop here.");
         log::info("========================================");
         self.wait_for_trigger(true);
+        match self.seat_probe_here()? {
+            Some(e) => Err(e),
+            None => Ok(false),
+        }
+    }
 
+    /// The probe body shared by [`Sequencer::run_seat_probe`] (after its
+    /// jog hold) and holder map mode (straight after seating the puck):
+    /// step into contact, measure every configured height, print the
+    /// report, write nothing.
+    ///
+    /// The nested result keeps "how much was measured" apart from "where
+    /// is the arm": `Ok(None)` measured everything, `Ok(Some(e))` was
+    /// stopped by `e` but the arm is back at the entry pose with the
+    /// grip on the puck, and `Err` means even the walk back failed, so
+    /// the arm is somewhere a caller must not build on.
+    fn seat_probe_here(&mut self) -> Result<Option<SequencerError>, SequencerError> {
         let p = &self.config.probe;
         let depth = ProbeLimits::new(&p.depth, p.velocity_scale);
         let limits = Limits {
@@ -683,7 +714,7 @@ impl<'a> Sequencer<'a> {
         // instead of them: a bracket that aborted at the bottom of a
         // ladder does not make the heights above it unmeasured, and this
         // mode's whole output is what it printed.
-        let (play_mm, (levels, outcome)) =
+        let (play_mm, (levels, walked, returned)) =
             self.with_grip_loosened(|s| Ok(s.sweep_heights(limits)))?;
 
         log::info("========================================");
@@ -755,8 +786,108 @@ impl<'a> Sequencer<'a> {
              before the next trigger.",
         );
         log::info("========================================");
-        outcome?;
-        Ok(false)
+        if let Err(back) = returned {
+            return Err(match walked {
+                Err(e) => SequencerError(format!(
+                    "{e} — and the arm did not get back to the trigger pose: {back}"
+                )),
+                Ok(()) => back,
+            });
+        }
+        Ok(walked.err())
+    }
+
+    /// Holder map (`CalibMode = 6`): one trigger probes one holder's
+    /// seat. The puck comes from `MapSource` — another holder, ferried
+    /// through the sample holder exactly like the normal sequence does
+    /// (steps 0-11, 13-20) — or, when `MapSource` is 0 or the target
+    /// itself, the resident puck picked in place (steps 0-4). The probe
+    /// then runs without a jog hold, since the arm just seated the puck
+    /// and the taught pose is the pose under test, and the puck is left
+    /// seated (steps 21-23).
+    ///
+    /// Step numbers and waypoints are the normal sequence's own, so
+    /// PauseStep and CurrentStep behave as usual; like the other
+    /// calibration modes there are no vision hooks, because the taught
+    /// error is the thing being measured. A probe that measured less
+    /// than asked but walked back out still releases the puck and
+    /// retreats before the failure is reported — the alternative leaves
+    /// the arm parked in a bore for no reason.
+    ///
+    /// Always runs from the top: a resume into a half-done map would
+    /// grip air or probe an empty seat, so a non-zero `StartStep` is
+    /// refused rather than honored.
+    fn run_holder_map(
+        &mut self,
+        wd: &WaypointData,
+        base: &BaseWaypoints,
+        target: i32,
+        start: i32,
+    ) -> Result<bool, SequencerError> {
+        if start != 0 {
+            return Err(SequencerError(format!(
+                "holder map always runs from the top; StartStep is {start} — set \
+                 it to 0 (recover a failed map with CalibMode=4 and a fresh \
+                 trigger instead)"
+            )));
+        }
+        let source = match self.epics.read_map_source() {
+            0 => target,
+            s => s,
+        };
+        let w_t = self.compute_run_waypoints(wd, base, target)?;
+        if source == target {
+            log::info(&format!(
+                ">>> HOLDER MAP MODE: probe holder {target} in place <<<"
+            ));
+            self.hand(0, "open_hand", true, 0)?;
+            self.arm(1, "holder_standby", &w_t.standby, 0)?;
+            self.cartesian(2, "holder_above", &w_t.above, 0)?;
+            self.cartesian(3, "holder_on_position", &w_t.on_pos, 0)?;
+            self.hand(4, "close_gripper", false, 0)?;
+        } else {
+            log::info(&format!(
+                ">>> HOLDER MAP MODE: probe holder {target} with the puck from \
+                 holder {source} <<<"
+            ));
+            let w_s = self.compute_run_waypoints(wd, base, source)?;
+            self.hand(0, "open_hand", true, 0)?;
+            self.arm(1, "holder_standby", &w_s.standby, 0)?;
+            self.cartesian(2, "holder_above", &w_s.above, 0)?;
+            self.cartesian(3, "holder_on_position", &w_s.on_pos, 0)?;
+            self.hand(4, "close_gripper", false, 0)?;
+            self.cartesian(5, "holder_above_return", &w_s.above, 0)?;
+            self.cartesian(6, "holder_retreat", &w_s.retreat, 0)?;
+            self.arm(7, "sample_holder_standby", &w_s.sh_standby, 0)?;
+            self.cartesian(8, "sample_holder_above", &w_s.sh_above, 0)?;
+            self.cartesian(9, "sample_holder_on_position", &w_s.sh_on_pos, 0)?;
+            self.hand(10, "open_gripper", true, 0)?;
+            self.cartesian(11, "sample_holder_above_return", &w_s.sh_above, 0)?;
+            self.cartesian(13, "sample_holder_above_2nd", &w_t.sh_above, 0)?;
+            self.cartesian(14, "sample_holder_on_position_2nd", &w_t.sh_on_pos, 0)?;
+            self.hand(15, "close_gripper_2nd", false, 0)?;
+            self.cartesian(16, "sample_holder_above_2nd_return", &w_t.sh_above, 0)?;
+            self.cartesian(17, "sample_holder_standby_2nd", &w_t.sh_standby, 0)?;
+            self.arm(18, "holder_standby_return", &w_t.standby, 0)?;
+            self.cartesian(19, "holder_above_final", &w_t.above, 0)?;
+            self.cartesian(20, "holder_on_position_final", &w_t.on_pos, 0)?;
+        }
+
+        let probed = self.seat_probe_here()?;
+        if let Some(e) = &probed {
+            log::warn(&format!(
+                "probe measured less than asked ({e}); the arm walked back to \
+                 the seat, so the puck is left there and the arm retreats \
+                 before the failure is reported"
+            ));
+        }
+        self.hand(21, "open_gripper_final", true, 0)?;
+        self.cartesian(22, "holder_above_final_return", &w_t.above, 0)?;
+        self.cartesian(23, "holder_standby_final", &w_t.standby, 0)?;
+        match probed {
+            Some(e) => Err(e),
+            None => Ok(false),
+        }
     }
 
     /// Probes at every configured height and always brings the arm back
@@ -769,10 +900,20 @@ impl<'a> Sequencer<'a> {
     /// sequence by lifting it from there. So the return is one call after
     /// the walk, on both paths, and what the walk had already measured
     /// survives the failure that stopped it.
-    fn sweep_heights(&mut self, limits: Limits) -> (Vec<Level>, Result<(), SequencerError>) {
+    /// The two results travel separately so a caller can tell "measured
+    /// less than asked" (first) from "the arm is not back" (second).
+    #[allow(clippy::type_complexity)]
+    fn sweep_heights(
+        &mut self,
+        limits: Limits,
+    ) -> (
+        Vec<Level>,
+        Result<(), SequencerError>,
+        Result<(), SequencerError>,
+    ) {
         let axes = match Axes::in_tool(&mut self.motion) {
             Ok(axes) => axes,
-            Err(e) => return (Vec::new(), Err(e)),
+            Err(e) => return (Vec::new(), Err(e), Ok(())),
         };
         // The trigger pose is level zero and is always measured: it is the
         // taught pose the sequence itself uses, and the first vertical
@@ -794,15 +935,7 @@ impl<'a> Sequencer<'a> {
             &mut levels,
         );
         let returned = Self::return_to_trigger(&mut self.motion, &axes, &mut from_trigger, limits);
-        let outcome = match (walked, returned) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(e), Ok(())) => Err(e),
-            (Ok(()), Err(b)) => Err(b),
-            (Err(e), Err(b)) => Err(SequencerError(format!(
-                "{e} — and the arm did not get back to the trigger pose: {b}"
-            ))),
-        };
-        (levels, outcome)
+        (levels, walked, returned)
     }
 
     /// The walking half of [`Sequence::sweep_heights`], split out so that

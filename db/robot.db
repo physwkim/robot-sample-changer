@@ -25,12 +25,14 @@ record(mbbo, "Robot:CalibMode")
     field(THST, "Hand-Eye Calib")
     field(FRST, "Recover")
     field(FVST, "Seat Probe")
+    field(SXST, "Holder Map")
     field(ZRVL, "0")
     field(ONVL, "1")
     field(TWVL, "2")
     field(THVL, "3")
     field(FRVL, "4")
     field(FVVL, "5")
+    field(SXVL, "6")
     field(VAL,  "0")
 }
 record(longout, "Robot:StartStep")
@@ -46,6 +48,13 @@ record(longout, "Robot:Holder")
     field(DRVL, "1")
     field(DRVH, "100")
     field(VAL,  "1")
+}
+record(longout, "Robot:MapSource")
+{
+    field(DESC, "Map mode source holder")
+    field(DRVL, "0")
+    field(DRVH, "10")
+    field(VAL,  "0")
 }
 record(bo, "Robot:Stop")
 {

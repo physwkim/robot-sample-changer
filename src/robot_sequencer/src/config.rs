@@ -88,6 +88,15 @@ pub struct EpicsConfig {
     pub jog_y_pv: String,
     pub jog_z_pv: String,
     pub jog_step_pv: String,
+    /// Defaulted so configs that predate the record keep loading; the
+    /// channel itself is optional in `Epics::connect` for the same
+    /// reason.
+    #[serde(default = "default_map_source_pv")]
+    pub map_source_pv: String,
+}
+
+fn default_map_source_pv() -> String {
+    "Robot:MapSource".into()
 }
 
 /// The level-tool path constraint (see [`SequenceConfig::level_tool`]).

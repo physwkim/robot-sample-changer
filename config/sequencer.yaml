@@ -55,6 +55,7 @@ epics:
   jog_y_pv: "Robot:JogY"
   jog_z_pv: "Robot:JogZ"
   jog_step_pv: "Robot:JogStep"
+  map_source_pv: "Robot:MapSource"
 
 sequence:
   waypoints_yaml: "taught_waypoints.yaml"

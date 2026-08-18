@@ -102,6 +102,11 @@ fn run() -> Result<(), SequencerError> {
         "      steps into contact at {:.2}/{:.2} N, measures, writes nothing)",
         config.probe.lateral.threshold_n, config.probe.depth.threshold_n
     ));
+    log::info("    6=Holder map (fetch the puck, probe the seat, leave it seated;");
+    log::info(&format!(
+        "      source holder from {}, 0 = the target itself)",
+        config.epics.map_source_pv
+    ));
     if config.vision.enabled {
         log::info(&format!(
             "  Vision correction: ENABLED{} (deadband {:.2} mm, limit {:.2} mm, {})",
