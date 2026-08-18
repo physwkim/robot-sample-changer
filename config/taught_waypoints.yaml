@@ -15,9 +15,9 @@
     holder_on_position_lift: 0.00015
     holder_on_position_tilt_x_deg: 0.3
     holder1_on_position_z_offset: -0.0003
-    sample_holder_on_position_x_offset: -0.0025
+    sample_holder_on_position_x_offset: -0.002785
     sample_holder_on_position_y_offset: -0.0005
-    sample_holder_on_position_z_offset: 0.0005
+    sample_holder_on_position_z_offset: 0.000171
     holder_multi_x_offsets: [0.0003, 0.0005, 0.0015, 0.0015, 0.003, 0.003, 0.003,
       0.003, 0.003]
     # Insertion-depth trim, tool y (base -z), m, holder N at index N-2;
