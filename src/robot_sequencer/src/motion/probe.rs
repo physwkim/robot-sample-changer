@@ -148,6 +148,54 @@ impl Contact {
     }
 }
 
+/// One between-steps force reading, split into the two things a probe
+/// has to decide from it.
+///
+/// They are separate because they were once the same number
+/// (`along.abs().max(lateral)`), and that let a force across the probe
+/// direction declare a wall along it: measured 2026-08-18, the `base x-`
+/// probe tripped on 1.037 N of lateral with only 0.256 N along, and put a
+/// wall in the record at a travel that had nothing to do with one.
+#[derive(Debug, Clone, Copy)]
+struct Reading {
+    /// Force change along the probe direction. A wall reacts along its own
+    /// normal, which for a probe driven into it is this axis — sideways as
+    /// much as downwards — so this alone is contact.
+    along: f64,
+    /// Force change across the probe direction: friction, the tool
+    /// bending, the next joint settling. Recorded and reported, never a
+    /// wall.
+    lateral: f64,
+    /// The whole force change. How hard the arm is leaning on the sample
+    /// does not depend on which way the probe happens to be driving, so
+    /// this is what the abort limit reads.
+    load: f64,
+}
+
+impl Reading {
+    fn new(df: Vector3, base_dir: &Vector3) -> Self {
+        let along = df.dot(base_dir);
+        Self {
+            along,
+            lateral: (df - base_dir * along).norm(),
+            load: df.norm(),
+        }
+    }
+
+    /// Something is pushing back along the way the probe is going.
+    fn is_contact(&self, threshold_n: f64) -> bool {
+        self.along.abs() >= threshold_n
+    }
+
+    /// The arm is leaning on the sample harder than this mode may.
+    ///
+    /// Never below the `max(|along|, lateral)` it replaced, so nothing
+    /// that used to abort stops aborting.
+    fn is_overload(&self, abort_n: f64) -> bool {
+        self.load >= abort_n
+    }
+}
+
 /// Two opposed probes from one pose, and what they did or did not find.
 ///
 /// The pair is kept rather than reduced to a centre because "neither side
@@ -260,7 +308,10 @@ impl Motion<'_> {
     /// Exceeding `abort_n` *is* an error. It means a step met something
     /// much harder than a bore wall — the floor while probing sideways, a
     /// puck that never entered the bore — and continuing to push at that
-    /// is how a sample gets damaged.
+    /// is how a sample gets damaged. That limit reads the whole force
+    /// change rather than the component along the probe: a sample being
+    /// leant on sideways is being leant on, whichever way the probe
+    /// happened to be driving.
     ///
     /// **The arm always ends where it started.** Every exit — contact,
     /// travel exhausted, the abort limit, a step that did not execute —
@@ -366,39 +417,34 @@ impl Motion<'_> {
                 now[1] - start_wrench[1],
                 now[2] - start_wrench[2],
             );
-            // Split the change into "along the way I am pushing" and "across
-            // it". The along component is what a floor gives back and what
-            // the slope fit needs; the lateral magnitude is what a wall
-            // gives when the probe is sideways. Both are taken against the
-            // start pose, which is where the arm's own bias cancels.
-            let along = df.dot(&base_dir);
-            let lateral = (df - base_dir * along).norm();
+            let reading = Reading::new(df, &base_dir);
             let here = self.model.fk(&here_joints)?;
             let travel =
                 (here.translation.vector - start_pose.translation.vector).dot(&base_dir) * 1000.0;
             out.travel_mm.push(travel);
-            out.along_n.push(along);
-            out.lateral_n.push(lateral);
+            out.along_n.push(reading.along);
+            out.lateral_n.push(reading.lateral);
 
-            let felt = along.abs().max(lateral);
+            let load = reading.load;
             log::info(&format!(
-                "  {label}: {travel:+.3} mm, along {along:+.3} N, lateral {lateral:.3} N"
+                "  {label}: {travel:+.3} mm, along {:+.3} N, lateral {:.3} N",
+                reading.along, reading.lateral
             ));
-            if felt >= limits.abort_n {
+            if reading.is_overload(limits.abort_n) {
                 return Err(SequencerError(format!(
-                    "{label}: {felt:.2} N at {travel:+.3} mm exceeds the {:.2} N abort limit \
+                    "{label}: {load:.2} N at {travel:+.3} mm exceeds the {:.2} N abort limit \
                      — the probe met something harder than a bore wall",
                     limits.abort_n
                 )));
             }
-            if felt >= limits.threshold_n {
+            if reading.is_contact(limits.threshold_n) {
                 out.tripped_mm = Some(travel);
                 log::info(&format!("  {label}: contact at {travel:+.3} mm"));
                 return Ok(());
             }
             if travel - previous < limits.step_mm * STEP_TAKEN_FRACTION {
                 return Err(SequencerError(format!(
-                    "{label}: commanded {:.3} mm and moved {:.3} mm with only {felt:.2} N \
+                    "{label}: commanded {:.3} mm and moved {:.3} mm with only {load:.2} N \
                      pushing back — the step did not execute, so any clearance reported \
                      from here would be travel that never happened",
                     limits.step_mm,
@@ -516,6 +562,51 @@ mod tests {
                      close to the fine threshold to survive it"
                 );
             }
+        }
+    }
+
+    /// The defect [`Reading`] exists for: base x- on 2026-08-18 read
+    /// +0.256 N along the probe and 1.037 N across it, and the old
+    /// `max` declared a wall there. Contact reads the probe direction
+    /// alone; the load, which the abort limit reads, still counts it.
+    #[test]
+    fn a_force_across_the_probe_is_not_a_wall_along_it() {
+        let dir = Vector3::x();
+        let r = Reading::new(Vector3::new(0.256, 1.037, 0.0), &dir);
+        assert!(
+            !r.is_contact(0.5),
+            "along {:.3} N is under the threshold",
+            r.along
+        );
+        assert!((r.lateral - 1.037).abs() < 1e-12);
+        assert!(
+            r.is_overload(1.0),
+            "load {:.3} N is what leans on the sample",
+            r.load
+        );
+    }
+
+    /// Contact does not care which way along the probe axis the force
+    /// points: pushing down, the floor reads negative.
+    #[test]
+    fn contact_is_the_probe_axis_either_way() {
+        let down = -Vector3::z();
+        assert!(Reading::new(Vector3::new(0.0, 0.0, 2.6), &down).is_contact(1.0));
+        assert!(Reading::new(Vector3::new(0.0, 0.0, -2.6), &down).is_contact(1.0));
+    }
+
+    /// The abort is never made later by the split — it reads the whole
+    /// force, which is at least the larger component it replaced.
+    #[test]
+    fn the_overload_is_never_below_the_larger_component() {
+        let dir = Vector3::x();
+        for df in [
+            Vector3::new(3.0, 4.0, 0.0),
+            Vector3::new(0.0, 5.0, 0.0),
+            Vector3::new(5.0, 0.0, 0.0),
+        ] {
+            let r = Reading::new(df, &dir);
+            assert!(r.load >= r.along.abs().max(r.lateral) - 1e-12, "{r:?}");
         }
     }
 
