@@ -377,6 +377,15 @@ struct Reading {
     /// does not depend on which way the probe happens to be driving, so
     /// this is what the abort limit reads.
     load: f64,
+    /// The force change itself, in base coordinates.
+    ///
+    /// `along` and `lateral` are what the estimators need, but `lateral`
+    /// is a magnitude: it says a force exists across the probe axis and
+    /// not which way it points, so from a lift along base z it cannot say
+    /// whether the puck is being pushed in base x or in base y. That is
+    /// exactly the question a reader of the log has, so the components go
+    /// out as they were measured.
+    df: Vector3,
 }
 
 impl Reading {
@@ -386,6 +395,7 @@ impl Reading {
             along,
             lateral: (df - base_dir * along).norm(),
             load: df.norm(),
+            df,
         }
     }
 
@@ -710,17 +720,24 @@ impl Motion<'_> {
             );
             let reading = Reading::new(df, &base_dir);
             let here = self.model.fk(&here_joints)?;
-            let travel =
-                (here.translation.vector - start_pose.translation.vector).dot(&base_dir) * 1000.0;
+            let moved = here.translation.vector - start_pose.translation.vector;
+            let travel = moved.dot(&base_dir) * 1000.0;
+            // How far the TCP has wandered off the line it was sent along,
+            // in base mm. A force across the probe axis has two possible
+            // authors — the thing being pushed, or the arm not going
+            // straight — and the force alone cannot name either.
+            let drift = (moved - base_dir * moved.dot(&base_dir)) * 1000.0;
             out.travel_mm.push(travel);
             out.along_n.push(reading.along);
             out.lateral_n.push(reading.lateral);
 
             let load = reading.load;
             last_load = load;
+            let f = reading.df;
             log::info(&format!(
-                "  {label}: {travel:+.3} mm, along {:+.3} N, lateral {:.3} N",
-                reading.along, reading.lateral
+                "  {label}: {travel:+.3} mm, along {:+.3} N | base force \
+                 ({:+.2}, {:+.2}, {:+.2}) N, base drift ({:+.3}, {:+.3}, {:+.3}) mm",
+                reading.along, f.x, f.y, f.z, drift.x, drift.y, drift.z
             ));
             if reading.is_overload(limits.abort_n) {
                 return Ok(Stopped::TooHard(format!(
