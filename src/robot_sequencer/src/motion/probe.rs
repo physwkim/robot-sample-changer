@@ -710,8 +710,18 @@ impl Motion<'_> {
         if mm.abs() < f64::EPSILON {
             return Ok(());
         }
+        // The step is a granularity here, not a quantum: a probe's step
+        // is the resolution it reports a wall at and its travel is a
+        // bound, but a move has to land exactly where it was sent. Whole
+        // configured steps do not always divide the distance — 0.05 mm in
+        // 0.10 mm steps is zero of them — so the distance is split into
+        // the fewest steps no larger than the configured one.
+        let steps = (mm.abs() / limits.step_mm - STEP_COUNT_EPSILON)
+            .ceil()
+            .max(1.0);
         let limits = ProbeLimits {
             travel_mm: mm.abs(),
+            step_mm: mm.abs() / steps,
             // Nothing to fit: this is not measuring a wall.
             overtravel_steps: 0,
             ..limits
@@ -722,14 +732,14 @@ impl Motion<'_> {
             return Ok(());
         };
         let back: Vec<JointMap> = out.visited.iter().rev().cloned().collect();
-        Err(SequencerError(
-            match self.retrace(&back, limits.velocity_scale, label) {
-                Ok(()) => format!("{label}: {why}"),
-                Err(b) => {
-                    format!("{label}: {why} — and the arm could not be walked back out: {b}")
-                }
-            },
-        ))
+        // `why` is already labelled: it comes from the stepping, which
+        // names itself in everything it returns.
+        Err(match self.retrace(&back, limits.velocity_scale, label) {
+            Ok(()) => why,
+            Err(b) => SequencerError(format!(
+                "{why} — and the arm could not be walked back out: {b}"
+            )),
+        })
     }
 
     /// Both walls along one tool axis, and the middle between them.
@@ -929,6 +939,28 @@ mod tests {
         let releasing = Reading::new(Vector3::new(0.0, 0.0, -5.0), &up);
         assert!(StopAt::Contact(1.0).reached(&releasing));
         assert!(!StopAt::Travel.reached(&releasing));
+    }
+
+    /// A move shorter than one configured step is still a move.
+    #[test]
+    fn a_move_is_split_into_steps_that_land_on_it() {
+        // What `probe_reposition` computes, kept honest here because the
+        // arm is what runs the real one.
+        let split = |mm: f64, step: f64| {
+            let steps = (mm / step - STEP_COUNT_EPSILON).ceil().max(1.0);
+            (steps as usize, mm / steps)
+        };
+        assert_eq!(split(0.05, 0.10).0, 1);
+        assert_eq!(split(0.30, 0.10).0, 3);
+        assert_eq!(split(3.00, 0.10).0, 30);
+        // Every split lands on the distance, and no step is bigger than
+        // the configured one.
+        for (mm, step) in [(0.05, 0.1), (0.3, 0.1), (0.25, 0.1), (3.0, 0.1)] {
+            let (n, taken) = split(mm, step);
+            assert!(taken <= step + 1e-12, "{mm} in {step} steps");
+            assert!((n as f64 * taken - mm).abs() < 1e-12);
+            assert_eq!(steps_in(mm, taken), n);
+        }
     }
 
     /// Tenths of a millimetre are not exact in binary, and a move that
