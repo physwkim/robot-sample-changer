@@ -4,5 +4,5 @@ Name=[2] Robot GUI
 Comment=Start Robot Control GUI (start after Robot Sequencer)
 Icon=utilities-terminal
 Terminal=true
-Exec=/home/bl9b/ws/desktop/scripts/launch_robot_gui.sh
+Exec=/home/bl9b/work/robot-sample-changer/desktop/scripts/launch_robot_gui.sh
 Categories=Development;

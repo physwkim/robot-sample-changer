@@ -6,16 +6,19 @@ if pgrep -f "[r]obot_gui.main" > /dev/null; then
     exit 0
 fi
 
-# robot_gui is a pure-Python EPICS CA client (silx/PyQt6/pyepics) — no ROS needed.
-# It runs from a dedicated conda env that provides silx, since the system/base
+# robot_gui is a pure-Python EPICS CA client (silx/PyQt6/pyepics) — no ROS.
+# It runs from a dedicated conda env that provides silx, since the system
 # Python does not have it. See CLAUDE.md for env setup.
 source /home/bl9b/miniconda3/etc/profile.d/conda.sh
 conda activate robot_gui
 
-# Clear ROS PYTHONPATH so the stale colcon build copy of robot_gui
-# (~/ws/build/robot_gui) doesn't shadow the source package, and run from
-# the package dir so `robot_gui` resolves to the source tree.
+# Resolve Robot:* over TCP at the local IOC. This host is multihomed and
+# shares 5064 with other CA servers; NAME_SERVERS pins the lookup without
+# breaking broadcast search for anyone else (never use EPICS_CA_ADDR_LIST
+# here — see CLAUDE.md).
+export EPICS_CA_NAME_SERVERS=127.0.0.1:5064
+
 unset PYTHONPATH
-cd /home/bl9b/ws/src/robot_gui
+cd /home/bl9b/work/robot-sample-changer/src/robot_gui
 python -m robot_gui.main
 exec bash
