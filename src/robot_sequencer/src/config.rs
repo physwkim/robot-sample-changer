@@ -328,8 +328,13 @@ impl Default for ProbeConfig {
                 step_mm: 0.05,
                 // Past the clearance by enough that "no contact" means the
                 // bore is not where the pose says, rather than that the
-                // probe was too short.
-                travel_mm: 1.5,
+                // probe was too short. At 1.5 that was not yet true: two
+                // of the four lateral directions ran out with nothing in
+                // front of them (doc §16.7) and the bracket had no
+                // midpoint. This clears the loosened fingers' own free
+                // run, half of `loosen_mm`, plus the nominal 0.50 mm
+                // radial clearance, with room left over.
+                travel_mm: 3.0,
                 // Seven times the 0.073 N the arm scatters standing still
                 // (doc/vision_correction_plan.md §16.1). Reading between
                 // steps is what makes a threshold this low usable at all.

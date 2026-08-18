@@ -299,8 +299,12 @@ probe:
   lateral:                # sideways, toward a bore wall
     step_mm: 0.05         # ten steps to the nominal 0.50 mm radial clearance,
                           # and the overshoot past first contact is one of them
-    travel_mm: 1.5        # past the clearance, so "no contact" means the bore is
-                          # not where the pose says rather than the probe was short
+    travel_mm: 3.0        # past the clearance, so "no contact" means the bore is
+                          # not where the pose says rather than the probe was short.
+                          # 1.5 did not reach that: base x- and y+ both ran out with
+                          # nothing in front of them (doc §16.7) and the bracket had
+                          # no midpoint. This clears the loosened fingers' free run
+                          # (loosen_mm/2 = 1.27) plus the nominal 0.50 clearance
     threshold_n: 0.5      # 7x the 0.073 N the arm scatters standing still; reading
                           # force between steps rather than during them is what
                           # makes a threshold this low usable (doc §16.1)
