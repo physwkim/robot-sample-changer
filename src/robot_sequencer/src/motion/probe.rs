@@ -100,6 +100,26 @@ const OVERTRAVEL_LOAD_FRACTION: f64 = 0.5;
 /// step in decimal is not one step short in binary.
 const STEP_COUNT_EPSILON: f64 = 1e-9;
 
+/// The smallest linear command worth sending to the arm.
+///
+/// Repositioning distances accrue floating-point residue — the sideways
+/// corrections of a climb land in `from_trigger` through base-axis unit
+/// vectors whose off-axis components are ~0.004, so a fully spent 3 mm
+/// allowance leaves at most ~0.012 mm in the axis that was never
+/// corrected. A zero-check passes that residue on to the servo, which
+/// cannot execute it: on this rig a 0.008 mm command travelled -0.004 mm
+/// and tripped the step-taken guard (doc §16.4), while 0.05 mm executes.
+/// Below this floor a move is already where it was going.
+pub const MIN_EXECUTABLE_MM: f64 = 0.02;
+/// The floor must sit between the two populations that reach
+/// [`Motion::probe_reposition`]: cross-term residue (at most the full
+/// 3 mm sideways allowance times the ~0.004 off-axis component of a
+/// holder base axis) below, one 0.05 mm centring step — nearly parallel
+/// to its axis — above. If this fails to compile, the floor either
+/// stops forgiving residue (the return leg dies on "commanded
+/// 0.000 mm") or starts swallowing genuine steps.
+const _: () = assert!(3.0 * 0.004 < MIN_EXECUTABLE_MM && 0.05 * 0.99 > MIN_EXECUTABLE_MM);
+
 /// How many whole steps fit in `travel_mm`.
 ///
 /// Rounded before flooring: 0.3 mm of travel in 0.1 mm steps is
@@ -956,7 +976,13 @@ impl Motion<'_> {
         limits: ProbeLimits,
         label: &str,
     ) -> Result<(), SequencerError> {
-        if mm.abs() < f64::EPSILON {
+        if mm.abs() < MIN_EXECUTABLE_MM {
+            if mm != 0.0 {
+                log::info(&format!(
+                    "{label}: {mm:+.4} mm is below the {MIN_EXECUTABLE_MM} mm \
+                     execution floor — already there"
+                ));
+            }
             return Ok(());
         }
         // The step is a granularity here, not a quantum: a probe's step
@@ -1168,7 +1194,7 @@ impl Motion<'_> {
         centring: Centring,
         label: &str,
     ) -> Result<Climbed, SequencerError> {
-        if mm.abs() < f64::EPSILON {
+        if mm.abs() < MIN_EXECUTABLE_MM {
             return Ok(Climbed {
                 offset: Vector3::zeros(),
                 load: Vector3::zeros(),

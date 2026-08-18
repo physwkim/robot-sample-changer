@@ -22,7 +22,9 @@ use crate::gripper::Gripper;
 use crate::handeye;
 use crate::log;
 use crate::model::{JointMap, Model};
-use crate::motion::{Bracket, Centring, Motion, ProbeLimits, Probed, TiltLimits, Tilted};
+use crate::motion::{
+    Bracket, Centring, MIN_EXECUTABLE_MM, Motion, ProbeLimits, Probed, TiltLimits, Tilted,
+};
 use crate::waypoints::WaypointData;
 
 const POLL: Duration = Duration::from_millis(100);
@@ -820,7 +822,7 @@ impl<'a> Sequencer<'a> {
             from_trigger.z = height;
             levels.push(Level {
                 height_mm: height,
-                load: (climb.abs() > f64::EPSILON).then_some(climbed.load),
+                load: (climb.abs() >= MIN_EXECUTABLE_MM).then_some(climbed.load),
                 brackets: Vec::new(),
                 floor: None,
                 tilts: Vec::new(),
@@ -897,9 +899,6 @@ impl<'a> Sequencer<'a> {
             (axes.up, 2, "height"),
         ] {
             let back = -from_trigger[component];
-            if back.abs() < f64::EPSILON {
-                continue;
-            }
             motion.probe_reposition(dir, back, limits.lift, &format!("return the {what}"))?;
             from_trigger[component] = 0.0;
         }
