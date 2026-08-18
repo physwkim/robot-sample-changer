@@ -18,6 +18,7 @@
 mod bringup;
 mod execute;
 mod probe;
+pub use probe::{Bracket, Contact};
 mod scene;
 
 pub(crate) use probe::ProbeLimits;

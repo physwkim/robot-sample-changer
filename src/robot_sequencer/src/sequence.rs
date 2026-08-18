@@ -22,7 +22,7 @@ use crate::gripper::Gripper;
 use crate::handeye;
 use crate::log;
 use crate::model::{JointMap, Model};
-use crate::motion::{Motion, ProbeLimits};
+use crate::motion::{Bracket, Contact, Motion, ProbeLimits};
 use crate::waypoints::WaypointData;
 
 const POLL: Duration = Duration::from_millis(100);
@@ -85,6 +85,15 @@ struct RunWaypoints {
     sh_standby: JointMap,
     sh_above: JointMap,
     sh_on_pos: JointMap,
+}
+
+/// One height's worth of seat probing: where the arm stood, and what it
+/// found from there.
+struct Level {
+    /// Height above the pose the mode was triggered at, mm.
+    height_mm: f64,
+    brackets: Vec<Bracket>,
+    floor: Contact,
 }
 
 pub struct Sequencer<'a> {
@@ -588,22 +597,12 @@ impl<'a> Sequencer<'a> {
         let lateral = ProbeLimits::new(&p.lateral, p.velocity_scale);
         let depth = ProbeLimits::new(&p.depth, p.velocity_scale);
 
-        let (play_mm, (brackets, floor)) = self.with_grip_loosened(|s| {
-            let mut brackets = Vec::new();
-            for (name, axis) in [("base x", Vector3::x()), ("base y", Vector3::y())] {
-                let dir = s.motion.base_dir_in_tool(&axis)?;
-                brackets.push(s.motion.bracket_axis(dir, lateral, name)?);
-            }
-
-            // Straight down in base, not along whichever tool axis happens
-            // to point that way: the seat floor is horizontal and the
-            // puck's own weight is already resting on it, so the probe has
-            // to push along the same line that weight acts on for the slope
-            // to mean depth.
-            let down = s.motion.base_dir_in_tool(&(-Vector3::z()))?;
-            let floor = s.motion.probe_until_contact(down, depth, "base z-")?;
-            Ok((brackets, floor))
-        })?;
+        // The sweep's own failure travels beside its results rather than
+        // instead of them: a bracket that aborted at the bottom of a
+        // ladder does not make the heights above it unmeasured, and this
+        // mode's whole output is what it printed.
+        let (play_mm, (levels, outcome)) =
+            self.with_grip_loosened(|s| Ok(s.sweep_heights(lateral, depth)))?;
 
         log::info("========================================");
         log::info("SEAT PROBE RESULT (measured from the pose the probe started at)");
@@ -616,25 +615,35 @@ impl<'a> Sequencer<'a> {
         } else {
             log::info("  the grip was held throughout — no play in front of the steps");
         }
-        for bracket in brackets {
-            log::info(&format!("  {}", bracket.summary()));
-        }
-        // The trip point carries the threshold in it; the fit does not.
-        // Both are printed because they disagreeing by more than a step
-        // is how a floor that was already loaded before the probe began
-        // announces itself.
-        match (floor.tripped_mm(), floor.wall_mm()) {
-            (Some(t), Some(f)) => log::info(&format!(
-                "  base z: floor at {f:+.3} mm from the force-versus-depth fit, \
-                 tripped at {t:+.3} mm"
-            )),
-            (Some(t), None) => log::info(&format!(
-                "  base z: tripped at {t:+.3} mm, too few rising samples to fit a floor"
-            )),
-            (None, _) => log::info(&format!(
-                "  base z: no floor within {:.2} mm — the puck is not resting on anything",
-                depth.travel_mm
-            )),
+        for level in levels {
+            if self.config.probe.heights_mm.is_empty() {
+                log::info("  at the pose the probe was triggered at:");
+            } else {
+                log::info(&format!(
+                    "  at {:+.2} mm above the trigger pose:",
+                    level.height_mm
+                ));
+            }
+            for bracket in level.brackets {
+                log::info(&format!("    {}", bracket.summary()));
+            }
+            // The trip point carries the threshold in it; the fit does
+            // not. Both are printed because they disagreeing by more than
+            // a step is how a floor that was already loaded before the
+            // probe began announces itself.
+            match (level.floor.tripped_mm(), level.floor.wall_mm()) {
+                (Some(t), Some(f)) => log::info(&format!(
+                    "    base z: floor at {f:+.3} mm from the force-versus-depth fit, \
+                     tripped at {t:+.3} mm"
+                )),
+                (Some(t), None) => log::info(&format!(
+                    "    base z: tripped at {t:+.3} mm, too few rising samples to fit a floor"
+                )),
+                (None, _) => log::info(&format!(
+                    "    base z: no floor within {:.2} mm — the puck is not resting on anything",
+                    depth.travel_mm
+                )),
+            }
         }
         // Where the arm is, this knows: every probe walks itself back out
         // before it returns, and a retrace that could not be flown is an
@@ -647,7 +656,91 @@ impl<'a> Sequencer<'a> {
              before the next trigger.",
         );
         log::info("========================================");
+        outcome?;
         Ok(false)
+    }
+
+    /// Probes at every configured height and always brings the arm back
+    /// to the pose the mode was triggered at.
+    ///
+    /// The height is owned here for the same reason the grip is owned by
+    /// [`Sequence::with_grip_loosened`]: a run that ends on an abort part
+    /// way up a sweep would otherwise leave the arm at a height nothing
+    /// records, holding a sample, and the next trigger resumes the
+    /// sequence by lifting it from there. So the return is one call after
+    /// the walk, on both paths, and what the walk had already measured
+    /// survives the failure that stopped it.
+    fn sweep_heights(
+        &mut self,
+        lateral: ProbeLimits,
+        depth: ProbeLimits,
+    ) -> (Vec<Level>, Result<(), SequencerError>) {
+        let up = match self.motion.base_dir_in_tool(&Vector3::z()) {
+            Ok(up) => up,
+            Err(e) => return (Vec::new(), Err(e)),
+        };
+        let heights: Vec<f64> = if self.config.probe.heights_mm.is_empty() {
+            vec![0.0]
+        } else {
+            self.config.probe.heights_mm.clone()
+        };
+        let mut levels = Vec::new();
+        let mut at = 0.0;
+        let walked = self.walk_heights(&heights, up, lateral, depth, &mut at, &mut levels);
+        let returned = self
+            .motion
+            .probe_reposition(up, -at, depth, "return to the trigger pose");
+        let outcome = match (walked, returned) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(e), Ok(())) => Err(e),
+            (Ok(()), Err(b)) => Err(b),
+            (Err(e), Err(b)) => Err(SequencerError(format!(
+                "{e} — and the arm did not get back to the trigger pose: {b}"
+            ))),
+        };
+        (levels, outcome)
+    }
+
+    /// The walking half of [`Sequence::sweep_heights`], split out so that
+    /// every way it can leave is a return into code that lowers the arm
+    /// back. `at` is where the arm is, in mm above the trigger pose, and
+    /// is updated only by a move that finished.
+    fn walk_heights(
+        &mut self,
+        heights: &[f64],
+        up: Vector3,
+        lateral: ProbeLimits,
+        depth: ProbeLimits,
+        at: &mut f64,
+        levels: &mut Vec<Level>,
+    ) -> Result<(), SequencerError> {
+        for &height in heights {
+            self.motion.probe_reposition(
+                up,
+                height - *at,
+                depth,
+                &format!("to {height:+.2} mm"),
+            )?;
+            *at = height;
+            let mut brackets = Vec::new();
+            for (name, axis) in [("base x", Vector3::x()), ("base y", Vector3::y())] {
+                let dir = self.motion.base_dir_in_tool(&axis)?;
+                brackets.push(self.motion.bracket_axis(dir, lateral, name)?);
+            }
+            // Straight down in base, not along whichever tool axis happens
+            // to point that way: the seat floor is horizontal and the
+            // puck's own weight is already resting on it, so the probe has
+            // to push along the same line that weight acts on for the
+            // slope to mean depth.
+            let down = self.motion.base_dir_in_tool(&(-Vector3::z()))?;
+            let floor = self.motion.probe_until_contact(down, depth, "base z-")?;
+            levels.push(Level {
+                height_mm: height,
+                brackets,
+                floor,
+            });
+        }
+        Ok(())
     }
 
     /// Runs `probe` with the fingers opened by `probe.loosen_mm`, and puts

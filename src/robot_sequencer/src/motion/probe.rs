@@ -137,6 +137,18 @@ pub struct Contact {
 }
 
 impl Contact {
+    /// An empty record for a probe that is about to run.
+    fn new(threshold_n: f64) -> Self {
+        Self {
+            travel_mm: Vec::new(),
+            lateral_n: Vec::new(),
+            along_n: Vec::new(),
+            threshold_n,
+            tripped: None,
+            visited: Vec::new(),
+        }
+    }
+
     /// Travel at which the contact threshold tripped.
     pub fn tripped_mm(&self) -> Option<f64> {
         self.tripped.map(|i| self.travel_mm[i])
@@ -449,14 +461,7 @@ impl Motion<'_> {
         limits: ProbeLimits,
         label: &str,
     ) -> Result<Contact, SequencerError> {
-        let mut out = Contact {
-            travel_mm: Vec::new(),
-            lateral_n: Vec::new(),
-            along_n: Vec::new(),
-            threshold_n: limits.threshold_n,
-            tripped: None,
-            visited: Vec::new(),
-        };
+        let mut out = Contact::new(limits.threshold_n);
         let stepping = self.step_until_contact(dir, limits, label, &mut out);
         // Reversed, so it leaves from where the arm is standing now and
         // ends at the pose the probe began from.
@@ -613,6 +618,62 @@ impl Motion<'_> {
             ));
         }
         Ok(())
+    }
+
+    /// Moves `mm` along `dir` in probe-sized steps and **stays there**,
+    /// failing if anything pushes back on the way.
+    ///
+    /// The one motion in this mode that is not a measurement. It exists
+    /// because the operator jog cannot do it: [`Motion::jog`] gates on the
+    /// scene, the stage mesh is a convex decomposition, and a convex hull
+    /// cannot represent a bore — so from a seated pose every jog is
+    /// refused as a collision before it starts (measured 2026-08-15, and
+    /// again 2026-08-18 on a 3 mm jog straight up). The probe's own step
+    /// is guarded by contact instead of by geometry, which is the guard
+    /// that means anything inside a bore, so the height change is made of
+    /// probe steps.
+    ///
+    /// Contact is a *failure* here, and the inversion is the point:
+    /// arriving is the goal, so meeting something on the way means the
+    /// arm is not where the next measurement would assume. The arm is
+    /// walked back out before the error returns, as everywhere else in
+    /// this file.
+    pub fn probe_reposition(
+        &mut self,
+        dir: Vector3,
+        mm: f64,
+        limits: ProbeLimits,
+        label: &str,
+    ) -> Result<(), SequencerError> {
+        if mm.abs() < f64::EPSILON {
+            return Ok(());
+        }
+        let limits = ProbeLimits {
+            travel_mm: mm.abs(),
+            // Nothing to fit: this is not measuring a wall.
+            overtravel_steps: 0,
+            ..limits
+        };
+        let dir = if mm < 0.0 { -dir } else { dir };
+        let mut out = Contact::new(limits.threshold_n);
+        let stepping = self.step_until_contact(dir, limits, label, &mut out);
+        let arrived = stepping.is_ok() && out.tripped.is_none();
+        if arrived {
+            return Ok(());
+        }
+        let back: Vec<JointMap> = out.visited.iter().rev().cloned().collect();
+        let returned = self.retrace(&back, limits.velocity_scale, label);
+        let why = match (stepping, out.tripped_mm()) {
+            (Err(e), _) => e.to_string(),
+            (Ok(()), Some(at)) => {
+                format!("something pushed back {at:+.3} mm in, so the move did not finish")
+            }
+            (Ok(()), None) => "the move did not finish".to_string(),
+        };
+        Err(SequencerError(match returned {
+            Ok(()) => format!("{label}: {why}"),
+            Err(b) => format!("{label}: {why} — and the arm could not be walked back out: {b}"),
+        }))
     }
 
     /// Both walls along one tool axis, and the middle between them.

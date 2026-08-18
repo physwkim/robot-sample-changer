@@ -328,6 +328,21 @@ pub struct ProbeConfig {
     /// one — the play is the largest unknown in the chain, and a run that
     /// finds free travel without it needs no play to be subtracted.
     pub loosen_mm: f64,
+    /// Heights above the pose the probe was triggered at, mm, probed in
+    /// the order given and returned from at the end.
+    ///
+    /// Empty probes once, where it was triggered, and moves the arm
+    /// nowhere. A list asks the other question: a gripped puck at the
+    /// taught pose has under 0.05 mm of lateral freedom in every
+    /// direction and 8.11 N in 0.044 mm (2026-08-18), which is a closed
+    /// loop rather than a clearance, and the height at which that loop
+    /// opens is what says how deep the seat really engages.
+    ///
+    /// The moves are probe steps, not jogs: the operator jog gates on a
+    /// scene whose stage is a convex decomposition, and a convex hull
+    /// cannot represent a bore, so from a seated pose every jog is
+    /// refused before it starts.
+    pub heights_mm: Vec<f64>,
     /// Sideways, toward a bore wall.
     pub lateral: ProbeAxisConfig,
     /// Downward, toward the seat floor.
@@ -343,6 +358,7 @@ impl Default for ProbeConfig {
             // something in every direction and the pads had not been
             // ruled out by a margin.
             loosen_mm: 2.5,
+            heights_mm: Vec::new(),
             lateral: ProbeAxisConfig {
                 // Ten steps to a wall at the nominal 0.50 mm radial
                 // clearance, and 0.05 mm of overshoot past it.
@@ -546,6 +562,24 @@ impl Config {
         // Bounded above because the fingers are holding a sample over an
         // open rack while this runs: a decimal-point slip here is the
         // difference between play and a dropped puck.
+        // Arm motion inside a rack with a sample in the fingers, so the
+        // list is bounded like every other number in this block. Below the
+        // trigger pose is allowed but barely: down is where the seat is.
+        if config.probe.heights_mm.len() > 8 {
+            return Err(SequencerError(
+                "probe.heights_mm must have at most 8 entries (each is a full bracket set)".into(),
+            ));
+        }
+        if config
+            .probe
+            .heights_mm
+            .iter()
+            .any(|h| !(-2.0..=10.0).contains(h))
+        {
+            return Err(SequencerError(
+                "probe.heights_mm entries must be within -2..10 mm of the trigger pose".into(),
+            ));
+        }
         if !(0.0..=5.0).contains(&config.probe.loosen_mm) {
             return Err(SequencerError(
                 "probe.loosen_mm must be within 0..5 (the fingers must find the sample again)"
