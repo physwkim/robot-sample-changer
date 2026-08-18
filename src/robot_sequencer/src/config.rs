@@ -299,10 +299,13 @@ pub struct ProbeConfig {
     /// wall. This is the play that reopens it. In millimetres, like every
     /// other number in this block, though the gripper speaks metres.
     ///
-    /// Small on purpose: the fingers still have to hold the puck upright
-    /// and be the thing that finds it. Along the jaw axis the free run is
-    /// half of this before a finger touches the puck again, then the puck's
-    /// own clearance before the bore wall.
+    /// Along the jaw axis the free run is half of this before a finger
+    /// touches the puck again, and only then does the puck cross its own
+    /// clearance to the bore wall. So the play has to be more than twice
+    /// the radial clearance for "nothing in the free run" to mean the
+    /// fingers were not the thing in the way: at 0.4 mm the free run was
+    /// 0.2 mm against a nominal 0.50 mm clearance (§16.2) and could not
+    /// decide it.
     pub loosen_mm: f64,
     /// Sideways, toward a bore wall.
     pub lateral: ProbeAxisConfig,
@@ -314,9 +317,10 @@ impl Default for ProbeConfig {
     fn default() -> Self {
         Self {
             velocity_scale: 0.02,
-            // Under a third of the nominal 0.50 mm radial clearance, so
-            // the puck stays cradled between the pads.
-            loosen_mm: 0.3,
+            // Free run of 0.6 mm per side against the nominal 0.50 mm
+            // radial clearance, so the puck reaches a bore wall before a
+            // pad reaches the puck.
+            loosen_mm: 1.2,
             lateral: ProbeAxisConfig {
                 // Ten steps to a wall at the nominal 0.50 mm radial
                 // clearance, and 0.05 mm of overshoot past it.
@@ -496,9 +500,9 @@ impl Config {
         // Bounded above because the fingers are holding a sample over an
         // open rack while this runs: a decimal-point slip here is the
         // difference between play and a dropped puck.
-        if !(0.0..=1.0).contains(&config.probe.loosen_mm) {
+        if !(0.0..=2.0).contains(&config.probe.loosen_mm) {
             return Err(SequencerError(
-                "probe.loosen_mm must be within 0..1 (the fingers still have to hold the sample)"
+                "probe.loosen_mm must be within 0..2 (the fingers still have to hold the sample)"
                     .into(),
             ));
         }
