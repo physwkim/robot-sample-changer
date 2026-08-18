@@ -21,6 +21,14 @@ const STALL_DWELL: Duration = Duration::from_millis(250);
 /// ...and this much quiet since the last observed movement.
 const STALL_QUIET: Duration = Duration::from_millis(300);
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(10);
+/// Force scale for the probe's release. A move that only has to let go of
+/// something needs no force, and the fingers open into a rack: at the full
+/// scale a release that met the holder would push on it with everything the
+/// Hand-E has. The floor is the gripper's own minimum, not zero.
+const RELEASE_FORCE: f64 = 0.0;
+/// Force scale for closing on a sample — production's value, kept for the
+/// restore so the puck ends held the way the sequence holds it.
+const GRIP_FORCE: f64 = 1.0;
 
 enum Backend {
     Hande(Box<HandeDriver>),
@@ -120,7 +128,7 @@ impl Gripper {
         let from = self.position();
         let target = (from + by_m.max(0.0)).min(self.open_position);
         log::info(&format!("Loosening the grip: {from:.4} -> {target:.4} m"));
-        self.settle_to(target, epics);
+        self.settle_to(target, RELEASE_FORCE, epics);
         let play = self.position() - from;
         log::info(&format!("  Grip loosened, {play:.4} m of play"));
         play
@@ -135,7 +143,7 @@ impl Gripper {
     /// grip the arm then lifts the puck out with.
     pub fn regrip(&mut self, epics: &Epics) {
         log::info("Restoring the grip");
-        self.settle_to(self.close_position, epics);
+        self.settle_to(self.close_position, GRIP_FORCE, epics);
         log::info(&format!("  Grip restored at {:.4} m", self.position()));
     }
 
@@ -158,13 +166,14 @@ impl Gripper {
     ///
     /// The band is what makes [`Gripper::wait_reached`] unusable for a
     /// small move: `reach_tolerance` is 1.5 mm and the probe's release is
-    /// 0.3 mm, so "reached" is already true at the first poll and the wait
-    /// would return before the fingers had moved at all. Waiting for the
+    /// smaller than that, so "reached" is already true at the first poll
+    /// and the wait would return before the fingers had moved at all.
+    /// Waiting for the
     /// stall instead costs the ~0.55 s the stall dwell takes and answers
     /// the question actually being asked — where did they end up.
-    fn settle_to(&mut self, target: f64, epics: &Epics) {
+    fn settle_to(&mut self, target: f64, force: f64, epics: &Epics) {
         match &mut self.backend {
-            Backend::Hande(driver) => driver.set_position(target, 1.0),
+            Backend::Hande(driver) => driver.set_position(target, force),
             Backend::Simulated { position } => *position = target,
         }
         self.settle_at(target, 0.0, epics);

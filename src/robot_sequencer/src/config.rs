@@ -317,10 +317,11 @@ impl Default for ProbeConfig {
     fn default() -> Self {
         Self {
             velocity_scale: 0.02,
-            // Free run of 0.6 mm per side against the nominal 0.50 mm
-            // radial clearance, so the puck reaches a bore wall before a
-            // pad reaches the puck.
-            loosen_mm: 1.2,
+            // Twice what it took to drop base y+ from 6.008 N to
+            // 0.652 N, because at that value the first step still met
+            // something in every direction and the pads had not been
+            // ruled out by a margin.
+            loosen_mm: 2.5,
             lateral: ProbeAxisConfig {
                 // Ten steps to a wall at the nominal 0.50 mm radial
                 // clearance, and 0.05 mm of overshoot past it.
@@ -500,9 +501,9 @@ impl Config {
         // Bounded above because the fingers are holding a sample over an
         // open rack while this runs: a decimal-point slip here is the
         // difference between play and a dropped puck.
-        if !(0.0..=2.0).contains(&config.probe.loosen_mm) {
+        if !(0.0..=5.0).contains(&config.probe.loosen_mm) {
             return Err(SequencerError(
-                "probe.loosen_mm must be within 0..2 (the fingers still have to hold the sample)"
+                "probe.loosen_mm must be within 0..5 (the fingers must find the sample again)"
                     .into(),
             ));
         }
@@ -650,11 +651,11 @@ mod tests {
                 "probe:\n  velocity_scale: 0.5\n",
                 "probe.velocity_scale",
             ),
-            // A slipped decimal point here opens the fingers 3 mm over an
+            // A slipped decimal point here opens the fingers 12 mm over an
             // open rack with a sample in them.
             (
                 "loosen_wide",
-                "probe:\n  loosen_mm: 3.0\n",
+                "probe:\n  loosen_mm: 12.0\n",
                 "probe.loosen_mm",
             ),
         ] {

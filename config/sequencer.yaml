@@ -284,14 +284,18 @@ handeye:
 # validated at startup rather than at the trigger.
 probe:
   velocity_scale: 0.02    # each step is a move into something that may be there
-  loosen_mm: 1.2          # play opened before stepping. A gripped, seated puck
+  loosen_mm: 2.5          # play opened before stepping. A gripped, seated puck
                           # closes the gripper-puck-bore loop and every direction
                           # saturated on the first 0.05 mm step (1.2/1.5/6.3 N,
                           # 2026-08-15) with nothing free in front of it. Half of
                           # this is the free run before a pad touches the puck
                           # again, so it has to beat the nominal 0.50 mm radial
-                          # clearance: at 0.3 the free run was 0.2 mm and the
-                          # first-step trips could not be attributed.
+                          # clearance: at 0.3 the free run was 0.2 mm and base
+                          # y+ still read 6.008 N. 1.2 dropped that to 0.652 N
+                          # but every direction still met something on the first
+                          # step, so this doubles it to put the pads out of reach
+                          # by a margin. The release runs at the gripper's minimum
+                          # force -- it opens into a rack.
   lateral:                # sideways, toward a bore wall
     step_mm: 0.05         # ten steps to the nominal 0.50 mm radial clearance,
                           # and the overshoot past first contact is one of them
