@@ -145,6 +145,60 @@ impl StopAt {
     }
 }
 
+/// Why a run of steps ended, when it ended for a reason the mode can go
+/// on measuring past.
+///
+/// The abort force is not a fault. It is the thing this mode exists to
+/// notice, the arm is walked back out of it, and the run stands where it
+/// started — so one direction meeting something hard must not throw away
+/// the directions already measured. Faults that leave the arm somewhere
+/// unknown (an RTDE read, a retrace that could not be flown, a step that
+/// did not execute) stay `Err` and stop everything.
+#[derive(Debug)]
+enum Stopped {
+    /// Ran out of allowance, or found what it was looking for.
+    Done,
+    /// Force passed `abort_n`, with the reason already worded for the log.
+    TooHard(String),
+}
+
+/// What one direction produced.
+#[derive(Debug, Clone)]
+pub enum Probed {
+    /// Samples, and whatever they say about where the wall is.
+    Wall(Contact),
+    /// The direction was given up on at the abort force. There is no
+    /// wall in it — a probe that had to shove is not measuring a bore.
+    TooHard(String),
+}
+
+impl Probed {
+    fn contact(&self) -> Option<&Contact> {
+        match self {
+            Self::Wall(c) => Some(c),
+            Self::TooHard(_) => None,
+        }
+    }
+
+    /// The travel at which contact tripped, if this direction found one.
+    pub fn tripped_mm(&self) -> Option<f64> {
+        self.contact()?.tripped_mm()
+    }
+
+    /// The fitted wall, if this direction found one.
+    pub fn wall_mm(&self) -> Option<f64> {
+        self.contact()?.wall_mm()
+    }
+
+    /// Why this direction was given up on, if it was.
+    pub fn too_hard(&self) -> Option<&str> {
+        match self {
+            Self::Wall(_) => None,
+            Self::TooHard(why) => Some(why),
+        }
+    }
+}
+
 /// One probe's worth of stepping: where it started, every place it stood,
 /// and what pushed back there.
 #[derive(Debug, Clone)]
@@ -361,8 +415,8 @@ pub struct Bracket {
     /// Travel allowed in each direction, for the message when nothing was
     /// found within it.
     travel_mm: f64,
-    pub plus: Contact,
-    pub minus: Contact,
+    pub plus: Probed,
+    pub minus: Probed,
 }
 
 impl Bracket {
@@ -399,9 +453,24 @@ impl Bracket {
         self.walls_mm().map(|(p, m, _)| (p + m) / 2.0)
     }
 
-    /// One line saying which of the three things happened.
+    /// The directions this axis gave up on at the abort force.
+    fn too_hard(&self) -> Vec<&str> {
+        [self.plus.too_hard(), self.minus.too_hard()]
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
+    /// One line saying which of the things happened.
     pub fn summary(&self) -> String {
         let label = &self.label;
+        // Said first, because a direction that had to shove is not a
+        // direction that found nothing, and the arithmetic below cannot
+        // tell them apart.
+        let hard = self.too_hard();
+        if !hard.is_empty() {
+            return format!("{label}: {} — no centre from this axis", hard.join("; "));
+        }
         match (
             self.walls_mm(),
             self.plus.tripped_mm(),
@@ -508,7 +577,7 @@ impl Motion<'_> {
         dir: Vector3,
         limits: ProbeLimits,
         label: &str,
-    ) -> Result<Contact, SequencerError> {
+    ) -> Result<Probed, SequencerError> {
         let mut out = Contact::new(StopAt::Contact(limits.threshold_n));
         let stepping = self.step_along(
             dir,
@@ -522,8 +591,12 @@ impl Motion<'_> {
         let back: Vec<JointMap> = out.visited.iter().rev().cloned().collect();
         let returned = self.retrace(&back, limits.velocity_scale, label);
         match (stepping, returned) {
-            (Ok(()), Ok(())) => Ok(out),
-            (Ok(()), Err(b)) => Err(b),
+            (Ok(Stopped::Done), Ok(())) => Ok(Probed::Wall(out)),
+            (Ok(Stopped::TooHard(why)), Ok(())) => {
+                log::warn(&format!("  {why}"));
+                Ok(Probed::TooHard(why))
+            }
+            (Ok(_), Err(b)) => Err(b),
             (Err(e), Ok(())) => Err(e),
             // The probe failure is the one the operator has to act on; the
             // retrace failure is why the arm is not where they will look
@@ -545,7 +618,7 @@ impl Motion<'_> {
         stop: StopAt,
         label: &str,
         out: &mut Contact,
-    ) -> Result<(), SequencerError> {
+    ) -> Result<Stopped, SequencerError> {
         let norm = dir.norm();
         if norm < f64::EPSILON {
             return Err(SequencerError(format!("{label}: probe direction is zero")));
@@ -645,7 +718,7 @@ impl Motion<'_> {
                 reading.along, reading.lateral
             ));
             if reading.is_overload(limits.abort_n) {
-                return Err(SequencerError(format!(
+                return Ok(Stopped::TooHard(format!(
                     "{label}: {load:.2} N at {travel:+.3} mm exceeds the {:.2} N abort limit \
                      — the probe met something harder than a bore wall",
                     limits.abort_n
@@ -677,7 +750,7 @@ impl Motion<'_> {
                 limits.travel_mm
             ));
         }
-        Ok(())
+        Ok(Stopped::Done)
     }
 
     /// Moves `mm` along `dir` in probe-sized steps and **stays there**,
@@ -728,8 +801,13 @@ impl Motion<'_> {
         };
         let dir = if mm < 0.0 { -dir } else { dir };
         let mut out = Contact::new(StopAt::Travel);
-        let Err(why) = self.step_along(dir, limits, StopAt::Travel, label, &mut out) else {
-            return Ok(());
+        // Here the abort force *is* a fault, unlike in a probe: a move
+        // that had to shove did not arrive, and everything measured from
+        // where it stopped would be at a height nothing recorded.
+        let why = match self.step_along(dir, limits, StopAt::Travel, label, &mut out) {
+            Ok(Stopped::Done) => return Ok(()),
+            Ok(Stopped::TooHard(why)) => SequencerError(why),
+            Err(e) => e,
         };
         let back: Vec<JointMap> = out.visited.iter().rev().cloned().collect();
         // `why` is already labelled: it comes from the stepping, which
@@ -915,6 +993,24 @@ mod tests {
         }
     }
 
+    /// One direction shoving is not the same as it finding nothing, and
+    /// the arithmetic cannot tell them apart — both leave no wall.
+    #[test]
+    fn a_direction_given_up_on_is_not_a_direction_that_found_nothing() {
+        let hard = Bracket {
+            label: "base y".to_string(),
+            travel_mm: 3.0,
+            plus: Probed::TooHard("base y+: 8.65 N at +0.051 mm".to_string()),
+            minus: Probed::Wall(contact(&[0.1, 0.2, 0.3], &[0.0, 0.0, 0.0], None)),
+        };
+        assert!(hard.centre_mm().is_none());
+        assert!(hard.summary().contains("8.65 N"));
+
+        let empty = bracket(None, None);
+        assert!(empty.centre_mm().is_none());
+        assert!(empty.summary().contains("nothing within"));
+    }
+
     /// A move is not a measurement. The samples can look exactly like a
     /// wall — they will, on the way out of a preloaded seat — and there
     /// is still no wall in them, because nothing was looking for one.
@@ -1093,8 +1189,8 @@ mod tests {
         Bracket {
             label: "base x".into(),
             travel_mm: 1.5,
-            plus: side(plus),
-            minus: side(minus),
+            plus: Probed::Wall(side(plus)),
+            minus: Probed::Wall(side(minus)),
         }
     }
 
@@ -1123,8 +1219,8 @@ mod tests {
         let b = Bracket {
             label: "base x".into(),
             travel_mm: 1.5,
-            plus: fitted,
-            minus: contact(&[0.4], &[9.0], Some(0)),
+            plus: Probed::Wall(fitted),
+            minus: Probed::Wall(contact(&[0.4], &[9.0], Some(0))),
         };
         assert_eq!(b.minus.wall_mm(), None, "the minus side cannot");
         // 0.5 and 0.4, the two trip points, giving 0.05 — not the fitted
@@ -1147,8 +1243,8 @@ mod tests {
         let b = Bracket {
             label: "base x".into(),
             travel_mm: 1.5,
-            plus: side(1.0),
-            minus: side(-1.0),
+            plus: Probed::Wall(side(1.0)),
+            minus: Probed::Wall(side(-1.0)),
         };
         assert!((b.centre_mm().unwrap()).abs() < 1e-12);
         assert!((b.half_gap_mm().unwrap() - 0.45).abs() < 1e-12);

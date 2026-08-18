@@ -22,7 +22,7 @@ use crate::gripper::Gripper;
 use crate::handeye;
 use crate::log;
 use crate::model::{JointMap, Model};
-use crate::motion::{Bracket, Contact, Motion, ProbeLimits};
+use crate::motion::{Bracket, Motion, ProbeLimits, Probed};
 use crate::waypoints::WaypointData;
 
 const POLL: Duration = Duration::from_millis(100);
@@ -93,7 +93,8 @@ struct Level {
     /// Height above the pose the mode was triggered at, mm.
     height_mm: f64,
     brackets: Vec<Bracket>,
-    floor: Contact,
+    /// `None` when the level did not get as far as the floor.
+    floor: Option<Probed>,
 }
 
 pub struct Sequencer<'a> {
@@ -631,7 +632,15 @@ impl<'a> Sequencer<'a> {
             // not. Both are printed because they disagreeing by more than
             // a step is how a floor that was already loaded before the
             // probe began announces itself.
-            match (level.floor.tripped_mm(), level.floor.wall_mm()) {
+            let Some(floor) = &level.floor else {
+                log::info("    base z: not reached — the level stopped before the floor probe");
+                continue;
+            };
+            if let Some(why) = floor.too_hard() {
+                log::info(&format!("    base z: {why}"));
+                continue;
+            }
+            match (floor.tripped_mm(), floor.wall_mm()) {
                 (Some(t), Some(f)) => log::info(&format!(
                     "    base z: floor at {f:+.3} mm from the force-versus-depth fit, \
                      tripped at {t:+.3} mm"
@@ -722,24 +731,44 @@ impl<'a> Sequencer<'a> {
                 &format!("to {height:+.2} mm"),
             )?;
             *at = height;
-            let mut brackets = Vec::new();
-            for (name, axis) in [("base x", Vector3::x()), ("base y", Vector3::y())] {
-                let dir = self.motion.base_dir_in_tool(&axis)?;
-                brackets.push(self.motion.bracket_axis(dir, lateral, name)?);
-            }
-            // Straight down in base, not along whichever tool axis happens
-            // to point that way: the seat floor is horizontal and the
-            // puck's own weight is already resting on it, so the probe has
-            // to push along the same line that weight acts on for the
-            // slope to mean depth.
-            let down = self.motion.base_dir_in_tool(&(-Vector3::z()))?;
-            let floor = self.motion.probe_until_contact(down, depth, "base z-")?;
             levels.push(Level {
                 height_mm: height,
-                brackets,
-                floor,
+                brackets: Vec::new(),
+                floor: None,
             });
+            let level = levels.last_mut().expect("just pushed");
+            // Pushed before it is filled, and filled in place, so that a
+            // fault part way through a level still leaves the axes it had
+            // already measured in the report. This mode writes nothing
+            // else — what it printed is the whole of it.
+            Self::measure_level(&mut self.motion, level, lateral, depth)?;
         }
+        Ok(())
+    }
+
+    /// Both lateral axes and the floor, at wherever the arm is standing.
+    ///
+    /// Takes the motion rather than `self` so the borrow of `level` can
+    /// live alongside it.
+    fn measure_level(
+        motion: &mut Motion<'a>,
+        level: &mut Level,
+        lateral: ProbeLimits,
+        depth: ProbeLimits,
+    ) -> Result<(), SequencerError> {
+        for (name, axis) in [("base x", Vector3::x()), ("base y", Vector3::y())] {
+            let dir = motion.base_dir_in_tool(&axis)?;
+            level
+                .brackets
+                .push(motion.bracket_axis(dir, lateral, name)?);
+        }
+        // Straight down in base, not along whichever tool axis happens
+        // to point that way: the seat floor is horizontal and the puck's
+        // own weight is already resting on it, so the probe has to push
+        // along the same line that weight acts on for the slope to mean
+        // depth.
+        let down = motion.base_dir_in_tool(&(-Vector3::z()))?;
+        level.floor = Some(motion.probe_until_contact(down, depth, "base z-")?);
         Ok(())
     }
 
