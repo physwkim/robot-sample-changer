@@ -799,7 +799,17 @@ impl<'a> Sequencer<'a> {
             let Some(centre) = bracket.centre_mm() else {
                 continue;
             };
-            if centre.abs() < f64::EPSILON {
+            // Below the step the walls were found with there is nothing
+            // to correct: the midpoint of two trip points a step apart is
+            // not known to better than that step, and the arm will not
+            // execute the move anyway — a 0.008 mm command travelled
+            // -0.004 mm and tripped the step-taken guard (doc §16.4).
+            if centre.abs() < lateral.step_mm {
+                log::info(&format!(
+                    "  {} is already centred to within one {:.3} mm step ({centre:+.3} mm)",
+                    bracket.label(),
+                    lateral.step_mm
+                ));
                 continue;
             }
             let label = format!("centre {} by {centre:+.3} mm", bracket.label());
