@@ -901,6 +901,7 @@ impl<'a> Sequencer<'a> {
         ));
         let mut total_mm = [0.0f64; 3];
         let mut wrote = false;
+        let mut quiet_rounds = 0u32;
         for iteration in 1..=g.max_iterations {
             // Reloaded per iteration, by the same path the trigger loop
             // uses: the previous iteration wrote the trims this one has
@@ -944,14 +945,33 @@ impl<'a> Sequencer<'a> {
             // counts, so "settled" and "not written" are one rule.
             let live = force.map(|f| f.abs() >= g.settled_n);
             if !live.iter().any(|l| *l) {
-                log::info(&format!(
-                    "grip null: settled at iteration {iteration}; every force \
-                     component is under {:.2} N. Total move ({:+.3}, {:+.3}, \
-                     {:+.3}) mm in {}, {}, {}",
-                    g.settled_n, total_mm[0], total_mm[1], total_mm[2], AXES[0], AXES[1], AXES[2]
-                ));
-                return Ok(if wrote { Outcome::Wrote } else { Outcome::Ran });
+                // Confirmed, not declared. The scatter on one reading is
+                // an appreciable fraction of the floor, so a single
+                // quiet round is as likely to be the noise as the null —
+                // h8 read +0.96, +0.80, +0.94, +0.87, +0.84 and then
+                // +0.11 N on base y without having moved 0.031 mm
+                // (2026-08-19), and stopping there would have banked the
+                // outlier.
+                quiet_rounds += 1;
+                if quiet_rounds >= 2 {
+                    log::info(&format!(
+                        "grip null: settled at iteration {iteration}; every force \
+                         component was under {:.2} N twice running. Total move \
+                         ({:+.3}, {:+.3}, {:+.3}) mm in {}, {}, {}",
+                        g.settled_n,
+                        total_mm[0],
+                        total_mm[1],
+                        total_mm[2],
+                        AXES[0],
+                        AXES[1],
+                        AXES[2]
+                    ));
+                    return Ok(if wrote { Outcome::Wrote } else { Outcome::Ran });
+                }
+                log::info("  grip null: under the floor; one more round to confirm");
+                continue;
             }
+            quiet_rounds = 0;
             let step_mm: [f64; 3] = std::array::from_fn(|i| {
                 if live[i] {
                     -force[i] / g.stiffness_n_per_mm[i] * g.damping
