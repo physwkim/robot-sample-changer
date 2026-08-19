@@ -32,7 +32,10 @@ impl Action {
                 } else {
                     format!(" (fetching holder {source}'s puck first)")
                 };
-                format!("Null the grip wrench at holder {target} and write its trims{from}")
+                format!(
+                    "Null the grip wrench at {} and write its trims{from}",
+                    seat_name(*target)
+                )
             }
             Action::Transfer { target, source } => {
                 format!("Move the puck from holder {source} to holder {target}")
@@ -103,6 +106,16 @@ const AMBER: egui::Color32 = egui::Color32::from_rgb(0xff, 0xb3, 0x00);
 const LABEL_W: f32 = 92.0;
 
 /// A card's label/field rows.
+/// What a seat number is called: `Robot:Holder = 0` is the stage bore,
+/// 1-10 the rack wells.
+fn seat_name(n: i64) -> String {
+    if n == 0 {
+        "stage".into()
+    } else {
+        format!("holder {n}")
+    }
+}
+
 fn fields(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui)) {
     egui::Grid::new(id)
         .num_columns(2)
@@ -188,7 +201,9 @@ impl OpsPanel {
             Action::GripNull { target, source } => {
                 put(&self.holder, target);
                 // 0 means the puck already seated in the target; anything
-                // else is fetched first, on the same trigger.
+                // else is fetched first, on the same trigger. The stage
+                // can only be the former: the fetch carries rack to rack.
+                let source = if target == 0 { 0 } else { source };
                 put(&self.map_source, if source == target { 0 } else { source });
                 put(&self.calib_mode, 6);
                 // Grip null refuses mid-sequence resumes.
@@ -199,9 +214,9 @@ impl OpsPanel {
                 put(&self.trigger, 1);
                 self.note = if source == 0 || source == target {
                     format!(
-                        "Nulling holder {target} — it picks and reseats that holder's own \
-                         puck once per iteration and writes the trims to \
-                         taught_waypoints.yaml"
+                        "Nulling {} — it picks and reseats that seat's own puck once per \
+                         iteration and writes the trims to taught_waypoints.yaml",
+                        seat_name(target)
                     )
                 } else {
                     format!(
@@ -321,8 +336,8 @@ impl OpsPanel {
                         .unwrap_or("-"),
                 );
                 ui.end_row();
-                ui.label("Holder:");
-                ui.label(holder.map_or("-".to_string(), |h| h.to_string()));
+                ui.label("Seat:");
+                ui.label(holder.map_or("-".to_string(), seat_name));
                 ui.end_row();
                 ui.label("Sample:");
                 ui.label(if loaded { "Loaded" } else { "Not loaded" });
@@ -333,8 +348,11 @@ impl OpsPanel {
                 ui.label("Gripper:");
                 self.gripper_rbv.show(ui);
                 ui.end_row();
-                // Base frame, the frame the grip-null trims are written in:
-                // x -> holder x trim, y -> z trim, z -> depth (y) trim.
+                // Base frame, as the RTDE stream reports it. The grip
+                // null writes tool-frame trims and rotates this itself;
+                // at a rack seat that comes out x -> x trim, y -> z
+                // trim, z -> depth (y) trim, and at the stage it does
+                // not, which is why the daemon does the turning.
                 let w = self.wrench.state();
                 let w = w.value.as_ref().and_then(PvValue::as_f64_slice);
                 let w = w.filter(|v| v.len() >= 6);
@@ -473,16 +491,28 @@ impl OpsPanel {
         ui.vertical(|ui| {
             ui.strong("Grip null");
             ui.label("Close on the puck, write the trims the wrench asks for.");
+            let stage = self.null_holder == 0;
             fields(ui, "gripnull-fields", |ui| {
-                ui.label("Holder:");
-                ui.add(egui::DragValue::new(&mut self.null_holder).range(1..=10));
+                ui.label("Seat:");
+                ui.add(
+                    egui::DragValue::new(&mut self.null_holder)
+                        .range(0..=10)
+                        .custom_formatter(|n, _| seat_name(n as i64)),
+                );
                 ui.end_row();
                 ui.label("Puck from:");
-                ui.add(egui::DragValue::new(&mut self.null_source).range(0..=10));
+                // The fetch is rack to rack, so the stage nulls whatever
+                // is already sitting in it.
+                ui.add_enabled(
+                    !stage,
+                    egui::DragValue::new(&mut self.null_source).range(0..=10),
+                );
                 ui.end_row();
             });
             let own = self.null_source == 0 || self.null_source == self.null_holder;
-            ui.label(if own {
+            ui.label(if stage {
+                "(the stage nulls the puck a Normal run left on it)"
+            } else if own {
                 "(0 = the puck already in that holder)"
             } else {
                 "(fetched first; the target seat must be empty)"
