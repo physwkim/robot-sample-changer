@@ -15,7 +15,7 @@ use crate::pvs::{MODE_NAMES, robot, step_name};
 enum Action {
     Mount(i64),
     Return(i64),
-    Map { target: i64, source: i64 },
+    GripNull(i64),
     Transfer { target: i64, source: i64 },
     Advanced { mode: i64, start: i64 },
     Recover,
@@ -26,11 +26,8 @@ impl Action {
         match self {
             Action::Mount(h) => format!("Mount holder {h} on the stage"),
             Action::Return(h) => format!("Return the sample to holder {h}"),
-            Action::Map { target, source: 0 } => {
-                format!("Map holder {target} with its own puck")
-            }
-            Action::Map { target, source } => {
-                format!("Map holder {target} with the puck from holder {source}")
+            Action::GripNull(h) => {
+                format!("Null the grip wrench at holder {h} and write its trims")
             }
             Action::Transfer { target, source } => {
                 format!("Move the puck from holder {source} to holder {target}")
@@ -59,8 +56,7 @@ pub struct OpsPanel {
     gripper_rbv: RsdmLabel,
 
     holder_sel: i64,
-    map_target: i64,
-    map_src: i64,
+    null_holder: i64,
     xfer_target: i64,
     xfer_src: i64,
     adv_mode: usize,
@@ -91,8 +87,7 @@ impl OpsPanel {
             gripper: ch("Gripper")?,
             gripper_rbv: RsdmLabel::new(engine, &robot("Gripper_RBV"))?,
             holder_sel: 1,
-            map_target: 1,
-            map_src: 0,
+            null_holder: 1,
             xfer_target: 6,
             xfer_src: 7,
             adv_mode: 0,
@@ -134,19 +129,18 @@ impl OpsPanel {
                     "Going to the stage — press Continue at the wait to retrieve to holder {h}"
                 );
             }
-            Action::Map { target, source } => {
-                put(&self.holder, target);
-                put(&self.map_source, source);
+            Action::GripNull(h) => {
+                put(&self.holder, h);
                 put(&self.calib_mode, 6);
-                // Holder map refuses mid-sequence resumes.
+                // Grip null refuses mid-sequence resumes.
                 put(&self.start_step, 0);
                 put(&self.pause_step, 0);
                 self.pause_step_input = 0;
                 put(&self.wait, 0);
                 put(&self.trigger, 1);
                 self.note = format!(
-                    "Mapping holder {target} — the puck stays seated and the probed \
-                     trims are written to taught_waypoints.yaml"
+                    "Nulling holder {h} — it picks and reseats its own puck once per \
+                     iteration and writes the trims to taught_waypoints.yaml"
                 );
             }
             Action::Transfer { target, source } => {
@@ -343,20 +337,15 @@ impl OpsPanel {
         ui.horizontal_top(|ui| {
             ui.group(|ui| {
                 ui.vertical(|ui| {
-                    ui.strong("Holder map");
-                    ui.label("Probe a seat and write its trims.");
+                    ui.strong("Grip null");
+                    ui.label("Close on the puck, write the trims the wrench asks for.");
                     ui.horizontal(|ui| {
-                        ui.label("Target:");
-                        ui.add(egui::DragValue::new(&mut self.map_target).range(1..=10));
-                        ui.label("Puck from:");
-                        ui.add(egui::DragValue::new(&mut self.map_src).range(0..=10));
+                        ui.label("Holder:");
+                        ui.add(egui::DragValue::new(&mut self.null_holder).range(1..=10));
                     });
-                    ui.label("(0 = the target's own puck)");
-                    if ui.button("Map holder").clicked() {
-                        self.request(Action::Map {
-                            target: self.map_target,
-                            source: self.map_src,
-                        });
+                    ui.label("(the holder must have a puck in it)");
+                    if ui.button("Null grip").clicked() {
+                        self.request(Action::GripNull(self.null_holder));
                     }
                 });
             });

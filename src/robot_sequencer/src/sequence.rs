@@ -144,47 +144,6 @@ struct Level {
     tilts: Vec<Tilted>,
 }
 
-/// What the seat-level probe found, in mm from the pose it started at.
-///
-/// Three independent `Option`s and not one `Option` over the set: an
-/// axis that failed to bracket says nothing about the two that did, and
-/// which one is missing is what the operator needs told. What to do
-/// with a partial answer is the writer's decision, not the prober's —
-/// see [`Sequencer::persist_seat_centres`].
-#[derive(Debug, Clone, Copy, Default)]
-struct Seat {
-    /// Lateral bracket centre along base x, which trims tool x.
-    ///
-    /// Measured at the topmost height the probe was asked for, not at
-    /// the seat. A seated puck is under tension — the taught residual
-    /// preloads it against a wall, and what a bracket reports there is
-    /// the holder flexing and the arm being pulled, not where the seat
-    /// is. The centre is only the centre for both the way down and the
-    /// way up if it was measured with that tension gone.
-    centre_x_mm: Option<f64>,
-    /// Lateral bracket centre along base y, which trims tool z. Same
-    /// height as `centre_x_mm`.
-    centre_y_mm: Option<f64>,
-    /// How far below the TAUGHT pose the floor is, from the
-    /// force-versus-depth fit rather than the trip point, which carries
-    /// the threshold and up to a step of overshoot in it.
-    ///
-    /// Reported, not written: see [`Sequencer::persist_seat_centres`] for
-    /// why the tool y trim is left to the hand-taught value.
-    ///
-    /// From the LAST level, converted here so every field of this struct
-    /// is in the taught pose's frame whatever height it was measured at.
-    /// It cannot come from the same height as the centres: a descent
-    /// started above the well meets the well's own mouth long before the
-    /// floor and reports that instead (h7 tripped at 0.815 mm ABOVE the
-    /// taught pose, twice, 2026-08-19). It cannot come from the first
-    /// level either, where the taught pose holds the puck against the
-    /// floor and a downward step loads it without travelling. So the
-    /// ladder ends by putting the puck back down on the centre the
-    /// lifted level found, and the floor is probed from there.
-    floor_mm: Option<f64>,
-}
-
 pub struct Sequencer<'a> {
     epics: Epics,
     motion: Motion<'a>,
@@ -263,7 +222,7 @@ enum Outcome {
     Ran,
     /// Normal mode, Wait PV = 2: steps 13-23 were not run.
     Skipped,
-    /// Holder map: the seat's trims in the taught file were rewritten.
+    /// Grip null: the seat's trims in the taught file were rewritten.
     Wrote,
 }
 
@@ -305,7 +264,7 @@ impl<'a> Sequencer<'a> {
                 CalibMode::SampleHolder => "SampleHolder",
                 CalibMode::HandEye => "HandEye",
                 CalibMode::SeatProbe => "SeatProbe",
-                CalibMode::HolderMap => "HolderMap",
+                CalibMode::GripNull => "GripNull",
                 CalibMode::HolderTransfer => "HolderTransfer",
                 CalibMode::Recover => "Recover",
                 CalibMode::Normal => "Normal",
@@ -349,11 +308,9 @@ impl<'a> Sequencer<'a> {
             };
             let attempt = self.compute_base_waypoints(&waypoints).and_then(|base| {
                 match calib_mode {
-                    // Needs waypoints for two holders (source and target),
-                    // so it owns its own compute_run_waypoints calls.
-                    CalibMode::HolderMap => {
-                        self.run_holder_map(&waypoints, &base, holder_number, start_from_step)
-                    }
+                    // Reloads and recomputes once per iteration, since
+                    // each iteration writes the trims the next one reads.
+                    CalibMode::GripNull => self.run_grip_null(holder_number, start_from_step),
                     CalibMode::HolderTransfer => {
                         self.run_holder_transfer(&waypoints, &base, holder_number, start_from_step)
                     }
@@ -368,7 +325,7 @@ impl<'a> Sequencer<'a> {
                             CalibMode::SeatProbe => self.run_seat_probe(),
                             CalibMode::Recover => self.run_recover(&run),
                             CalibMode::Normal => self.run_normal(&run, start_from_step),
-                            CalibMode::HolderMap | CalibMode::HolderTransfer => {
+                            CalibMode::GripNull | CalibMode::HolderTransfer => {
                                 unreachable!("dispatched above")
                             }
                         }),
@@ -417,11 +374,11 @@ impl<'a> Sequencer<'a> {
                 (CalibMode::HolderTransfer, _) => {
                     log::info(&format!("Puck moved into holder {holder_number}"))
                 }
-                (CalibMode::HolderMap, Outcome::Wrote) => log::info(&format!(
-                    "Holder map finished for holder {holder_number}; trims written above"
+                (CalibMode::GripNull, Outcome::Wrote) => log::info(&format!(
+                    "Grip null finished for holder {holder_number}; trims written above"
                 )),
-                (CalibMode::HolderMap, _) => log::info(&format!(
-                    "Holder map finished for holder {holder_number}; nothing written"
+                (CalibMode::GripNull, _) => log::info(&format!(
+                    "Grip null finished for holder {holder_number}; nothing written"
                 )),
             }
             log::info("========================================");
@@ -750,7 +707,7 @@ impl<'a> Sequencer<'a> {
         log::info("  not in the seat, or the fingers are empty, stop here.");
         log::info("========================================");
         self.wait_for_trigger(true);
-        let (_, soft) = self.seat_probe_here(self.config.probe.bore.seat_probe())?;
+        let soft = self.seat_probe_here(self.config.probe.bore.seat_probe())?;
         log::info(
             "Nothing was written. The arm is back at the pose the probe \
              started from and the grip is back on the puck; lift it out \
@@ -768,21 +725,23 @@ impl<'a> Sequencer<'a> {
     /// report. Writing is the caller's business: mode 5 writes nothing,
     /// holder map folds the returned centres into the trim file.
     ///
-    /// The first element of the pair is the trigger-pose level's bracket
-    /// centres `(base x, base y)` in mm — the pose the probe starts at
-    /// is the taught seat pose itself, so these ARE the residual trim
-    /// errors — and `None` when either bracket failed to find both
-    /// walls. The `Option<SequencerError>` keeps "how much was measured"
-    /// apart from "where is the arm": `None` measured everything,
-    /// `Some(e)` was stopped by `e` but the arm is back at the entry
-    /// pose — with the grip back on the puck unless `e` is the regrip
-    /// check itself reporting the puck lost — and the outer `Err` means
-    /// even the walk back failed, so the arm is somewhere a caller must
-    /// not build on.
+    /// Everything measured goes to the log here; the return value
+    /// carries only how far the probe got. It used to hand its bracket
+    /// centres back for the holder map to write from, but the map read
+    /// walls the puck was already pressed against — the grip wrench
+    /// replaced it, so there is no longer a caller that acts on these
+    /// numbers, and inventing one would re-open that mistake.
+    ///
+    /// The `Option<SequencerError>` keeps "how much was measured" apart
+    /// from "where is the arm": `None` measured everything, `Some(e)`
+    /// was stopped by `e` but the arm is back at the entry pose — with
+    /// the grip back on the puck unless `e` is the regrip check itself
+    /// reporting the puck lost — and the outer `Err` means even the walk
+    /// back failed, so the arm is somewhere a caller must not build on.
     fn seat_probe_here(
         &mut self,
         seat: SeatProbe,
-    ) -> Result<(Seat, Option<SequencerError>), SequencerError> {
+    ) -> Result<Option<SequencerError>, SequencerError> {
         let p = &self.config.probe;
         let depth = ProbeLimits::new(&seat.depth, p.velocity_scale);
         let limits = Limits {
@@ -815,34 +774,6 @@ impl<'a> Sequencer<'a> {
             })?;
 
         let lifted = !seat.heights_mm.is_empty();
-        // Each trim comes from the level whose physics can measure it,
-        // picked by LADDER INDEX so a walk that stopped short leaves it
-        // unmeasured rather than quietly handing back a reading from
-        // somewhere else. The laterals want the highest level, where the
-        // seat holds no tension; the floor wants the last one, which is
-        // where the ladder has put the puck back down.
-        // measure_level order: brackets[0] = base x, [1] = base y.
-        let ladder: Vec<f64> = std::iter::once(0.0)
-            .chain(seat.heights_mm.iter().copied())
-            .collect();
-        let highest = ladder
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.total_cmp(b.1))
-            .map_or(0, |(i, _)| i);
-        let free = levels.get(highest);
-        let seat = Seat {
-            centre_x_mm: free
-                .and_then(|l| l.brackets.first())
-                .and_then(Bracket::centre_mm),
-            centre_y_mm: free
-                .and_then(|l| l.brackets.get(1))
-                .and_then(Bracket::centre_mm),
-            floor_mm: levels
-                .get(ladder.len() - 1)
-                .and_then(|l| Some((l, l.floor.as_ref()?.wall_mm()?)))
-                .map(|(l, floor)| floor - l.height_mm),
-        };
         log::info("========================================");
         log::info("SEAT PROBE RESULT (measured from the pose the probe started at)");
         // Half of it on each side, so the first `play/2` of every lateral
@@ -917,107 +848,161 @@ impl<'a> Sequencer<'a> {
         // The grip check outranks the sweep's own failure: brackets swept
         // with the puck dragging along the fingers are free travel, not
         // walls, and the loss is what explains them.
-        Ok((seat, grip_lost.or(walked.err())))
+        Ok(grip_lost.or(walked.err()))
     }
 
-    /// Holder map (`CalibMode = 6`): one trigger probes one holder's
-    /// seat. The puck comes from `MapSource` — another holder, ferried
-    /// through the sample holder exactly like the normal sequence does
-    /// (steps 0-11, 13-20) — or, when `MapSource` is 0 or the target
-    /// itself, the resident puck picked in place (steps 0-4). The probe
-    /// then runs without a jog hold, since the arm just seated the puck
-    /// and the taught pose is the pose under test, and the puck is left
-    /// seated (steps 21-23). A probe that measured everything folds the
-    /// seat-level bracket centres into this holder's x/z trim slots in
-    /// the taught-waypoints file (see
-    /// [`Sequencer::persist_seat_centres`]) — obtaining the optimum and
-    /// applying it is what the mode is for.
+    /// Grip null (`CalibMode = 6`): drive this holder's taught seat pose
+    /// to where the fingers close on its puck without loading it.
     ///
-    /// Step numbers and waypoints are the normal sequence's own, so
-    /// PauseStep and CurrentStep behave as usual; like the other
-    /// calibration modes there are no vision hooks, because the taught
-    /// error is the thing being measured. A probe that measured less
-    /// than asked but walked back out still releases the puck and
-    /// retreats before the failure is reported — the alternative leaves
-    /// the arm parked in a bore for no reason.
+    /// One trigger runs the whole loop. Each iteration picks the puck
+    /// (steps 0-5), puts it straight back (20-23), and steers on the
+    /// wrench the close left on the tool. The pose error is legible
+    /// there and nowhere else this daemon can reach: the puck is held by
+    /// the well, so pads that meet it off-centre press it on one side
+    /// and the reaction lands on the arm at tens of newtons per
+    /// millimetre. It replaced the seat probe in this slot because the
+    /// probe pushed the *arm* against walls the puck was already
+    /// touching, which brackets the well's play and not the error --
+    /// h10 read 17.8 N here against 0.3 N at a holder that grips clean,
+    /// while its probe could not write at all (2026-08-19).
     ///
-    /// Always runs from the top: a resume into a half-done map would
-    /// grip air or probe an empty seat, so a non-zero `StartStep` is
+    /// **The loop is closed, so `stiffness_n_per_mm` only sets how fast
+    /// it converges, not where it stops.** That matters because those
+    /// constants are two holders' worth of measurement. `damping` below
+    /// 1 is what makes a two-point estimate safe: at 0.7 the iteration
+    /// still contracts with a stiffness wrong by a factor of two in
+    /// either direction, where at 1.0 a 2x underestimate would sit on
+    /// the edge of oscillating.
+    ///
+    /// The correction is the same on all three axes -- `-force /
+    /// stiffness` -- and so is the threshold: an axis under
+    /// `settled_n` is measurement grain, so it is neither written nor
+    /// counted against convergence. Both signs come out opposite to the
+    /// obvious argument about which way a closing finger drags an arm,
+    /// which is why they are recorded here as measured rather than
+    /// derived.
+    ///
+    /// Always runs from the top: a resume would grip air, or release
+    /// into a seat that is not empty, so a non-zero `StartStep` is
     /// refused rather than honored.
-    fn run_holder_map(
-        &mut self,
-        wd: &WaypointData,
-        base: &BaseWaypoints,
-        target: i32,
-        start: i32,
-    ) -> Result<Outcome, SequencerError> {
+    fn run_grip_null(&mut self, holder: i32, start: i32) -> Result<Outcome, SequencerError> {
+        /// Index order of every triple here: the wrench components the
+        /// loop reads, the trim slots it writes, and the log.
+        const AXES: [&str; 3] = ["base x", "base y", "depth"];
         if start != 0 {
             return Err(SequencerError(format!(
-                "holder map always runs from the top; StartStep is {start} — set \
-                 it to 0 (recover a failed map with CalibMode=4 and a fresh \
+                "grip null always runs from the top; StartStep is {start} — set \
+                 it to 0 (recover a failed run with CalibMode=4 and a fresh \
                  trigger instead)"
             )));
         }
-        let source = match self.epics.read_map_source() {
-            0 => target,
-            s => s,
-        };
-        let w_t = self.compute_run_waypoints(wd, base, target)?;
-        if source == target {
+        let g = self.config.grip_null.clone();
+        log::info(&format!(
+            ">>> GRIP NULL MODE: holder {holder}, up to {} iterations <<<",
+            g.max_iterations
+        ));
+        let mut total_mm = [0.0f64; 3];
+        let mut wrote = false;
+        for iteration in 1..=g.max_iterations {
+            // Reloaded per iteration, by the same path the trigger loop
+            // uses: the previous iteration wrote the trims this one has
+            // to pick the puck with.
+            let wd = WaypointData::load(&self.config.sequence.waypoints_yaml)?;
+            let base = self.compute_base_waypoints(&wd)?;
+            let run = self.compute_run_waypoints(&wd, &base, holder)?;
             log::info(&format!(
-                ">>> HOLDER MAP MODE: probe holder {target} in place <<<"
+                "--- grip null iteration {iteration} of {} ---",
+                g.max_iterations
             ));
             self.hand(0, "open_hand", true, 0)?;
-            self.arm(1, "holder_standby", &w_t.standby, 0)?;
-            self.cartesian(2, "holder_above", &w_t.above, 0)?;
-            self.cartesian(3, "holder_on_position", &w_t.on_pos, 0)?;
-            self.hand(4, "close_gripper", false, 0)?;
-        } else {
-            log::info(&format!(
-                ">>> HOLDER MAP MODE: probe holder {target} with the puck from \
-                 holder {source} <<<"
-            ));
-            let w_s = self.compute_run_waypoints(wd, base, source)?;
-            self.hand(0, "open_hand", true, 0)?;
-            self.arm(1, "holder_standby", &w_s.standby, 0)?;
-            self.cartesian(2, "holder_above", &w_s.above, 0)?;
-            self.cartesian(3, "holder_on_position", &w_s.on_pos, 0)?;
-            self.hand(4, "close_gripper", false, 0)?;
-            self.cartesian(5, "holder_above_return", &w_s.above, 0)?;
-            self.cartesian(6, "holder_retreat", &w_s.retreat, 0)?;
-            self.arm(7, "sample_holder_standby", &w_s.sh_standby, 0)?;
-            self.cartesian(8, "sample_holder_above", &w_s.sh_above, 0)?;
-            self.cartesian(9, "sample_holder_on_position", &w_s.sh_on_pos, 0)?;
-            self.hand(10, "open_gripper", true, 0)?;
-            self.cartesian(11, "sample_holder_above_return", &w_s.sh_above, 0)?;
-            self.cartesian(13, "sample_holder_above_2nd", &w_t.sh_above, 0)?;
-            self.cartesian(14, "sample_holder_on_position_2nd", &w_t.sh_on_pos, 0)?;
-            self.hand(15, "close_gripper_2nd", false, 0)?;
-            self.cartesian(16, "sample_holder_above_2nd_return", &w_t.sh_above, 0)?;
-            self.cartesian(17, "sample_holder_standby_2nd", &w_t.sh_standby, 0)?;
-            self.arm(18, "holder_standby_return", &w_t.standby, 0)?;
-            self.cartesian(19, "holder_above_final", &w_t.above, 0)?;
-            self.cartesian(20, "holder_on_position_final", &w_t.on_pos, 0)?;
-        }
+            self.arm(1, "holder_standby", &run.standby, 0)?;
+            self.cartesian(2, "holder_above", &run.above, 0)?;
+            self.cartesian(3, "holder_on_position", &run.on_pos, 0)?;
+            let measured = self.hand(4, "close_gripper", false, 0)?;
+            // The puck goes back before anything is decided: the reading
+            // is already taken, and every exit below -- settled, capped,
+            // out of iterations -- must leave the seat as it found it.
+            self.cartesian(5, "holder_above_return", &run.above, 0)?;
+            self.cartesian(20, "holder_on_position_final", &run.on_pos, 0)?;
+            self.hand(21, "open_gripper_final", true, 0)?;
+            self.cartesian(22, "holder_above_final_return", &run.above, 0)?;
+            self.cartesian(23, "holder_standby_final", &run.standby, 0)?;
 
-        // The well's own profile: clamped by construction, and stepping
-        // an order of magnitude finer than the bore, whose walls sit ten
-        // steps out rather than inside the first one.
-        let (seat, probed) = self.seat_probe_here(self.config.probe.well.seat_probe())?;
-        if let Some(e) = &probed {
-            log::warn(&format!(
-                "probe measured less than asked ({e}); the arm walked back to \
-                 the seat, so the puck is left there and the arm retreats \
-                 before the failure is reported"
+            let Some(w) = measured else {
+                return Err(SequencerError(
+                    "grip null: the close reported no wrench, so there is \
+                     nothing to steer on; the puck is back in its seat and \
+                     the taught trims are unchanged"
+                        .into(),
+                ));
+            };
+            let force = [w[0], w[1], w[2]];
+            log::info(&format!(
+                "  grip null: the close left ({:+.2}, {:+.2}, {:+.2}) N, \
+                 ({:+.3}, {:+.3}, {:+.3}) Nm",
+                w[0], w[1], w[2], w[3], w[4], w[5]
             ));
+            // An axis inside the noise floor is left alone on both
+            // counts, so "settled" and "not written" are one rule.
+            let live = force.map(|f| f.abs() >= g.settled_n);
+            if !live.iter().any(|l| *l) {
+                log::info(&format!(
+                    "grip null: settled at iteration {iteration}; every force \
+                     component is under {:.2} N. Total move ({:+.3}, {:+.3}, \
+                     {:+.3}) mm in {}, {}, {}",
+                    g.settled_n, total_mm[0], total_mm[1], total_mm[2], AXES[0], AXES[1], AXES[2]
+                ));
+                return Ok(if wrote { Outcome::Wrote } else { Outcome::Ran });
+            }
+            let step_mm: [f64; 3] = std::array::from_fn(|i| {
+                if live[i] {
+                    -force[i] / g.stiffness_n_per_mm[i] * g.damping
+                } else {
+                    0.0
+                }
+            });
+            for (i, axis) in AXES.iter().enumerate() {
+                if step_mm[i].abs() > g.max_step_mm {
+                    return Err(SequencerError(format!(
+                        "grip null: iteration {iteration} asks for {:+.3} mm in \
+                         {axis} from {:+.2} N, past the {:.2} mm step cap — that \
+                         is not a trim error; nothing was written this round",
+                        step_mm[i], force[i], g.max_step_mm
+                    )));
+                }
+                if (total_mm[i] + step_mm[i]).abs() > g.max_total_mm {
+                    return Err(SequencerError(format!(
+                        "grip null: {axis} would reach {:+.3} mm from the taught \
+                         pose, past the {:.2} mm total cap — the seat is wrong, \
+                         not the trim; nothing was written this round",
+                        total_mm[i] + step_mm[i],
+                        g.max_total_mm
+                    )));
+                }
+            }
+            // x trim is base x, z trim is base y, y trim is depth: the
+            // mapping every hand-tuned trim in the file already uses.
+            let over = |i: usize| live[i].then_some(step_mm[i] / 1000.0);
+            for line in persist_holder_trims(
+                &self.config.sequence.waypoints_yaml,
+                holder,
+                over(0),
+                over(2),
+                over(1),
+            )? {
+                log::info(&line);
+            }
+            wrote = true;
+            for i in 0..3 {
+                total_mm[i] += step_mm[i];
+            }
         }
-        self.hand(21, "open_gripper_final", true, 0)?;
-        self.cartesian(22, "holder_above_final_return", &w_t.above, 0)?;
-        self.cartesian(23, "holder_standby_final", &w_t.standby, 0)?;
-        if let Some(e) = probed {
-            return Err(e);
-        }
-        self.persist_seat_centres(target, seat, wd.holder_on_lift * 1000.0)
+        Err(SequencerError(format!(
+            "grip null: {} iterations did not bring holder {holder} under \
+             {:.2} N. The puck is seated and the arm is at standby; the trims \
+             written so far are kept, so a fresh trigger continues from here",
+            g.max_iterations, g.settled_n
+        )))
     }
 
     /// Carry one puck from `MapSource` to `Holder`, straight across.
@@ -1078,104 +1063,6 @@ impl<'a> Sequencer<'a> {
         self.cartesian(22, "holder_above_final_return", &w_t.above, 0)?;
         self.cartesian(23, "holder_standby_final", &w_t.standby, 0)?;
         Ok(Outcome::Ran)
-    }
-
-    /// The write half of holder map: folds what the seat-level probe
-    /// measured into the holder's trim slots in the taught-waypoints
-    /// file, which the next trigger reloads like everything in it.
-    ///
-    /// Both laterals or neither. The frame mapping is the one every
-    /// hand-tuned trim used: bracket "base x" corrects the x trim (tool
-    /// x is base +x at the seats) and bracket "base y" the z trim (tool
-    /// z is base +y). A missing bracket is a probe that did not measure,
-    /// not a zero, so writing the other one would move the taught pose
-    /// along a line whose second coordinate is unknown — the run is
-    /// refused instead, naming what is missing.
-    ///
-    /// **Depth is measured and reported, never written.** The floor fit
-    /// would give `floor − holder_on_position_lift`, but at h7 that
-    /// number did not repeat: three consecutive maps of the same seat
-    /// read the hover as 0.076, -0.025 and +0.438 mm (2026-08-19), a
-    /// spread twenty times the deadband it would be written against,
-    /// because the puck's height in the fingers is set by wherever the
-    /// pads happened to close on its neck. The laterals over the same
-    /// three runs converged (x +0.150 -> +0.007 -> +0.026 mm). And it is
-    /// the laterals that decide whether the seat binds: with the centre
-    /// applied the lift off h7 fell from a 14.5 N drag to 0.32 N, while
-    /// the well floor is a hard stop the puck rests on either way.
-    ///
-    /// A correction inside `persist_deadband_mm` is measurement grain
-    /// and leaves the taught value alone; one past `PERSIST_CAP_MM` is
-    /// not a trim at all, it is something wrong with the seat (a foreign
-    /// object in the well reads exactly like this), so the write is
-    /// refused and the number reported rather than absorbed.
-    fn persist_seat_centres(
-        &mut self,
-        holder: i32,
-        seat: Seat,
-        lift_mm: f64,
-    ) -> Result<Outcome, SequencerError> {
-        const PERSIST_CAP_MM: f64 = 1.0;
-        // Depth: reported against the lift the teaching intends, so an
-        // operator can see where the puck rode without the map acting on
-        // a number that does not repeat.
-        match seat.floor_mm {
-            Some(floor) => log::info(&format!(
-                "holder map: the puck rode {floor:+.3} mm over the floor \
-                 against a taught lift of {lift_mm:.3} mm ({:+.3} mm); the \
-                 depth trim is not written from this",
-                floor - lift_mm
-            )),
-            None => log::info("holder map: no floor fit; depth not reported"),
-        }
-        let missing: Vec<&str> = [
-            ("base x wall bracket", seat.centre_x_mm.is_none()),
-            ("base y wall bracket", seat.centre_y_mm.is_none()),
-        ]
-        .into_iter()
-        .filter_map(|(name, absent)| absent.then_some(name))
-        .collect();
-        if !missing.is_empty() {
-            return Err(SequencerError(format!(
-                "holder map: {} did not measure, so the seat is located in \
-                 fewer than two axes; the taught trims are unchanged",
-                missing.join(" and ")
-            )));
-        }
-        // Both corrections in tool axes, which is what the trim slots
-        // are: x from the base x bracket, z from the base y bracket.
-        let corrections = [
-            ("x", "base x centre", seat.centre_x_mm.unwrap_or_default()),
-            ("z", "base y centre", seat.centre_y_mm.unwrap_or_default()),
-        ];
-        for (trim, what, c) in corrections {
-            if c.abs() > PERSIST_CAP_MM {
-                return Err(SequencerError(format!(
-                    "holder map: {what} is {c:+.3} mm, past the \
-                     {PERSIST_CAP_MM} mm persist cap — that is not a {trim} \
-                     trim error; nothing was written"
-                )));
-            }
-        }
-        let deadband_mm = self.config.probe.well.persist_deadband_mm;
-        let over = |c: f64| (c.abs() >= deadband_mm).then_some(c / 1000.0);
-        let [dx, dz] = corrections.map(|(_, _, c)| over(c));
-        if dx.is_none() && dz.is_none() {
-            let [cx, cz] = corrections.map(|(_, _, c)| c);
-            log::info(&format!(
-                "holder map: both lateral corrections (x {cx:+.3}, \
-                 z {cz:+.3} mm) are within the {deadband_mm} mm persist \
-                 deadband; the taught trims already hold the optimum and \
-                 were kept"
-            ));
-            return Ok(Outcome::Ran);
-        }
-        for line in
-            persist_holder_trims(&self.config.sequence.waypoints_yaml, holder, dx, None, dz)?
-        {
-            log::info(&line);
-        }
-        Ok(Outcome::Wrote)
     }
 
     /// Probes at every configured height and always brings the arm back
@@ -2098,14 +1985,14 @@ impl<'a> Sequencer<'a> {
         name: &str,
         open: bool,
         start: i32,
-    ) -> Result<(), SequencerError> {
+    ) -> Result<Option<[f64; 6]>, SequencerError> {
         if !self.step_prologue(step, name, start) {
-            return Ok(());
+            return Ok(None);
         }
         let before = self.grip_reading(name);
         self.gripper.command(open);
         self.gripper.wait_reached(open, &self.epics);
-        self.report_grip_shift(name, before);
+        let wrench = self.report_grip_shift(name, before);
         if !open && let Some(stuck) = self.gripper.dead_close() {
             return Err(SequencerError(format!(
                 "{name}: the fingers never left open ({:.1} mm) — the Hand-E is \
@@ -2121,7 +2008,8 @@ impl<'a> Sequencer<'a> {
             )));
         }
         log::info("  -> Completed");
-        self.step_epilogue(step)
+        self.step_epilogue(step)?;
+        Ok(wrench)
     }
 
     /// Where the tool is and what it feels, for the pair either side of a
@@ -2146,12 +2034,21 @@ impl<'a> Sequencer<'a> {
     /// build torque against an arm that has not moved, while fingers that
     /// push the arm move both. Only the first is invisible to every trim
     /// this daemon can write.
-    fn report_grip_shift(&mut self, name: &str, before: Option<(Isometry3, [f64; 6])>) {
+    ///
+    /// The six-component delta goes back to the caller rather than only to
+    /// the log, because it is the measurement [`Sequencer::run_grip_null`]
+    /// steers on. `None` means no measurement was taken, not a zero load.
+    fn report_grip_shift(
+        &mut self,
+        name: &str,
+        before: Option<(Isometry3, [f64; 6])>,
+    ) -> Option<[f64; 6]> {
         let (Some((was, w0)), Some((now, w1))) = (before, self.grip_reading(name)) else {
-            return;
+            return None;
         };
         let moved = (now.translation.vector - was.translation.vector) * 1000.0;
         let turned = (was.rotation.inverse() * now.rotation).scaled_axis() * 1000.0;
+        let delta = std::array::from_fn(|i| w1[i] - w0[i]);
         log::info(&format!(
             "  {name}: tool moved ({:+.3}, {:+.3}, {:+.3}) mm, turned \
              ({:+.2}, {:+.2}, {:+.2}) mrad, wrench ({:+.2}, {:+.2}, {:+.2}) N \
@@ -2162,13 +2059,14 @@ impl<'a> Sequencer<'a> {
             turned.x,
             turned.y,
             turned.z,
-            w1[0] - w0[0],
-            w1[1] - w0[1],
-            w1[2] - w0[2],
-            w1[3] - w0[3],
-            w1[4] - w0[4],
-            w1[5] - w0[5],
+            delta[0],
+            delta[1],
+            delta[2],
+            delta[3],
+            delta[4],
+            delta[5],
         ));
+        Some(delta)
     }
 
     // ---- PV wait loops -------------------------------------------------

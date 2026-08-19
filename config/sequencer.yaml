@@ -357,81 +357,29 @@ probe:
                           # and moves the answer 0.2 mm (doc §16.9). Two steps put
                           # a second sample in the hard part; the load bound (half
                           # of abort_n) stops it sooner on a stiff floor
-  well:                   # a holder well (CalibMode=6): an order of magnitude
-                          # tighter than the bore, and probed CLAMPED -- there is
-                          # deliberately no loosen_mm here, because a well holds
-                          # its puck by gravity and pads leaving the neck tip it
-                          # out of the well (h2, 2026-08-19)
-    lateral:              # sideways, toward a well wall -- run at the top of
-                          # heights_mm, not at the seat
-      step_mm: 0.05       # the only step this arm is measured to execute. At the
-                          # seat the wells' 0.026-0.052 mm per side (h4/h7/h10,
-                          # 2026-08-18/19) puts the wall INSIDE one of them, which
-                          # is what tripped the abort at h7 and h10 -- and 0.01,
-                          # tried as the cure, was below the floor the arm moves at
-                          # all (commanded 0.010, travelled -0.004 at h7). The
-                          # clearance is what has to grow, so the probe steps back
-                          # off the seat instead: see heights_mm below
-      travel_mm: 3.0      # the bore's travel, not 10x a seat's play: the bracket
-                          # runs at the top of heights_mm precisely so the seat
-                          # is under no tension, and that is where the walls sit
-                          # further out than the seat's own clearance. 0.5 found
-                          # nothing either way from +2 mm at h7 (2026-08-19) --
-                          # a scan too narrow, not an absent wall
-      threshold_n: 0.5    # set by the arm's standing scatter, which does not
-                          # change with the seat
-      abort_n: 12.0       # clamped probing has no finger play to absorb the seat's
-                          # own cross-axis tension, and that tension is what met
-                          # the bore's 5.0: h7 base x+ read 8.12 N total with only
-                          # 1.17 N along the axis. Below lift_abort_n (20) and well
-                          # below the 23 N of a rubbing insert
-      overtravel_steps: 5 # a well wall is rigid and the run stops at half of
-                          # abort_n anyway, so more steps buy rising samples on a
-                          # wall that gives and cost nothing on one that does not.
-                          # Three left every clean well bracket reporting "at the
-                          # trip point, no slope to fit"
-    depth:                # downward, toward the well floor
-      step_mm: 0.05       # the smallest step this arm executes. Three of them
-                          # reach the holder_on_position_lift (0.15 mm) hover,
-                          # which is all the resolution the hover has room for:
-                          # 0.02 was tried to buy more and the arm did not take
-                          # it (h7 commanded 0.020 mm, moved -0.002 mm against
-                          # 0.32 N, 2026-08-19) -- the depth axis failing
-                          # exactly the way the lateral one had
-      travel_mm: 3.0      # the descent starts at the top of heights_mm, so it
-                          # has to cover the lift plus the hover with margin --
-                          # "no floor within" then means the seat is not where
-                          # the pose believes rather than the probe stopped short
-      threshold_n: 0.5    # the floor answers at ~16 N/mm, so one step is 0.32 N
-                          # and contact is caught within two. The bore's 1.0 N
-                          # would be three steps deep, most of the hover
-      abort_n: 8.0        # a push onto a floor: bounded by what the arm may do
-                          # to a sample, which does not change with the seat
-      overtravel_steps: 4 # four rising samples for the fit, against the bore's
-                          # two: the descent that reaches this floor is three
-                          # steps long and has none of its own to spare. The
-                          # half-abort bound stops it sooner on a stiff floor
-    heights_mm: [2.0, 1.0, 0.3]
-                          # where the laterals are measured, mm above the taught
-                          # seat. At the seat a taught residual larger than the
-                          # play starts the bracket already pressed into a wall,
-                          # so it saturates before it has measured anything; the
-                          # force it reports there is the arm bending. Lifted, the
-                          # puck hangs in the grip inside a wider cross-section and
-                          # the same 0.05 mm step has room again. The ladder then
-                          # comes back DOWN so the floor probe starts from the
-                          # centre those brackets found -- a descent begun above
-                          # the well meets its mouth 0.8 mm before the floor (h7,
-                          # twice) -- but stops short of the seat, because the
-                          # floor fit needs pre-contact samples for its baseline
-                          # and the taught seat hovers only 0.075 mm (h7): one
-                          # sample, and the fit declines. From +0.3 the same
-                          # descent is 0.375 mm long, still well inside the well
-                          # mouth, and the baseline has seven
-    persist_deadband_mm: 0.01
-                          # smallest centre worth rewriting the taught pose for.
-                          # Its own number, NOT lateral.step_mm, which is what the
-                          # map used to read: a well's whole play is about one bore
-                          # step, so with the two tied together every centre it
-                          # could honestly measure was inside the deadband and no
-                          # well was ever writable
+
+# CalibMode=6, the grip null: drives a holder's taught seat pose to where
+# the fingers close on its puck without loading it. It took this slot from
+# the seat-probe holder map, which read walls the puck was already pressed
+# against and so could not measure the pose error at all.
+grip_null:
+  stiffness_n_per_mm: [30.0, 100.0, 37.0]
+                        # force the close leaves per mm of pose error, in base x,
+                        # base y and depth. Measured at two holders (h9 29.4 in
+                        # base x and 103 in base y; h10 28-36 in base x and 36.6
+                        # in depth, 2026-08-19). The loop re-measures every
+                        # iteration, so these set the rate and not the answer
+  damping: 0.7          # two-point stiffness estimates need margin: at 0.7 the
+                        # iteration still contracts with a stiffness wrong by 2x
+                        # either way, where 1.0 sits on the edge of oscillating
+  settled_n: 0.5        # the noise floor, doing two jobs -- an axis under it is
+                        # not written, and a round with no axis over it is done.
+                        # A holder that grips clean reads 0.27 N (h4) and a
+                        # nulled one settles at 0.29 N (h9); at 29 N/mm that is
+                        # 0.010 mm, under the arm's own repeatability
+  max_step_mm: 0.5      # h10's first correction, the largest measured, was
+                        # 0.36 mm
+  max_total_mm: 1.0     # past this the seat is wrong, not the trim: a foreign
+                        # object in the well reads exactly like a large steady
+                        # force, and so does the wrong puck
+  max_iterations: 6     # each is one pick and place, about 35 s

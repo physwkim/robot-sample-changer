@@ -25,7 +25,7 @@ pub const MODE_NAMES: [&str; 8] = [
     "Hand-Eye Calib",
     "Recover",
     "Seat Probe",
-    "Holder Map",
+    "Grip Null",
     "Holder Transfer",
 ];
 

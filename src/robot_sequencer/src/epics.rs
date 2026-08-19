@@ -53,21 +53,23 @@ pub enum CalibMode {
     /// sequence; unlike every other mode it moves until something pushes
     /// back rather than to a pose.
     SeatProbe,
-    /// One trigger, one holder mapped: fetch the puck (from `MapSource`
-    /// through the sample holder, or in place when that is 0 or the
-    /// target itself), run the seat probe without a jog hold, and leave
-    /// the puck seated in the target. Replaces the external caput
-    /// orchestration that drove the same tour through
-    /// StartStep/PauseStep/Wait.
-    HolderMap,
+    /// One trigger drives this holder's taught seat pose to where the
+    /// fingers close on its puck without loading it: pick, read the
+    /// wrench the close left behind, put the puck back, write the trim
+    /// the wrench asks for, repeat until the load is at the noise floor.
+    ///
+    /// It took the slot the seat-probe-based holder map had, because the
+    /// map measured the wrong thing. The probe pushes the *arm* against
+    /// well walls the puck is already touching, so its brackets land
+    /// inside its own persist deadband; the close pushes the *pads*
+    /// against the puck, where the contact is asymmetric by exactly the
+    /// pose error.
+    GripNull,
     /// Carry one puck from `MapSource` to `Holder` and leave it there.
     ///
-    /// Holder map already moves a puck between seats, but it does it
-    /// through the stage — it reuses the normal sequence's step numbers,
-    /// and that route is holder to stage to holder by construction. This
-    /// is the same pick and place with the stage leg cut out and no
-    /// probe: the arm retreats from the source and goes straight to the
-    /// target seat.
+    /// The pick and place the sequence already does, with the stage leg
+    /// cut out and nothing measured: the arm retreats from the source
+    /// and goes straight to the target seat.
     HolderTransfer,
 }
 
@@ -323,7 +325,7 @@ impl Epics {
             Some(3) => CalibMode::HandEye,
             Some(4) => CalibMode::Recover,
             Some(5) => CalibMode::SeatProbe,
-            Some(6) => CalibMode::HolderMap,
+            Some(6) => CalibMode::GripNull,
             Some(7) => CalibMode::HolderTransfer,
             _ => CalibMode::Normal,
         }

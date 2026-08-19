@@ -28,6 +28,65 @@ pub struct Config {
     pub handeye: HandEyeConfig,
     #[serde(default)]
     pub probe: ProbeConfig,
+    #[serde(default)]
+    pub grip_null: GripNullConfig,
+}
+
+/// [`crate::epics::CalibMode::GripNull`]: how the wrench a gripper close
+/// leaves on the tool becomes a trim in the taught-waypoints file.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct GripNullConfig {
+    /// Force the close leaves per mm of taught-pose error, N/mm, in the
+    /// order base x, base y, depth.
+    ///
+    /// Measured at two holders: h9 read 29.4 N/mm in base x and 103 in
+    /// base y, h10 28-36 in base x and 36.6 in depth (2026-08-19). The
+    /// loop measures again every iteration, so these set how fast it
+    /// converges and not where it stops — see `damping`.
+    pub stiffness_n_per_mm: [f64; 3],
+    /// Fraction of the computed step actually taken.
+    ///
+    /// Below 1 because `stiffness_n_per_mm` is a two-point estimate: at
+    /// 0.7 the iteration still contracts when a stiffness is wrong by a
+    /// factor of two in either direction, where 1.0 leaves a 2x
+    /// underestimate sitting on the edge of oscillation.
+    pub damping: f64,
+    /// The noise floor, in newtons. One threshold with two jobs: an axis
+    /// under it is not written, and a round with no axis over it is
+    /// converged.
+    ///
+    /// A holder that grips clean reads 0.27 N (h4) and a nulled one
+    /// settles at 0.29 N (h9). At 29 N/mm that is 0.010 mm, already
+    /// under the arm's own repeatability, so chasing it further would
+    /// write positioning noise into the taught file.
+    pub settled_n: f64,
+    /// Refuse a single iteration that asks for more than this.
+    pub max_step_mm: f64,
+    /// Refuse to walk the taught pose further than this in total.
+    ///
+    /// Past it the seat is wrong rather than the trim: a foreign object
+    /// in the well reads exactly like a large steady force, and so does
+    /// a puck that is not the one the pose was taught for.
+    pub max_total_mm: f64,
+    /// Give up after this many picks. Each is roughly 35 s.
+    pub max_iterations: u32,
+}
+
+impl Default for GripNullConfig {
+    fn default() -> Self {
+        Self {
+            stiffness_n_per_mm: [30.0, 100.0, 37.0],
+            damping: 0.7,
+            settled_n: 0.5,
+            // A first correction at h10, the worst holder measured, was
+            // 0.36 mm; this leaves room above that and still refuses a
+            // reading that would move the pose most of a puck diameter.
+            max_step_mm: 0.5,
+            max_total_mm: 1.0,
+            max_iterations: 6,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -431,7 +490,8 @@ impl Default for TiltConfig {
 
 /// The stage bore's lateral probe (`CalibMode` = Seat Probe).
 ///
-/// Its own block, and not one `lateral:` shared with the holder wells,
+/// Its own block, and not one `lateral:` shared with the holder wells
+/// the seat probe used to also serve,
 /// because the two seats are not the same measurement at either end. The
 /// bore holds the puck with 0.50 mm of radial clearance and needs the
 /// fingers opened to get the pads out of the way. Reusing these numbers
@@ -493,55 +553,6 @@ pub struct BoreConfig {
     pub heights_mm: Vec<f64>,
 }
 
-/// A holder well's lateral probe (`CalibMode` = Holder Map).
-///
-/// There is no `loosen_mm` here on purpose. A well holds its puck by
-/// gravity alone, so pads leaving the neck pivot it up and out — at h2
-/// the loosened bore probe lost the puck entirely (2026-08-19). "A well
-/// is probed clamped" is therefore not a number an operator may set: it
-/// is what [`WellConfig::seat_probe`] builds, and there is nowhere in
-/// the file to say otherwise.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct WellConfig {
-    /// Sideways, toward a well wall.
-    pub lateral: ProbeAxisConfig,
-    /// Downward, toward the well floor.
-    ///
-    /// Its own block for the same reason the lateral one is: the taught
-    /// pose hovers `holder_on_position_lift` (0.15 mm) above the floor,
-    /// and the bore's 0.10 mm step puts the whole descent inside one or
-    /// two samples — h7 reported "too few rising samples to fit a floor"
-    /// with it, which is the depth axis failing in exactly the way the
-    /// lateral one did.
-    pub depth: ProbeAxisConfig,
-    /// Heights above the pose the probe was triggered at, mm, probed in
-    /// the order given and returned from at the end.
-    ///
-    /// Empty probes once, where it was triggered, and moves the arm
-    /// nowhere. A list asks the other question: a gripped puck at the
-    /// taught pose has under 0.05 mm of lateral freedom in every
-    /// direction and 8.11 N in 0.044 mm (2026-08-18), which is a closed
-    /// loop rather than a clearance, and the height at which that loop
-    /// opens is what says how deep the seat really engages.
-    ///
-    /// The moves are probe steps, not jogs: the operator jog gates on a
-    /// scene whose stage is a convex decomposition, and a convex hull
-    /// cannot represent a bore, so from a seated pose every jog is
-    /// refused before it starts.
-    pub heights_mm: Vec<f64>,
-    /// Smallest measured off-centre worth writing to the trim file, mm.
-    ///
-    /// Its own number and not `lateral.step_mm` again, which is what the
-    /// holder map used to read. Those two being one constant is why no
-    /// well could ever be written: a well's whole play is about one bore
-    /// step, so every centre it could honestly measure was inside the
-    /// deadband by construction (h4, h7, h10). This says how small a
-    /// correction is not worth moving the taught pose for; the step says
-    /// how finely the walls are approached. They are different questions.
-    pub persist_deadband_mm: f64,
-}
-
 /// What a probe needs to know about the seat in front of it: how much
 /// play to open before stepping, and how finely to step toward a wall
 /// and toward the floor.
@@ -568,19 +579,6 @@ impl BoreConfig {
             depth: self.depth,
             heights_mm: self.heights_mm.clone(),
             centring: Some(self.centring),
-        }
-    }
-}
-
-impl WellConfig {
-    /// A well is probed clamped, always — see [`WellConfig`].
-    pub fn seat_probe(&self) -> SeatProbe {
-        SeatProbe {
-            loosen_mm: 0.0,
-            lateral: self.lateral,
-            depth: self.depth,
-            heights_mm: self.heights_mm.clone(),
-            centring: None,
         }
     }
 }
@@ -622,8 +620,6 @@ pub struct ProbeConfig {
     pub lift_step_mm: f64,
     /// The stage bore, probed loosened (`CalibMode` = Seat Probe).
     pub bore: BoreConfig,
-    /// A holder well, probed clamped (`CalibMode` = Holder Map).
-    pub well: WellConfig,
     /// Turning the sample in place at every level, instead of pushing it
     /// around.
     pub tilt: TiltConfig,
@@ -682,97 +678,11 @@ impl Default for BoreConfig {
     }
 }
 
-impl Default for WellConfig {
-    /// An order of magnitude finer than the bore, because that is what
-    /// the wells measured: h4 walls at 0.050 mm per side, h7 at 0.052,
-    /// h10 at 0.026-0.032 (2026-08-18/19). At the bore's 0.05 mm step
-    /// every one of those walls lands inside the first step.
-    fn default() -> Self {
-        Self {
-            lateral: ProbeAxisConfig {
-                // The bore's step, because it is the only one this arm is
-                // measured to execute. A well's seat is tighter than it,
-                // which is what `heights_mm` is for: the bracket is run
-                // where the cross-section has room for this step, not
-                // shrunk below the floor the arm moves at.
-                step_mm: 0.05,
-                // The bore's travel, not ten times a seat's play. The
-                // bracket is run at the top of `heights_mm`, where the
-                // point is to measure with no tension on the seat — and
-                // that is exactly where the walls are further out than
-                // the seat's own clearance. At h7, 0.5 mm found nothing
-                // either way from +2 mm (2026-08-19), which is a scan
-                // too narrow rather than an absent wall.
-                travel_mm: 3.0,
-                // The bore's threshold: it is set by what the arm can
-                // tell from its own standing scatter, which does not
-                // change with the seat.
-                threshold_n: 0.5,
-                // Clamped probing has no finger play to absorb the seat's
-                // own cross-axis tension, and that tension is what tripped
-                // the bore's 5.00 N: h7 base x+ read 8.12 N total while
-                // the along-axis force was 1.17 N. Below `lift_abort_n`,
-                // and below the 23 N of a rubbing insert.
-                abort_n: 12.0,
-                // Five, not the bore's three: a well wall is rigid and
-                // the run stops at half of `abort_n` anyway, so asking
-                // for more steps buys rising samples for the fit on a
-                // wall that gives, and costs nothing on one that does
-                // not. Three left every clean well bracket reporting
-                // "at the trip point, no slope to fit".
-                overtravel_steps: 5,
-            },
-            depth: ProbeAxisConfig {
-                // The smallest step this arm executes. Three of them
-                // reach the 0.15 mm the taught pose hovers by, which is
-                // as much resolution as the hover has room for: 0.02 mm
-                // was tried to buy more and the arm simply did not take
-                // it (commanded 0.020, moved -0.002 at h7, 2026-08-19).
-                step_mm: 0.05,
-                // The descent starts at the top of `heights_mm`, so it
-                // has to cover the lift plus the hover with margin.
-                // "No floor within" then says the seat is not where the
-                // pose believes rather than that the probe stopped short.
-                travel_mm: 3.0,
-                // The floor answers at about 16 N/mm, so one step is
-                // 0.32 N and contact is caught within two of them. The
-                // bore's 1.0 N would be three steps deep by the time it
-                // tripped, which is most of the hover.
-                threshold_n: 0.5,
-                // A push onto a floor, which is bounded by what the arm
-                // may do to a sample and not by which seat it is in.
-                abort_n: 8.0,
-                // Four rising samples for the fit, against the bore's
-                // two, because the descent that reaches this floor is
-                // three steps long and has none of its own to spare.
-                // The half-abort bound stops it sooner on a stiff floor.
-                overtravel_steps: 4,
-            },
-            // Up off the seat, where the brackets can measure with no
-            // tension on it, then back down so the floor probe starts
-            // from the centre they found -- but not all the way down.
-            // The taught seat hovers 0.075 mm over its floor (h7), which
-            // is one step, and a fit with one pre-contact sample has no
-            // baseline. From +0.3 the descent is 0.375 mm and still
-            // inside the well mouth (0.8 mm up).
-            heights_mm: vec![2.0, 0.3],
-            // Not one lateral step, which is what the map used to read:
-            // a bracket's walls are fitted from the force slope over
-            // MEASURED travel, and the arm undershoots its commands, so
-            // a centre is resolved to well inside the step that found
-            // it. Tying the two together made a well's whole play about
-            // one step and left no writable window at all.
-            persist_deadband_mm: 0.01,
-        }
-    }
-}
-
 impl Default for ProbeConfig {
     fn default() -> Self {
         Self {
             velocity_scale: 0.02,
             bore: BoreConfig::default(),
-            well: WellConfig::default(),
             // Above the drag a lift actually carries, and below the
             // 23 N a rubbing insert was measured at (doc §16.2) — the
             // level this whole mode exists to keep the sequence away
@@ -794,9 +704,8 @@ impl Default for ProbeConfig {
 
 impl Default for ProbeAxisConfig {
     /// Only reachable through a partial `lateral:`/`depth:` block, where
-    /// serde fills the unnamed fields from here. A complete `bore:` or
-    /// `well:` block never reaches it: those two have their own defaults,
-    /// so neither seat can inherit the other's numbers.
+    /// serde fills the unnamed fields from here. A complete `bore:`
+    /// block never reaches it.
     fn default() -> Self {
         ProbeConfig::default().bore.lateral
     }
@@ -913,8 +822,6 @@ impl Config {
         for (name, axis) in [
             ("probe.bore.lateral", &config.probe.bore.lateral),
             ("probe.bore.depth", &config.probe.bore.depth),
-            ("probe.well.lateral", &config.probe.well.lateral),
-            ("probe.well.depth", &config.probe.well.depth),
         ] {
             // Positive is not enough: below the floor the arm executes,
             // a step is a command it does not carry out, and a probe
@@ -967,18 +874,10 @@ impl Config {
         // Arm motion inside a rack with a sample in the fingers, so the
         // list is bounded like every other number in this block. Below the
         // trigger pose is allowed but barely: down is where the seat is.
-        for (name, heights, depth) in [
-            (
-                "probe.bore.heights_mm",
-                &config.probe.bore.heights_mm,
-                &config.probe.bore.depth,
-            ),
-            (
-                "probe.well.heights_mm",
-                &config.probe.well.heights_mm,
-                &config.probe.well.depth,
-            ),
-        ] {
+        {
+            let name = "probe.bore.heights_mm";
+            let heights = &config.probe.bore.heights_mm;
+            let depth = &config.probe.bore.depth;
             if heights.len() > 8 {
                 return Err(SequencerError(format!(
                     "{name} must have at most 8 entries (each is a full bracket set)"
@@ -1097,16 +996,39 @@ impl Config {
                     .into(),
             ));
         }
-        // Zero would write the measurement's own grain into a taught pose
-        // on every map; anything past the persist cap can never fire,
-        // because a centre that large is refused as not-a-trim first.
-        if !(0.0..=1.0).contains(&config.probe.well.persist_deadband_mm)
-            || config.probe.well.persist_deadband_mm == 0.0
-        {
+        let g = &config.grip_null;
+        if g.stiffness_n_per_mm.iter().any(|k| *k <= 0.0) {
             return Err(SequencerError(
-                "probe.well.persist_deadband_mm must be within 0..1 mm, exclusive of zero \
-                 (a centre past 1 mm is refused as not a trim error at all)"
+                "grip_null.stiffness_n_per_mm must all be positive (a zero or \
+                 negative stiffness turns the correction into a divergence)"
                     .into(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&g.damping) || g.damping == 0.0 {
+            return Err(SequencerError(
+                "grip_null.damping must be within 0..1 mm, exclusive of zero \
+                 (above 1 the loop overshoots by construction)"
+                    .into(),
+            ));
+        }
+        if g.settled_n <= 0.0 {
+            return Err(SequencerError(
+                "grip_null.settled_n must be positive (nothing reads exactly zero, \
+                 so the loop would run to its iteration cap every time)"
+                    .into(),
+            ));
+        }
+        if g.max_step_mm <= 0.0 || g.max_total_mm < g.max_step_mm {
+            return Err(SequencerError(
+                "grip_null.max_step_mm must be positive and no larger than \
+                 grip_null.max_total_mm (a step cap the total cap forbids can \
+                 never be reached)"
+                    .into(),
+            ));
+        }
+        if g.max_iterations == 0 {
+            return Err(SequencerError(
+                "grip_null.max_iterations must be at least 1".into(),
             ));
         }
         if config.vision.enabled {
@@ -1240,15 +1162,15 @@ mod tests {
             ),
             (
                 "step_zero",
-                "probe:\n  well:\n    lateral:\n      step_mm: 0.0\n",
-                "probe.well.lateral.step_mm",
+                "probe:\n  bore:\n    lateral:\n      step_mm: 0.0\n",
+                "probe.bore.lateral.step_mm",
             ),
-            // Positive but below the floor the arm executes: h7's well
+            // Positive but below the floor the arm executes: an h7 well
             // bracket commanded exactly this and travelled -0.004 mm.
             (
                 "step_under_the_executable_floor",
-                "probe:\n  well:\n    lateral:\n      step_mm: 0.01\n",
-                "probe.well.lateral.step_mm",
+                "probe:\n  bore:\n    lateral:\n      step_mm: 0.01\n",
+                "probe.bore.lateral.step_mm",
             ),
             // The ladder's last level is where the floor is probed, and
             // this one is parked on the seat: exactly the run14 h7 shape,
@@ -1256,13 +1178,13 @@ mod tests {
             // had no baseline to work from.
             (
                 "floor_level_on_the_seat",
-                "probe:\n  well:\n    heights_mm: [2.0, 0.0]\n",
-                "probe.well.heights_mm",
+                "probe:\n  bore:\n    heights_mm: [2.0, 0.0]\n",
+                "probe.bore.heights_mm",
             ),
             (
                 "travel_under_one_step",
-                "probe:\n  well:\n    depth:\n      step_mm: 0.5\n      travel_mm: 0.2\n",
-                "probe.well.depth.travel_mm",
+                "probe:\n  bore:\n    depth:\n      step_mm: 0.5\n      travel_mm: 0.2\n",
+                "probe.bore.depth.travel_mm",
             ),
             (
                 "velocity_hi",
@@ -1323,13 +1245,35 @@ mod tests {
                 "probe:\n  bore:\n    loosen_mm: 12.0\n",
                 "probe.bore.loosen_mm",
             ),
-            // The deadband is what decides whether a measured centre is
-            // written at all, so zero is a misconfiguration and not "no
-            // deadband".
+            // The grip null divides by its stiffnesses and multiplies by
+            // its damping, so a zero in either is not "no correction" —
+            // it is a divide by zero or a loop that never moves.
             (
-                "deadband_zero",
-                "probe:\n  well:\n    persist_deadband_mm: 0.0\n",
-                "probe.well.persist_deadband_mm",
+                "stiffness_zero",
+                "grip_null:\n  stiffness_n_per_mm: [30.0, 0.0, 37.0]\n",
+                "grip_null.stiffness_n_per_mm",
+            ),
+            (
+                "damping_over_one",
+                "grip_null:\n  damping: 1.5\n",
+                "grip_null.damping",
+            ),
+            (
+                "settled_zero",
+                "grip_null:\n  settled_n: 0.0\n",
+                "grip_null.settled_n",
+            ),
+            // A step cap the total cap forbids can never be reached, so
+            // the loop would refuse its own first correction.
+            (
+                "step_cap_over_total_cap",
+                "grip_null:\n  max_step_mm: 2.0\n  max_total_mm: 1.0\n",
+                "grip_null.max_step_mm",
+            ),
+            (
+                "no_iterations",
+                "grip_null:\n  max_iterations: 0\n",
+                "grip_null.max_iterations",
             ),
         ] {
             let path = dir.join(format!("{name}.yaml"));
