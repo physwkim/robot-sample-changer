@@ -492,6 +492,14 @@ impl OpsPanel {
             ui.strong("Grip null");
             ui.label("Close on the puck, write the trims the wrench asks for.");
             let stage = self.null_holder == 0;
+            // Changing the seat can leave the source pointing at the new
+            // target, or at a rack holder while the seat is the stage.
+            // Both mean "the puck already there", and the second one the
+            // daemon refuses outright, so settle it here rather than at
+            // the trigger.
+            if stage || self.null_source == self.null_holder {
+                self.null_source = 0;
+            }
             fields(ui, "gripnull-fields", |ui| {
                 ui.label("Seat:");
                 // A list, not a spinner: the stage is not "holder zero"
@@ -507,18 +515,37 @@ impl OpsPanel {
                 ui.end_row();
                 ui.label("Puck from:");
                 // The fetch is rack to rack, so the stage nulls whatever
-                // is already sitting in it.
-                ui.add_enabled(
-                    !stage,
-                    egui::DragValue::new(&mut self.null_source).range(0..=10),
-                );
+                // is already sitting in it. The target is left out of the
+                // list because picking it means the same as picking
+                // "already there".
+                let target = self.null_holder;
+                let mut source = self.null_source;
+                let named = |n: i64| {
+                    if n == 0 {
+                        format!("already in {}", seat_name(target))
+                    } else {
+                        seat_name(n)
+                    }
+                };
+                ui.add_enabled_ui(!stage, |ui| {
+                    egui::ComboBox::from_id_salt("gripnull-source")
+                        .selected_text(named(source))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut source, 0, named(0));
+                            for n in 1..=10i64 {
+                                if n != target {
+                                    ui.selectable_value(&mut source, n, seat_name(n));
+                                }
+                            }
+                        });
+                });
+                self.null_source = source;
                 ui.end_row();
             });
-            let own = self.null_source == 0 || self.null_source == self.null_holder;
             ui.label(if stage {
                 "(the stage nulls the puck a Normal run left on it)"
-            } else if own {
-                "(0 = the puck already in that holder)"
+            } else if self.null_source == 0 {
+                "(nulls the puck already seated there)"
             } else {
                 "(fetched first; the target seat must be empty)"
             });
