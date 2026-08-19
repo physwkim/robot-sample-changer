@@ -26,16 +26,16 @@
     sample_holder_on_position_z_offset: 0.000171
     # Per-holder trims, holder N at index N-1 -- holder 1 included, so
     # trimming it moves it and nothing else.
-    holder_multi_x_offsets: [-0.0002067, 9.18e-5, 0.0003947, 0.001, 0.0007379, 0.0012567, 0.0011774, 0.0012759, 0.0016, 0.0019997]
+    holder_multi_x_offsets: [-0.0002067, 9.18e-5, 0.0003947, 0.001, 0.0007379, 0.0012567, 0.0011608, 0.0012759, 0.0016, 0.0019997]
     # Insertion-depth trim, tool y (base -z), m, holder N at index N-1;
     # positive is deeper.
-    holder_multi_y_offsets: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.96e-05, 0.0, 0.0, -9e-05]
+    holder_multi_y_offsets: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.48e-5, 0.0, 0.0, -9e-5]
     # h8/h9 z are EXTRAPOLATED, not probed: h1-h7 fit z = 0.7357 - 0.1888*N mm
     # with 0.025 mm RMS (2026-08-19). h10 is measured, but by nulling the
     # gripper-close wrench rather than by the seat probe -- the probe reads
     # walls the pinned puck is already touching, the close reads the pose
     # error itself (2026-08-19).
-    holder_multi_z_offsets: [0.0005545, 0.0003259, 0.000206, -1.4e-5, -0.000214, -0.0004312, -0.0005625, -0.0007872, -0.0009831, -0.001102]
+    holder_multi_z_offsets: [0.0005545, 0.0003259, 0.000206, -1.4e-5, -0.000214, -0.0004312, -0.0005983, -0.0007872, -0.0009831, -0.001102]
     # Per-holder trim on holder_on_position_tilt_x_deg, deg, holder N at
     # index N-1. Reloaded every trigger, like everything here.
     holder_multi_tilt_x_deg: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
