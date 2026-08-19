@@ -18,7 +18,7 @@ pub fn cam(suffix: &str) -> String {
 }
 
 /// `Robot:CalibMode` labels, index == PV value.
-pub const MODE_NAMES: [&str; 7] = [
+pub const MODE_NAMES: [&str; 8] = [
     "Normal",
     "Holder Calib",
     "Sample Holder Calib",
@@ -26,6 +26,7 @@ pub const MODE_NAMES: [&str; 7] = [
     "Recover",
     "Seat Probe",
     "Holder Map",
+    "Holder Transfer",
 ];
 
 /// What the sequencer does at each `Robot:CurrentStep` value.

@@ -16,6 +16,7 @@ enum Action {
     Mount(i64),
     Return(i64),
     Map { target: i64, source: i64 },
+    Transfer { target: i64, source: i64 },
     Advanced { mode: i64, start: i64 },
     Recover,
 }
@@ -30,6 +31,9 @@ impl Action {
             }
             Action::Map { target, source } => {
                 format!("Map holder {target} with the puck from holder {source}")
+            }
+            Action::Transfer { target, source } => {
+                format!("Move the puck from holder {source} to holder {target}")
             }
             Action::Advanced { mode, start } => {
                 let name = MODE_NAMES.get(*mode as usize).copied().unwrap_or("?");
@@ -57,6 +61,8 @@ pub struct OpsPanel {
     holder_sel: i64,
     map_target: i64,
     map_src: i64,
+    xfer_target: i64,
+    xfer_src: i64,
     adv_mode: usize,
     adv_start: i64,
     pause_step_input: i64,
@@ -87,6 +93,8 @@ impl OpsPanel {
             holder_sel: 1,
             map_target: 1,
             map_src: 0,
+            xfer_target: 6,
+            xfer_src: 7,
             adv_mode: 0,
             adv_start: 0,
             pause_step_input: 0,
@@ -139,6 +147,21 @@ impl OpsPanel {
                 self.note = format!(
                     "Mapping holder {target} — the puck stays seated and the probed \
                      trims are written to taught_waypoints.yaml"
+                );
+            }
+            Action::Transfer { target, source } => {
+                put(&self.holder, target);
+                put(&self.map_source, source);
+                put(&self.calib_mode, 7);
+                // Holder transfer refuses mid-sequence resumes, like map.
+                put(&self.start_step, 0);
+                put(&self.pause_step, 0);
+                self.pause_step_input = 0;
+                put(&self.wait, 0);
+                put(&self.trigger, 1);
+                self.note = format!(
+                    "Moving the puck from holder {source} to holder {target} — \
+                     straight across, no stage leg and no probe"
                 );
             }
             Action::Advanced { mode, start } => {
@@ -333,6 +356,33 @@ impl OpsPanel {
                         self.request(Action::Map {
                             target: self.map_target,
                             source: self.map_src,
+                        });
+                    }
+                });
+            });
+            ui.group(|ui| {
+                ui.vertical(|ui| {
+                    ui.strong("Move puck");
+                    ui.label("Holder to holder, no stage leg.");
+                    ui.horizontal(|ui| {
+                        ui.label("From:");
+                        ui.add(egui::DragValue::new(&mut self.xfer_src).range(1..=10));
+                        ui.label("To:");
+                        ui.add(egui::DragValue::new(&mut self.xfer_target).range(1..=10));
+                    });
+                    let same = self.xfer_src == self.xfer_target;
+                    ui.label(if same {
+                        "(pick two different holders)"
+                    } else {
+                        "(the seat is not probed)"
+                    });
+                    if ui
+                        .add_enabled(!same, egui::Button::new("Move puck"))
+                        .clicked()
+                    {
+                        self.request(Action::Transfer {
+                            target: self.xfer_target,
+                            source: self.xfer_src,
                         });
                     }
                 });

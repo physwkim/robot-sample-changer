@@ -60,6 +60,15 @@ pub enum CalibMode {
     /// orchestration that drove the same tour through
     /// StartStep/PauseStep/Wait.
     HolderMap,
+    /// Carry one puck from `MapSource` to `Holder` and leave it there.
+    ///
+    /// Holder map already moves a puck between seats, but it does it
+    /// through the stage — it reuses the normal sequence's step numbers,
+    /// and that route is holder to stage to holder by construction. This
+    /// is the same pick and place with the stage leg cut out and no
+    /// probe: the arm retreats from the source and goes straight to the
+    /// target seat.
+    HolderTransfer,
 }
 
 /// `Robot:Vision:Kind` request codes (mbbo).
@@ -315,6 +324,7 @@ impl Epics {
             Some(4) => CalibMode::Recover,
             Some(5) => CalibMode::SeatProbe,
             Some(6) => CalibMode::HolderMap,
+            Some(7) => CalibMode::HolderTransfer,
             _ => CalibMode::Normal,
         }
     }

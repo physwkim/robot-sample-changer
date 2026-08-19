@@ -152,7 +152,7 @@ ws/
 |---------|------|------|
 | Robot:Trigger | bo | 시퀀스 시작 트리거 (0=Off, 1=On) |
 | Robot:Wait | mbbo | 측정 대기 상태 (0=Wait, 1=Continue, 2=Abort) |
-| Robot:CalibMode | mbbo | 캘리브레이션 모드 (0=Normal, 1=Holder Calib, 2=Sample Holder Calib, 3=Hand-Eye Calib, 4=Recover, 5=Seat Probe, 6=Holder Map) |
+| Robot:CalibMode | mbbo | 캘리브레이션 모드 (0=Normal, 1=Holder Calib, 2=Sample Holder Calib, 3=Hand-Eye Calib, 4=Recover, 5=Seat Probe, 6=Holder Map, 7=Holder Transfer) |
 | Robot:StartStep | longout | 시작 스텝 번호 (0-300) |
 | Robot:Holder | longout | 홀더 번호 (1-10) |
 | Robot:MapSource | longout | 홀더 맵 퍽 소스 홀더 (0=대상 홀더 자체, 1-10) |
@@ -220,6 +220,20 @@ PauseStep/CurrentStep이 평소처럼 동작합니다. StartStep은 0이어야
 하며(중간 재개는 빈 손 파지/빈 시트 프로브가 되므로 거부), 실패한
 맵은 CalibMode=4 후 새 트리거로 재시작합니다. 프로브가 도중에 끊겨도
 팔이 시트로 복귀돼 있으면 퍽을 놓고 후퇴한 뒤 실패로 보고합니다.
+
+### 홀더 간 이동 (`CalibMode=7`)
+
+`MapSource`의 퍽을 `Holder`로 **바로** 옮깁니다. 홀더 맵(모드 6)도 퍽을
+옮기지만 스테이지를 경유합니다 — Normal 시퀀스의 스텝 번호를 그대로
+쓰는 구조라 경로가 홀더→스테이지→홀더로 고정되기 때문입니다. 이 모드는
+소스에서 후퇴한 뒤 타깃 standby로 곧장 계획 이동하며(맵의 스텝 18과
+같은 이동), 시트 프로브도 트림 쓰기도 하지 않습니다.
+
+스텝 번호는 맵과 같습니다 — 0-6이 소스에서 집기, 18-23이 타깃에 놓기 —
+so PauseStep/CurrentStep이 평소대로 동작합니다. StartStep은 0이어야
+하며(중간 재개는 빈 손 파지나 이미 찬 시트로의 릴리즈가 되므로 거부),
+MapSource는 타깃과 다른 1-10이어야 합니다. **타깃 시트가 비었는지는
+확인하지 않습니다** — 이미 퍽이 있는 홀더로 옮기면 겹칩니다.
 
 ### Hand-eye 캘리브레이션 (`CalibMode=3`)
 

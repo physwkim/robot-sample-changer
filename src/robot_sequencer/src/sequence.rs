@@ -306,6 +306,7 @@ impl<'a> Sequencer<'a> {
                 CalibMode::HandEye => "HandEye",
                 CalibMode::SeatProbe => "SeatProbe",
                 CalibMode::HolderMap => "HolderMap",
+                CalibMode::HolderTransfer => "HolderTransfer",
                 CalibMode::Recover => "Recover",
                 CalibMode::Normal => "Normal",
             };
@@ -353,6 +354,9 @@ impl<'a> Sequencer<'a> {
                     CalibMode::HolderMap => {
                         self.run_holder_map(&waypoints, &base, holder_number, start_from_step)
                     }
+                    CalibMode::HolderTransfer => {
+                        self.run_holder_transfer(&waypoints, &base, holder_number, start_from_step)
+                    }
                     _ => self
                         .compute_run_waypoints(&waypoints, &base, holder_number)
                         .and_then(|run| match calib_mode {
@@ -364,7 +368,9 @@ impl<'a> Sequencer<'a> {
                             CalibMode::SeatProbe => self.run_seat_probe(),
                             CalibMode::Recover => self.run_recover(&run),
                             CalibMode::Normal => self.run_normal(&run, start_from_step),
-                            CalibMode::HolderMap => unreachable!("dispatched above"),
+                            CalibMode::HolderMap | CalibMode::HolderTransfer => {
+                                unreachable!("dispatched above")
+                            }
                         }),
                 }
             });
@@ -408,6 +414,9 @@ impl<'a> Sequencer<'a> {
                 )),
                 (CalibMode::Recover, _) => log::info("Arm returned to holder standby"),
                 (CalibMode::SeatProbe, _) => log::info("Seat probe finished; nothing written"),
+                (CalibMode::HolderTransfer, _) => {
+                    log::info(&format!("Puck moved into holder {holder_number}"))
+                }
                 (CalibMode::HolderMap, Outcome::Wrote) => log::info(&format!(
                     "Holder map finished for holder {holder_number}; trims written above"
                 )),
@@ -1009,6 +1018,66 @@ impl<'a> Sequencer<'a> {
             return Err(e);
         }
         self.persist_seat_centres(target, seat, wd.holder_on_lift * 1000.0)
+    }
+
+    /// Carry one puck from `MapSource` to `Holder`, straight across.
+    ///
+    /// Holder map moves a puck between seats too, but through the stage:
+    /// it reuses the normal sequence's step numbers and that route is
+    /// holder to stage to holder by construction, so a transfer between
+    /// two seats sets the puck down and picks it up again on the way.
+    /// Here the arm retreats from the source and plans directly to the
+    /// target standby — the same move step 18 already makes, from the
+    /// source retreat instead of the stage standby.
+    ///
+    /// Step numbers are the map's, so `PauseStep` and `CurrentStep` read
+    /// the same: 0-6 pick at the source, 18-23 place at the target. The
+    /// seat is not probed and nothing is written; this only moves a puck.
+    ///
+    /// Always runs from the top, for the map's reason: a resume into a
+    /// half-done transfer grips air or releases into an occupied seat.
+    fn run_holder_transfer(
+        &mut self,
+        wd: &WaypointData,
+        base: &BaseWaypoints,
+        target: i32,
+        start: i32,
+    ) -> Result<Outcome, SequencerError> {
+        if start != 0 {
+            return Err(SequencerError(format!(
+                "holder transfer always runs from the top; StartStep is {start} — \
+                 set it to 0 (recover a failed transfer with CalibMode=4 and a \
+                 fresh trigger instead)"
+            )));
+        }
+        let source = self.epics.read_map_source();
+        if !(1..=10).contains(&source) || source == target {
+            return Err(SequencerError(format!(
+                "holder transfer needs MapSource to name a holder 1-10 other \
+                 than the target; it is {source} and the target is {target}"
+            )));
+        }
+        log::info(&format!(
+            ">>> HOLDER TRANSFER MODE: holder {source} -> holder {target} <<<"
+        ));
+        let w_s = self.compute_run_waypoints(wd, base, source)?;
+        let w_t = self.compute_run_waypoints(wd, base, target)?;
+
+        self.hand(0, "open_hand", true, 0)?;
+        self.arm(1, "holder_standby", &w_s.standby, 0)?;
+        self.cartesian(2, "holder_above", &w_s.above, 0)?;
+        self.cartesian(3, "holder_on_position", &w_s.on_pos, 0)?;
+        self.hand(4, "close_gripper", false, 0)?;
+        self.cartesian(5, "holder_above_return", &w_s.above, 0)?;
+        self.cartesian(6, "holder_retreat", &w_s.retreat, 0)?;
+        // The one move the stage leg used to make from its own standby.
+        self.arm(18, "holder_standby_return", &w_t.standby, 0)?;
+        self.cartesian(19, "holder_above_final", &w_t.above, 0)?;
+        self.cartesian(20, "holder_on_position_final", &w_t.on_pos, 0)?;
+        self.hand(21, "open_gripper_final", true, 0)?;
+        self.cartesian(22, "holder_above_final_return", &w_t.above, 0)?;
+        self.cartesian(23, "holder_standby_final", &w_t.standby, 0)?;
+        Ok(Outcome::Ran)
     }
 
     /// The write half of holder map: folds what the seat-level probe

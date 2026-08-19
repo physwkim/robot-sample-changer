@@ -107,6 +107,11 @@ fn run() -> Result<(), SequencerError> {
         "      source holder from {}, 0 = the target itself)",
         config.epics.map_source_pv
     ));
+    log::info("    7=Holder transfer (carry the puck straight to the target seat;");
+    log::info(&format!(
+        "      source holder from {}, no stage leg and no probe)",
+        config.epics.map_source_pv
+    ));
     if config.vision.enabled {
         log::info(&format!(
             "  Vision correction: ENABLED{} (deadband {:.2} mm, limit {:.2} mm, {})",
