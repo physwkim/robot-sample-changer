@@ -40,6 +40,17 @@ fn slot_for(row: usize, col: usize) -> Option<Slot> {
     }
 }
 
+fn fval(ch: &Channel) -> Option<f64> {
+    ch.state().value.as_ref().and_then(PvValue::as_f64)
+}
+
+fn sval(ch: &Channel) -> Option<String> {
+    match ch.state().value.as_ref() {
+        Some(PvValue::Str(s)) => Some(s.to_string()),
+        _ => None,
+    }
+}
+
 fn row_name(row: usize) -> String {
     match row {
         0 => "Stage".to_string(),
@@ -84,6 +95,9 @@ fn load_cells(path: &std::path::Path) -> Result<Cells, String> {
 pub struct CalibPanel {
     jog: [Channel; 3],
     jog_step: Channel,
+    travel: [Channel; 3],
+    apply_target: Channel,
+    apply: Channel,
     step_mm: f64,
     yaml_path: PathBuf,
     cells: Cells,
@@ -101,6 +115,13 @@ impl CalibPanel {
                 engine.connect(&robot("JogZ"))?,
             ],
             jog_step: engine.connect(&robot("JogStep"))?,
+            travel: [
+                engine.connect(&robot("Jog:DX"))?,
+                engine.connect(&robot("Jog:DY"))?,
+                engine.connect(&robot("Jog:DZ"))?,
+            ],
+            apply_target: engine.connect(&robot("Jog:Target"))?,
+            apply: engine.connect(&robot("Jog:Apply"))?,
             step_mm: 1.0,
             yaml_path,
             cells: Default::default(),
@@ -160,7 +181,7 @@ impl CalibPanel {
     }
 
     pub fn jog_group(&mut self, ui: &mut egui::Ui) {
-        ui.strong("TCP jog (only serviced during a calibration hold)");
+        ui.strong("TCP jog (tool frame, serviced whenever the arm waits)");
         ui.horizontal(|ui| {
             ui.label("Step (mm):");
             ui.add(
@@ -183,6 +204,32 @@ impl CalibPanel {
                 ui.end_row();
             }
         });
+        ui.separator();
+        ui.label("Jogged this run (tool x, y, z):");
+        let travel: Vec<Option<f64>> = self.travel.iter().map(fval).collect();
+        match (travel[0], travel[1], travel[2]) {
+            (Some(x), Some(y), Some(z)) => ui.monospace(format!("{x:+7.3} {y:+7.3} {z:+7.3} mm")),
+            _ => ui.label("-"),
+        };
+        // The daemon publishes the seat it would trim, and only a
+        // calibration hold has one. Reading that rather than the mode
+        // keeps the button honest about the one thing that matters here:
+        // whether this press has somewhere to land.
+        let target = sval(&self.apply_target).unwrap_or_default();
+        ui.add_enabled_ui(!target.is_empty(), |ui| {
+            let label = if target.is_empty() {
+                "Apply to seat trims (no seat here)".to_string()
+            } else {
+                format!("Apply to {target}")
+            };
+            if ui.button(label).clicked() {
+                self.apply.put(PvValue::Int(1));
+            }
+        });
+        ui.label(
+            "Apply adds the travel to that seat's X/Y/Z trims and zeroes \
+             it; the next trigger reloads the file.",
+        );
     }
 
     pub fn table_group(&mut self, ui: &mut egui::Ui) {
