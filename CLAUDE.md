@@ -185,8 +185,11 @@ ws/
 | Robot:Gripper | bo | 그리퍼 명령 (0=Close, 1=Open) |
 | Robot:Gripper_RBV | bi | 그리퍼 상태 피드백 (0=Close, 1=Open) |
 | Robot:Loaded | bi | 샘플 로드 상태 (0=Not Loaded, 1=Loaded) |
-| Robot:JogX/Y/Z | longout | TCP jog 방향 (-1/0/+1, 캘리브레이션 hold 중) |
-| Robot:JogStep | ao | jog 스텝 크기 (mm) |
+| Robot:JogX/Y/Z | longout | TCP jog 방향 (-1/0/+1, 툴 프레임) |
+| Robot:JogStep | ao | jog 스텝 크기 (mm, 0.01-10) |
+| Robot:Jog:DX/DY/DZ | ai | 이번 런에서 jog한 누적량 (mm, 툴 x/y/z) |
+| Robot:Jog:Target | stringin | 누적량을 쓸 시트 (빈 문자열 = 없음) |
+| Robot:Jog:Apply | bo | 누적량을 그 시트 트림에 더해 쓰기 |
 | Robot:Vision:Req | longout | 비전 측정 요청 id (시퀀서가 씀) |
 | Robot:Vision:Kind | mbbo | 요청 종류 (0=None, 1=Pick Align, 2=Grip Offset, 3=Place Align, 4=Seating) |
 | Robot:Vision:Done | longin | 응답 완료 id 에코 (비전 노드가 씀) |
@@ -200,6 +203,33 @@ ws/
 | Robot:Null:DX/DY/DZ | ai | 누적 보정 (mm, 툴 x / 툴 y=깊이 / 툴 z; 깊이는 조향 안 하므로 항상 0) |
 | Robot:Null:Force | ai | 마지막 닫힘 렌치 크기 (N) |
 | Robot:Null:Msg | stringin | 결과 한 줄 (39자) |
+
+### Jog와 Jog Apply
+
+jog는 **데몬이 서 있는 모든 대기 상태**에서 동작합니다 — idle 트리거
+대기, 캘리브레이션 hold, hand-eye aiming, 시트 프로브 hold, PauseStep
+정지, measurement wait. 궤적을 실행하는 중에는 서비스되지 않습니다
+(그건 jog가 아니라 이동 중단입니다). idle에서 jog해도 안전합니다: 모든
+런이 스텝 0-1에서 티칭된 standby로 계획 이동하며 시작하므로 다음
+트리거가 되돌립니다. 그래서 누적량도 **런 시작마다 0으로** 리셋됩니다.
+
+누적량 `Robot:Jog:D*`는 **툴 프레임 mm**입니다. `Motion::jog`와
+`Model::apply_cartesian_offset`이 같은 강체 이동이라 누적량이 곧
+트림이고, 따로 프레임을 달고 다닐 필요가 없습니다(비전 `Correction`과
+다른 점).
+
+`Robot:Jog:Apply=1`이면 그 누적량을 `Robot:Jog:Target`이 가리키는 시트의
+x/y/z 트림에 **더해서** taught_waypoints.yaml에 쓰고 누적량을 0으로
+되돌립니다. 움직이지 않은 축은 슬롯을 아예 건드리지 않습니다. 반영은
+**다음 트리거**부터입니다(파일을 그때 다시 읽으므로) — 진행 중인 런의
+복귀 스텝은 집어 온 자리로 그대로 돌아갑니다.
+
+Target은 hold가 서 있는 시트이지 `Robot:Holder`가 아닙니다 — 모드 2는
+`Holder`가 랙을 가리키는 채로 스테이지 위에 섭니다. 그래서 시트가 있는
+곳은 캘리브레이션 hold 둘뿐이고(모드 1 = 그 홀더, 모드 2 = 스테이지),
+나머지 대기에서는 Target이 비어 있고 Apply는 거부됩니다. 트림은 시트의
+`on_position`을 움직이는 값이라 standby에서 jog한 양은 그 측정이
+아닙니다.
 
 ### Robot:Loaded PV
 
