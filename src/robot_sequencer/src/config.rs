@@ -421,22 +421,18 @@ impl Default for TiltConfig {
     }
 }
 
-/// Force-stopped seat probing (`CalibMode` = Seat Probe). Commissioning
-/// only: it measures where a bore actually is, which a taught pose only
-/// records an operator's belief about.
+/// The stage bore's lateral probe (`CalibMode` = Seat Probe).
 ///
-/// It exists because the criterion for the offsets is that the puck goes
-/// in and comes out without rubbing — lateral contact is what shakes the
-/// sample — and image agreement is a proxy for that which cannot see a
-/// bore whose axis differs from where its rim looks.
-#[derive(Debug, Deserialize)]
+/// Its own block, and not one `lateral:` shared with the holder wells,
+/// because the two seats are not the same measurement at either end. The
+/// bore holds the puck with 0.50 mm of radial clearance and needs the
+/// fingers opened to get the pads out of the way. Reusing these numbers
+/// at a well put the walls closer than one step, so contact landed
+/// mid-step and the rest of that step was driven into a rigid wall past
+/// the abort (h7 and h10, 2026-08-19).
+#[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub struct ProbeConfig {
-    /// Velocity and acceleration scale for every probe step and every
-    /// return. One value rather than one per direction: it says how
-    /// gently the arm may move next to a sample, which does not change
-    /// between pushing sideways and pushing down.
-    pub velocity_scale: f64,
+pub struct BoreConfig {
     /// How far the fingers open before the probe steps, mm.
     ///
     /// A gripped, seated puck closes the gripper-puck-bore loop: measured
@@ -453,13 +449,83 @@ pub struct ProbeConfig {
     /// fingers were not the thing in the way: at 0.4 mm the free run was
     /// 0.2 mm against a nominal 0.50 mm clearance (§16.2) and could not
     /// decide it.
-    ///
-    /// Zero holds the grip instead: the fingers are not commanded at all,
-    /// and the probe measures the arm against a puck that is rigidly
-    /// attached to it. That is a different measurement, not a degenerate
-    /// one — the play is the largest unknown in the chain, and a run that
-    /// finds free travel without it needs no play to be subtracted.
     pub loosen_mm: f64,
+    /// Sideways, toward a bore wall.
+    pub lateral: ProbeAxisConfig,
+}
+
+/// A holder well's lateral probe (`CalibMode` = Holder Map).
+///
+/// There is no `loosen_mm` here on purpose. A well holds its puck by
+/// gravity alone, so pads leaving the neck pivot it up and out — at h2
+/// the loosened bore probe lost the puck entirely (2026-08-19). "A well
+/// is probed clamped" is therefore not a number an operator may set: it
+/// is what [`WellConfig::seat_probe`] builds, and there is nowhere in
+/// the file to say otherwise.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct WellConfig {
+    /// Sideways, toward a well wall.
+    pub lateral: ProbeAxisConfig,
+    /// Smallest measured off-centre worth writing to the trim file, mm.
+    ///
+    /// Its own number and not `lateral.step_mm` again, which is what the
+    /// holder map used to read. Those two being one constant is why no
+    /// well could ever be written: a well's whole play is about one bore
+    /// step, so every centre it could honestly measure was inside the
+    /// deadband by construction (h4, h7, h10). This says how small a
+    /// correction is not worth moving the taught pose for; the step says
+    /// how finely the walls are approached. They are different questions.
+    pub persist_deadband_mm: f64,
+}
+
+/// What the lateral probe needs to know about the seat in front of it:
+/// how much play to open before stepping, and how finely to step.
+///
+/// Built by the seat's own config rather than assembled at the call
+/// site, so that "clamped" stays a property of being a well.
+#[derive(Debug, Clone, Copy)]
+pub struct SeatProbe {
+    pub loosen_mm: f64,
+    pub lateral: ProbeAxisConfig,
+}
+
+impl BoreConfig {
+    /// The bore is probed with the pads out of the way.
+    pub fn seat_probe(&self) -> SeatProbe {
+        SeatProbe {
+            loosen_mm: self.loosen_mm,
+            lateral: self.lateral,
+        }
+    }
+}
+
+impl WellConfig {
+    /// A well is probed clamped, always — see [`WellConfig`].
+    pub fn seat_probe(&self) -> SeatProbe {
+        SeatProbe {
+            loosen_mm: 0.0,
+            lateral: self.lateral,
+        }
+    }
+}
+
+/// Force-stopped seat probing (`CalibMode` = Seat Probe). Commissioning
+/// only: it measures where a bore actually is, which a taught pose only
+/// records an operator's belief about.
+///
+/// It exists because the criterion for the offsets is that the puck goes
+/// in and comes out without rubbing — lateral contact is what shakes the
+/// sample — and image agreement is a proxy for that which cannot see a
+/// bore whose axis differs from where its rim looks.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ProbeConfig {
+    /// Velocity and acceleration scale for every probe step and every
+    /// return. One value rather than one per direction: it says how
+    /// gently the arm may move next to a sample, which does not change
+    /// between pushing sideways and pushing down.
+    pub velocity_scale: f64,
     /// Heights above the pose the probe was triggered at, mm, probed in
     /// the order given and returned from at the end.
     ///
@@ -486,8 +552,10 @@ pub struct ProbeConfig {
     /// +0.31 mm with 7.6-8.2 N sideways (three repeats, doc §16.12) before
     /// any height above that could be measured.
     pub lift_abort_n: f64,
-    /// Sideways, toward a bore wall.
-    pub lateral: ProbeAxisConfig,
+    /// The stage bore, probed loosened (`CalibMode` = Seat Probe).
+    pub bore: BoreConfig,
+    /// A holder well, probed clamped (`CalibMode` = Holder Map).
+    pub well: WellConfig,
     /// Downward, toward the seat floor.
     pub depth: ProbeAxisConfig,
     /// Turning the sample in place at every level, instead of pushing it
@@ -504,22 +572,14 @@ pub struct ProbeConfig {
     pub centring: CentringConfig,
 }
 
-impl Default for ProbeConfig {
+impl Default for BoreConfig {
     fn default() -> Self {
         Self {
-            velocity_scale: 0.02,
             // Twice what it took to drop base y+ from 6.008 N to
             // 0.652 N, because at that value the first step still met
             // something in every direction and the pads had not been
             // ruled out by a margin.
             loosen_mm: 2.5,
-            heights_mm: Vec::new(),
-            // Above the 10.14 N the first lift reached, so the force
-            // through that feature can be recorded rather than aborted
-            // at, and below the 23 N a rubbing insert was measured at
-            // (doc §16.2) — the level this whole mode exists to keep the
-            // sequence away from.
-            lift_abort_n: 15.0,
             lateral: ProbeAxisConfig {
                 // Ten steps to a wall at the nominal 0.50 mm radial
                 // clearance, and 0.05 mm of overshoot past it.
@@ -548,6 +608,62 @@ impl Default for ProbeConfig {
                 // abort limit is checked on every one.
                 overtravel_steps: 3,
             },
+        }
+    }
+}
+
+impl Default for WellConfig {
+    /// An order of magnitude finer than the bore, because that is what
+    /// the wells measured: h4 walls at 0.050 mm per side, h7 at 0.052,
+    /// h10 at 0.026-0.032 (2026-08-18/19). At the bore's 0.05 mm step
+    /// every one of those walls lands inside the first step.
+    fn default() -> Self {
+        Self {
+            lateral: ProbeAxisConfig {
+                // Five steps to the tightest wall measured, so contact is
+                // read before the wall is loaded rather than after.
+                step_mm: 0.01,
+                // Ten times the largest play measured, which bounds a
+                // direction that finds nothing at ~40 s rather than the
+                // bore's ~4 min at this step size.
+                travel_mm: 0.5,
+                // The bore's threshold: it is set by what the arm can
+                // tell from its own standing scatter, which does not
+                // change with the seat.
+                threshold_n: 0.5,
+                // Clamped probing has no finger play to absorb the seat's
+                // own cross-axis tension, and that tension is what tripped
+                // the bore's 5.00 N: h7 base x+ read 8.12 N total while
+                // the along-axis force was 1.17 N. Below `lift_abort_n`,
+                // and below the 23 N of a rubbing insert.
+                abort_n: 12.0,
+                // Five, not the bore's three: the step is a fifth of the
+                // bore's, so five of them is a shorter push into the wall
+                // and still gives the slope enough rising samples to fit
+                // — both wells that bracketed cleanly reported "at the
+                // trip point, no slope to fit" with three.
+                overtravel_steps: 5,
+            },
+            // One step. The trim it guards is a taught-pose move, and a
+            // correction the probe cannot resolve is not one to make.
+            persist_deadband_mm: 0.01,
+        }
+    }
+}
+
+impl Default for ProbeConfig {
+    fn default() -> Self {
+        Self {
+            velocity_scale: 0.02,
+            bore: BoreConfig::default(),
+            well: WellConfig::default(),
+            heights_mm: Vec::new(),
+            // Above the 10.14 N the first lift reached, so the force
+            // through that feature can be recorded rather than aborted
+            // at, and below the 23 N a rubbing insert was measured at
+            // (doc §16.2) — the level this whole mode exists to keep the
+            // sequence away from.
+            lift_abort_n: 15.0,
             depth: ProbeAxisConfig {
                 step_mm: 0.10,
                 travel_mm: 4.0,
@@ -567,10 +683,11 @@ impl Default for ProbeConfig {
 
 impl Default for ProbeAxisConfig {
     /// Only reachable through a partial `lateral:`/`depth:` block, where
-    /// serde fills the unnamed fields from here. The lateral numbers are
-    /// the safer of the two sets to inherit.
+    /// serde fills the unnamed fields from here. A complete `bore:` or
+    /// `well:` block never reaches it: those two have their own defaults,
+    /// so neither seat can inherit the other's numbers.
     fn default() -> Self {
-        ProbeConfig::default().lateral
+        ProbeConfig::default().bore.lateral
     }
 }
 
@@ -683,7 +800,8 @@ impl Config {
         // allowed to push on a sample, and a probe that reads them for the
         // first time has already been triggered.
         for (name, axis) in [
-            ("probe.lateral", &config.probe.lateral),
+            ("probe.bore.lateral", &config.probe.bore.lateral),
+            ("probe.well.lateral", &config.probe.well.lateral),
             ("probe.depth", &config.probe.depth),
         ] {
             if axis.step_mm <= 0.0 {
@@ -822,9 +940,21 @@ impl Config {
                     .into(),
             ));
         }
-        if !(0.0..=5.0).contains(&config.probe.loosen_mm) {
+        if !(0.0..=5.0).contains(&config.probe.bore.loosen_mm) {
             return Err(SequencerError(
-                "probe.loosen_mm must be within 0..5 (the fingers must find the sample again)"
+                "probe.bore.loosen_mm must be within 0..5 (the fingers must find the sample again)"
+                    .into(),
+            ));
+        }
+        // Zero would write the measurement's own grain into a taught pose
+        // on every map; anything past the persist cap can never fire,
+        // because a centre that large is refused as not-a-trim first.
+        if !(0.0..=1.0).contains(&config.probe.well.persist_deadband_mm)
+            || config.probe.well.persist_deadband_mm == 0.0
+        {
+            return Err(SequencerError(
+                "probe.well.persist_deadband_mm must be within 0..1 mm, exclusive of zero \
+                 (a centre past 1 mm is refused as not a trim error at all)"
                     .into(),
             ));
         }
@@ -949,8 +1079,8 @@ mod tests {
         for (name, section, want) in [
             (
                 "abort_at_threshold",
-                "probe:\n  lateral:\n    threshold_n: 0.5\n    abort_n: 0.5\n",
-                "probe.lateral.abort_n",
+                "probe:\n  bore:\n    lateral:\n      threshold_n: 0.5\n      abort_n: 0.5\n",
+                "probe.bore.lateral.abort_n",
             ),
             (
                 "abort_under_threshold",
@@ -959,8 +1089,8 @@ mod tests {
             ),
             (
                 "step_zero",
-                "probe:\n  lateral:\n    step_mm: 0.0\n",
-                "probe.lateral.step_mm",
+                "probe:\n  well:\n    lateral:\n      step_mm: 0.0\n",
+                "probe.well.lateral.step_mm",
             ),
             (
                 "travel_under_one_step",
@@ -976,8 +1106,8 @@ mod tests {
             // to be in contact, so the count is a push limit like the rest.
             (
                 "overtravel_deep",
-                "probe:\n  lateral:\n    overtravel_steps: 11\n",
-                "probe.lateral.overtravel_steps",
+                "probe:\n  bore:\n    lateral:\n      overtravel_steps: 11\n",
+                "probe.bore.lateral.overtravel_steps",
             ),
             // The move between heights carries a gripped sample out of a
             // seat, so its ceiling is bounded like every other force here.
@@ -1023,8 +1153,16 @@ mod tests {
             // open rack with a sample in them.
             (
                 "loosen_wide",
-                "probe:\n  loosen_mm: 12.0\n",
-                "probe.loosen_mm",
+                "probe:\n  bore:\n    loosen_mm: 12.0\n",
+                "probe.bore.loosen_mm",
+            ),
+            // The deadband is what decides whether a measured centre is
+            // written at all, so zero is a misconfiguration and not "no
+            // deadband".
+            (
+                "deadband_zero",
+                "probe:\n  well:\n    persist_deadband_mm: 0.0\n",
+                "probe.well.persist_deadband_mm",
             ),
         ] {
             let path = dir.join(format!("{name}.yaml"));

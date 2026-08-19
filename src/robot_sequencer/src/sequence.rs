@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use cspace_core::geometry::Vector3;
 
-use crate::config::Config;
+use crate::config::{Config, SeatProbe};
 use crate::epics::{CalibMode, Epics, VisionKind, WaitStatus};
 use crate::error::SequencerError;
 use crate::gripper::Gripper;
@@ -673,7 +673,7 @@ impl<'a> Sequencer<'a> {
         log::info("  not in the seat, or the fingers are empty, stop here.");
         log::info("========================================");
         self.wait_for_trigger(true);
-        let (_, soft) = self.seat_probe_here(self.config.probe.loosen_mm)?;
+        let (_, soft) = self.seat_probe_here(self.config.probe.bore.seat_probe())?;
         log::info(
             "Nothing was written. The arm is back at the pose the probe \
              started from and the grip is back on the puck; lift it out \
@@ -705,12 +705,12 @@ impl<'a> Sequencer<'a> {
     #[allow(clippy::type_complexity)]
     fn seat_probe_here(
         &mut self,
-        loosen_mm: f64,
+        seat: SeatProbe,
     ) -> Result<(Option<(f64, f64)>, Option<SequencerError>), SequencerError> {
         let p = &self.config.probe;
         let depth = ProbeLimits::new(&p.depth, p.velocity_scale);
         let limits = Limits {
-            lateral: ProbeLimits::new(&p.lateral, p.velocity_scale),
+            lateral: ProbeLimits::new(&seat.lateral, p.velocity_scale),
             depth,
             // The moves between heights are stepped like the depth probe
             // but bounded like a pick, not like a push onto a floor.
@@ -732,7 +732,7 @@ impl<'a> Sequencer<'a> {
         // ladder does not make the heights above it unmeasured, and this
         // mode's whole output is what it printed.
         let (play_mm, grip_lost, (levels, walked, returned)) =
-            self.with_grip_loosened(loosen_mm, |s| Ok(s.sweep_heights(limits)))?;
+            self.with_grip_loosened(seat.loosen_mm, |s| Ok(s.sweep_heights(limits)))?;
 
         // The trigger-pose level is the taught seat pose, so its bracket
         // centres are the trim residuals holder map persists.
@@ -900,10 +900,10 @@ impl<'a> Sequencer<'a> {
             self.cartesian(20, "holder_on_position_final", &w_t.on_pos, 0)?;
         }
 
-        // Clamped: a holder well holds the puck by gravity only, so the
-        // loosened-pad probe that the stage bore needs would drag the
-        // puck out of it instead of bracketing walls.
-        let (seat, probed) = self.seat_probe_here(0.0)?;
+        // The well's own profile: clamped by construction, and stepping
+        // an order of magnitude finer than the bore, whose walls sit ten
+        // steps out rather than inside the first one.
+        let (seat, probed) = self.seat_probe_here(self.config.probe.well.seat_probe())?;
         if let Some(e) = &probed {
             log::warn(&format!(
                 "probe measured less than asked ({e}); the arm walked back to \
@@ -954,14 +954,14 @@ impl<'a> Sequencer<'a> {
                 )));
             }
         }
-        let step_mm = self.config.probe.lateral.step_mm;
-        let dx = (cx_mm.abs() >= step_mm).then_some(cx_mm / 1000.0);
-        let dz = (cy_mm.abs() >= step_mm).then_some(cy_mm / 1000.0);
+        let deadband_mm = self.config.probe.well.persist_deadband_mm;
+        let dx = (cx_mm.abs() >= deadband_mm).then_some(cx_mm / 1000.0);
+        let dz = (cy_mm.abs() >= deadband_mm).then_some(cy_mm / 1000.0);
         if dx.is_none() && dz.is_none() {
             log::info(&format!(
                 "holder map: both centres ({cx_mm:+.3}, {cy_mm:+.3} mm) are \
-                 within one lateral step ({step_mm} mm); the taught trims \
-                 already hold the optimum and were kept"
+                 within the {deadband_mm} mm persist deadband; the taught \
+                 trims already hold the optimum and were kept"
             ));
             return Ok(false);
         }

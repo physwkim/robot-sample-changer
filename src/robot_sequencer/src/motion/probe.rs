@@ -1495,7 +1495,12 @@ mod tests {
         let config = Config::load(path).expect("load config");
         let model = Model::load(&config).expect("load model");
         let w = WaypointData::load(&config.sequence.waypoints_yaml).expect("waypoints");
-        let step_mm = config.probe.lateral.step_mm.min(config.probe.depth.step_mm);
+        let step_mm = config
+            .probe
+            .bore
+            .lateral
+            .step_mm
+            .min(config.probe.depth.step_mm);
 
         for (name, taught) in [
             ("holder1_on_position", &w.holder1_on_position),

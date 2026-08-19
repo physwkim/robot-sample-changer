@@ -307,7 +307,9 @@ handeye:
 # validated at startup rather than at the trigger.
 probe:
   velocity_scale: 0.02    # each step is a move into something that may be there
-  loosen_mm: 2.5          # play opened before stepping. A gripped, seated puck
+  bore:                   # the stage bore (CalibMode=5): 0.50 mm radial clearance,
+                          # probed with the fingers opened
+    loosen_mm: 2.5        # play opened before stepping. A gripped, seated puck
                           # closes the gripper-puck-bore loop and every direction
                           # saturated on the first 0.05 mm step (1.2/1.5/6.3 N,
                           # 2026-08-15) with nothing free in front of it. Half of
@@ -319,27 +321,59 @@ probe:
                           # step, so this doubles it to put the pads out of reach
                           # by a margin. The release runs at the gripper's minimum
                           # force -- it opens into a rack.
-  lateral:                # sideways, toward a bore wall
-    step_mm: 0.05         # ten steps to the nominal 0.50 mm radial clearance,
+    lateral:              # sideways, toward a bore wall
+      step_mm: 0.05       # ten steps to the nominal 0.50 mm radial clearance,
                           # and the overshoot past first contact is one of them
-    travel_mm: 3.0        # past the clearance, so "no contact" means the bore is
+      travel_mm: 3.0      # past the clearance, so "no contact" means the bore is
                           # not where the pose says rather than the probe was short.
                           # 1.5 did not reach that: base x- and y+ both ran out with
                           # nothing in front of them (doc §16.7) and the bracket had
                           # no midpoint. This clears the loosened fingers' free run
                           # (loosen_mm/2 = 1.27) plus the nominal 0.50 clearance
-    threshold_n: 0.5      # 7x the 0.073 N the arm scatters standing still; reading
+      threshold_n: 0.5    # 7x the 0.073 N the arm scatters standing still; reading
                           # force between steps rather than during them is what
                           # makes a threshold this low usable (doc §16.1)
-    abort_n: 5.0          # a rubbing insert was measured at 8-23 N. That is the
+      abort_n: 5.0        # a rubbing insert was measured at 8-23 N. That is the
                           # force this mode exists to stop the sequence applying,
                           # not a level to probe up to.
-    overtravel_steps: 3   # steps taken after contact so the wall comes from a
+      overtravel_steps: 3 # steps taken after contact so the wall comes from a
                           # slope, not from the trip point. A bore wall trips in
                           # one step (0.17 -> 0.59 N, doc §16.8) and one sample is
                           # not a slope. 0.15 mm further in at most -- it also
                           # stops at half the abort force, so a stiffer wall costs
                           # samples rather than an aborted run (doc §16.9)
+  well:                   # a holder well (CalibMode=6): an order of magnitude
+                          # tighter than the bore, and probed CLAMPED -- there is
+                          # deliberately no loosen_mm here, because a well holds
+                          # its puck by gravity and pads leaving the neck tip it
+                          # out of the well (h2, 2026-08-19)
+    lateral:              # sideways, toward a well wall
+      step_mm: 0.01       # the wells measured 0.026-0.052 mm per side (h4/h7/h10,
+                          # 2026-08-18/19), so at the bore's 0.05 the wall lands
+                          # INSIDE the first step: contact is read only after the
+                          # rest of that step has been driven into a rigid wall,
+                          # which is what tripped the abort at h7 and h10
+      travel_mm: 0.5      # 10x the largest play measured. Bounds a direction that
+                          # finds nothing at ~40 s instead of the bore's ~4 min at
+                          # this step size
+      threshold_n: 0.5    # set by the arm's standing scatter, which does not
+                          # change with the seat
+      abort_n: 12.0       # clamped probing has no finger play to absorb the seat's
+                          # own cross-axis tension, and that tension is what met
+                          # the bore's 5.0: h7 base x+ read 8.12 N total with only
+                          # 1.17 N along the axis. Below lift_abort_n (15) and well
+                          # below the 23 N of a rubbing insert
+      overtravel_steps: 5 # five 0.01 mm steps is a third of the bore's push and
+                          # gives the slope five rising samples -- both wells that
+                          # bracketed cleanly reported "at the trip point, no slope
+                          # to fit" with three
+    persist_deadband_mm: 0.01
+                          # smallest centre worth rewriting the taught pose for.
+                          # Its own number, NOT lateral.step_mm, which is what the
+                          # map used to read: a well's whole play is about one bore
+                          # step, so with the two tied together every centre it
+                          # could honestly measure was inside the deadband and no
+                          # well was ever writable
   depth:                  # downward, toward the seat floor
     step_mm: 0.10
     travel_mm: 4.0
