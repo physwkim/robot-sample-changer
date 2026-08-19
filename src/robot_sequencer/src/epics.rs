@@ -391,14 +391,24 @@ impl Epics {
         self.put_i32(&self.wait, value, GET_TIMEOUT)
     }
 
-    /// Holder number clamped to 1-10, defaulting to 1 (C++ behavior).
+    /// The seat number as the PV has it, 1 if it cannot be read.
+    ///
+    /// Not clamped to the rack. It used to be — 1-10 or else 1, which
+    /// is where `Robot:Holder = 0` went when the stage was added: the
+    /// stage seat was coerced to holder 1 and the run fetched a puck
+    /// into it, with only a warning line to say so. What a seat number
+    /// means belongs to the mode that acts on it, so the range lives
+    /// where it is used: `Sequencer::run_grip_null` reads 0 as the
+    /// stage, and `Sequencer::compute_run_waypoints` refuses anything
+    /// that is not a rack seat rather than extrapolating the pitch.
     pub fn read_holder(&self) -> i32 {
-        let holder = self.get_i32(&self.holder, GET_TIMEOUT).unwrap_or(1);
-        if !(1..=10).contains(&holder) {
-            log::warn(&format!("Invalid holder number {holder} from PV, using 1"));
-            return 1;
+        match self.get_i32(&self.holder, GET_TIMEOUT) {
+            Some(holder) => holder,
+            None => {
+                log::warn("Cannot read the holder PV, using 1");
+                1
+            }
         }
-        holder
     }
 
     /// Map-mode puck source holder; 0 — also a missing PV or a bad read
