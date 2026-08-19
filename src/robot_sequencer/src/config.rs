@@ -37,13 +37,16 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct GripNullConfig {
-    /// Force the close leaves per mm of taught-pose error, N/mm, in the
-    /// order base x, base y, depth.
+    /// Seed for the first step, N/mm, in the order base x, base y,
+    /// depth: the force the close leaves per mm of taught-pose error.
     ///
-    /// Measured at two holders: h9 read 29.4 N/mm in base x and 103 in
-    /// base y, h10 28-36 in base x and 36.6 in depth (2026-08-19). The
-    /// loop measures again every iteration, so these set how fast it
-    /// converges and not where it stops — see `damping`.
+    /// Only the first. After that the loop divides by the slope it has
+    /// measured itself, because a seed alone cannot be trusted to set
+    /// even the rate: at h8 the seeded 100 N/mm in base y bought 0.006 mm
+    /// a round against a force that did not respond, and six rounds
+    /// moved 0.031 mm (2026-08-19). Measured at two holders — h9 read
+    /// 29.4 N/mm in base x and 103 in base y, h10 28-36 in base x and
+    /// 36.6 in depth.
     pub stiffness_n_per_mm: [f64; 3],
     /// Fraction of the computed step actually taken.
     ///

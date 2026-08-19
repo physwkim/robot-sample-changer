@@ -364,11 +364,13 @@ probe:
 # against and so could not measure the pose error at all.
 grip_null:
   stiffness_n_per_mm: [30.0, 100.0, 37.0]
-                        # force the close leaves per mm of pose error, in base x,
-                        # base y and depth. Measured at two holders (h9 29.4 in
-                        # base x and 103 in base y; h10 28-36 in base x and 36.6
-                        # in depth, 2026-08-19). The loop re-measures every
-                        # iteration, so these set the rate and not the answer
+                        # SEED for the first step only, N/mm, in base x, base y
+                        # and depth. Measured at two holders (h9 29.4 in base x
+                        # and 103 in base y; h10 28-36 in base x and 36.6 in
+                        # depth, 2026-08-19). After the first step the loop
+                        # steers on the slope it measures itself, because a seed
+                        # too stiff makes it crawl: h8's base y took 0.006 mm a
+                        # round against a force that did not move at 100 N/mm
   damping: 0.7          # two-point stiffness estimates need margin: at 0.7 the
                         # iteration still contracts with a stiffness wrong by 2x
                         # either way, where 1.0 sits on the edge of oscillating

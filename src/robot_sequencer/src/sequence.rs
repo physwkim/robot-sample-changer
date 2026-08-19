@@ -901,6 +901,13 @@ impl<'a> Sequencer<'a> {
         ));
         let mut total_mm = [0.0f64; 3];
         let mut wrote = false;
+        // The slope the loop steers on, seeded from the file and then
+        // measured. `since_mm` is the travel that has not yet produced a
+        // force change worth dividing by, so the estimate is always a
+        // secant over an interval that actually carried signal.
+        let mut stiffness = g.stiffness_n_per_mm;
+        let mut since_mm = [0.0f64; 3];
+        let mut previous: Option<[f64; 3]> = None;
         let mut quiet_rounds = 0u32;
         for iteration in 1..=g.max_iterations {
             // Reloaded per iteration, by the same path the trigger loop
@@ -969,16 +976,50 @@ impl<'a> Sequencer<'a> {
                     return Ok(if wrote { Outcome::Wrote } else { Outcome::Ran });
                 }
                 log::info("  grip null: under the floor; one more round to confirm");
+                previous = Some(force);
                 continue;
             }
             quiet_rounds = 0;
+            // Re-estimate before stepping. The seed is two holders' worth
+            // of measurement and a holder that is stiffer than it makes
+            // the loop crawl: at h8 the seeded 100 N/mm in base y bought
+            // 0.006 mm a round against a force that did not move
+            // (2026-08-19). The loop already holds what it needs to know
+            // better — how far it went and what that did.
+            if let Some(prev) = previous {
+                for i in 0..3 {
+                    if since_mm[i] == 0.0 {
+                        continue;
+                    }
+                    let change = force[i] - prev[i];
+                    if change.abs() >= g.settled_n {
+                        // A real response: the secant over the travel
+                        // that produced it.
+                        let measured = change / since_mm[i];
+                        if measured > 0.0 {
+                            stiffness[i] = measured;
+                        }
+                        since_mm[i] = 0.0;
+                    } else {
+                        // Nothing came back over `since_mm`, so whatever
+                        // the slope is, it is no steeper than this —
+                        // which makes the next step larger rather than
+                        // repeating one already known to do nothing.
+                        stiffness[i] = stiffness[i].min(g.settled_n / since_mm[i].abs());
+                    }
+                }
+            }
             let step_mm: [f64; 3] = std::array::from_fn(|i| {
                 if live[i] {
-                    -force[i] / g.stiffness_n_per_mm[i] * g.damping
+                    -force[i] / stiffness[i] * g.damping
                 } else {
                     0.0
                 }
             });
+            log::info(&format!(
+                "  grip null: steering on {:.1}, {:.1}, {:.1} N/mm for {}, {}, {}",
+                stiffness[0], stiffness[1], stiffness[2], AXES[0], AXES[1], AXES[2]
+            ));
             for (i, axis) in AXES.iter().enumerate() {
                 if step_mm[i].abs() > g.max_step_mm {
                     return Err(SequencerError(format!(
@@ -1013,7 +1054,9 @@ impl<'a> Sequencer<'a> {
             wrote = true;
             for i in 0..3 {
                 total_mm[i] += step_mm[i];
+                since_mm[i] += step_mm[i];
             }
+            previous = Some(force);
         }
         Err(SequencerError(format!(
             "grip null: {} iterations did not bring holder {holder} under \
