@@ -46,8 +46,8 @@ record(longout, "Robot:StartStep")
 }
 record(longout, "Robot:Holder")
 {
-    field(DESC, "Robot holder number")
-    field(DRVL, "1")
+    field(DESC, "Holder 1-10, 0=stage (grip null only)")
+    field(DRVL, "0")
     field(DRVH, "100")
     field(VAL,  "1")
 }

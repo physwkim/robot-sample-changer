@@ -205,13 +205,128 @@ fn edit_list_entry(
     Ok((out.join("\n") + "\n", old, new))
 }
 
-/// Adds probe-measured deltas (metres) to one holder's x and/or z trim
-/// slots in the taught-waypoints file, editing the text in place so the
-/// comments and every untouched line survive (unlike a parse-and-dump).
-/// The edited text is parsed back and the touched fields compared to
-/// what was intended before it replaces the original (temp + rename),
-/// so a write that cannot be read back never lands. Returns one line
-/// per slot written, for the caller's log.
+/// The scalar twin of [`edit_list_entry`]: replaces the number on a
+/// `key: <n>` line, wherever it is indented. Same one-hit rule, so a key
+/// that appears twice is refused rather than half-edited.
+fn edit_scalar(text: &str, key: &str, delta: f64) -> Result<(String, f64, f64), SequencerError> {
+    let prefix = format!("{key}:");
+    let mut out: Vec<String> = Vec::new();
+    let mut hit = None;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix(&prefix) else {
+            out.push(line.to_string());
+            continue;
+        };
+        if hit.is_some() {
+            return Err(SequencerError(format!(
+                "waypoints: '{key}' appears more than once; refusing to edit"
+            )));
+        }
+        let indent = &line[..line.len() - trimmed.len()];
+        let old: f64 = rest.trim().parse().map_err(|e| {
+            SequencerError(format!("waypoints: cannot parse '{key}' as a number: {e}"))
+        })?;
+        let new = round7(old + delta);
+        out.push(format!("{indent}{key}: {new:?}"));
+        hit = Some((old, new));
+    }
+    let (old, new) = hit.ok_or_else(|| {
+        SequencerError(format!(
+            "waypoints: key '{key}' not found; refusing to edit"
+        ))
+    })?;
+    Ok((out.join("\n") + "\n", old, new))
+}
+
+/// Where one trim lives in the file. The rack keeps ten of each in a
+/// flow list; the stage, being one seat, keeps three scalars. Nothing
+/// else about writing a trim differs between them, so this is the only
+/// place the difference is spelt out.
+#[derive(Clone, Copy)]
+enum SlotRef {
+    Scalar(&'static str),
+    Entry(&'static str, usize),
+}
+
+impl SlotRef {
+    fn edit(self, text: &str, delta: f64) -> Result<(String, f64, f64), SequencerError> {
+        match self {
+            Self::Scalar(key) => edit_scalar(text, key, delta),
+            Self::Entry(key, index) => edit_list_entry(text, key, index, delta),
+        }
+    }
+
+    fn name(self) -> String {
+        match self {
+            Self::Scalar(key) => key.to_string(),
+            Self::Entry(key, index) => format!("{key}[{index}]"),
+        }
+    }
+}
+
+/// Adds measured deltas (metres) to one seat's three trim slots in the
+/// taught-waypoints file, editing the text in place so the comments and
+/// every untouched line survive (unlike a parse-and-dump). The edited
+/// text is parsed back and the touched fields compared to what was
+/// intended before it replaces the original (temp + rename), so a write
+/// that cannot be read back never lands. Returns one line per slot
+/// written, for the caller's log.
+fn persist_trims(
+    path: &Path,
+    seat: &str,
+    slots: [(&str, Option<f64>, SlotRef, ReadBack); 3],
+) -> Result<Vec<String>, SequencerError> {
+    let mut text = std::fs::read_to_string(path)
+        .map_err(|e| SequencerError(format!("cannot read waypoints {}: {e}", path.display())))?;
+    let mut report = Vec::new();
+    let mut checks: Vec<(String, SlotRef, f64, ReadBack)> = Vec::new();
+    for (axis, delta, slot, read_back) in slots {
+        let Some(delta) = delta else { continue };
+        let (new_text, old, new) = slot.edit(&text, delta)?;
+        let slot_name = slot.name();
+        text = new_text;
+        report.push(format!(
+            "{seat} {axis} trim ({slot_name}): {old:?} -> {new:?} ({:+.3} mm)",
+            delta * 1000.0
+        ));
+        checks.push((slot_name, slot, new, read_back));
+    }
+    if checks.is_empty() {
+        return Ok(report);
+    }
+    let tmp = path.with_extension("yaml.new");
+    std::fs::write(&tmp, &text)
+        .map_err(|e| SequencerError(format!("cannot write {}: {e}", tmp.display())))?;
+    let reread = WaypointData::load(&tmp).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })?;
+    for (slot_name, slot, expected, read_back) in &checks {
+        let index = match slot {
+            SlotRef::Scalar(_) => 0,
+            SlotRef::Entry(_, index) => *index,
+        };
+        let got = read_back(&reread, index);
+        if got != Some(*expected) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(SequencerError(format!(
+                "waypoints: verify failed for {slot_name}: wrote {expected:?}, read back {got:?}; \
+                 the original file is untouched"
+            )));
+        }
+    }
+    std::fs::rename(&tmp, path)
+        .map_err(|e| SequencerError(format!("cannot replace {}: {e}", path.display())))?;
+    Ok(report)
+}
+
+/// Reads a trim back out of a reloaded file. The index is the list
+/// position and is ignored by a scalar slot, which has only the one.
+type ReadBack = fn(&WaypointData, usize) -> Option<f64>;
+
+/// One holder's three rack trims. One shape for all ten holders: holder
+/// 1 used to be written to a scalar that every other holder also read,
+/// so mapping it moved the whole rack.
 pub fn persist_holder_trims(
     path: &Path,
     holder: i32,
@@ -224,59 +339,67 @@ pub fn persist_holder_trims(
             "waypoints: holder {holder} has no trim slots"
         )));
     }
-    let mut text = std::fs::read_to_string(path)
-        .map_err(|e| SequencerError(format!("cannot read waypoints {}: {e}", path.display())))?;
-    let mut report = Vec::new();
-    // (axis, delta, list key, read-back accessor). One shape for all ten
-    // holders: holder 1 used to be written to a scalar that every other
-    // holder also read, so mapping it moved the whole rack.
-    type ReadBack = fn(&WaypointData, usize) -> Option<f64>;
-    let slots: [(&str, Option<f64>, &str, ReadBack); 3] = [
-        ("x", dx_m, "holder_multi_x_offsets", |w, i| {
-            w.holder_multi_x_offsets.get(i).copied()
-        }),
-        ("y", dy_m, "holder_multi_y_offsets", |w, i| {
-            w.holder_multi_y_offsets.get(i).copied()
-        }),
-        ("z", dz_m, "holder_multi_z_offsets", |w, i| {
-            w.holder_multi_z_offsets.get(i).copied()
-        }),
-    ];
-    let mut checks: Vec<(String, usize, f64, ReadBack)> = Vec::new();
-    for (axis, delta, list_key, read_back) in slots {
-        let Some(delta) = delta else { continue };
-        let idx = (holder - 1) as usize;
-        let (new_text, old, new) = edit_list_entry(&text, list_key, idx, delta)?;
-        let slot_name = format!("{list_key}[{idx}]");
-        text = new_text;
-        report.push(format!(
-            "holder {holder} {axis} trim ({slot_name}): {old:?} -> {new:?} ({:+.3} mm)",
-            delta * 1000.0
-        ));
-        checks.push((slot_name, idx, new, read_back));
-    }
-    if checks.is_empty() {
-        return Ok(report);
-    }
-    let tmp = path.with_extension("yaml.new");
-    std::fs::write(&tmp, &text)
-        .map_err(|e| SequencerError(format!("cannot write {}: {e}", tmp.display())))?;
-    let reread = WaypointData::load(&tmp).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })?;
-    for (slot_name, idx, expected, read_back) in &checks {
-        let got = read_back(&reread, *idx);
-        if got != Some(*expected) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(SequencerError(format!(
-                "waypoints: verify failed for {slot_name}: wrote {expected:?}, read back {got:?}; \
-                 the original file is untouched"
-            )));
-        }
-    }
-    std::fs::rename(&tmp, path)
-        .map_err(|e| SequencerError(format!("cannot replace {}: {e}", path.display())))?;
-    Ok(report)
+    let i = (holder - 1) as usize;
+    persist_trims(
+        path,
+        &format!("holder {holder}"),
+        [
+            (
+                "x",
+                dx_m,
+                SlotRef::Entry("holder_multi_x_offsets", i),
+                |w, i| w.holder_multi_x_offsets.get(i).copied(),
+            ),
+            (
+                "y",
+                dy_m,
+                SlotRef::Entry("holder_multi_y_offsets", i),
+                |w, i| w.holder_multi_y_offsets.get(i).copied(),
+            ),
+            (
+                "z",
+                dz_m,
+                SlotRef::Entry("holder_multi_z_offsets", i),
+                |w, i| w.holder_multi_z_offsets.get(i).copied(),
+            ),
+        ],
+    )
+}
+
+/// The stage's three trims. Scalars rather than a list because there is
+/// one stage bore, but the same slots in the same tool frame as a
+/// holder's: `sample_holder_on_position` is offset by them the way a
+/// rack seat is offset by its list entries.
+pub fn persist_stage_trims(
+    path: &Path,
+    dx_m: Option<f64>,
+    dy_m: Option<f64>,
+    dz_m: Option<f64>,
+) -> Result<Vec<String>, SequencerError> {
+    persist_trims(
+        path,
+        "stage",
+        [
+            (
+                "x",
+                dx_m,
+                SlotRef::Scalar("sample_holder_on_position_x_offset"),
+                |w, _| Some(w.sample_holder_on_x_offset),
+            ),
+            (
+                "y",
+                dy_m,
+                SlotRef::Scalar("sample_holder_on_position_y_offset"),
+                |w, _| Some(w.sample_holder_on_y_offset),
+            ),
+            (
+                "z",
+                dz_m,
+                SlotRef::Scalar("sample_holder_on_position_z_offset"),
+                |w, _| Some(w.sample_holder_on_z_offset),
+            ),
+        ],
+    )
 }
 
 fn f64_at(params: &Value, key: &str, default: f64) -> f64 {
@@ -536,6 +659,57 @@ mod tests {
             after.holder_multi_y_offsets[5], before.holder_multi_y_offsets[5],
             "neighbour untouched"
         );
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The stage keeps its three trims as scalars, so it exercises the
+    /// other slot shape: the number on the line is replaced in place,
+    /// the rack lists beside it do not move, and an axis with no
+    /// measurement keeps its slot.
+    #[test]
+    fn persist_edits_the_stage_scalars_without_moving_the_rack() {
+        let path = temp_copy("stage");
+        let before = WaypointData::load(&path).expect("load");
+        let report =
+            persist_stage_trims(&path, Some(0.0001), None, Some(-0.00002)).expect("persist");
+        assert_eq!(report.len(), 2, "{report:?}");
+        let after = WaypointData::load(&path).expect("reload");
+        assert_eq!(
+            after.sample_holder_on_x_offset,
+            round7(before.sample_holder_on_x_offset + 0.0001)
+        );
+        assert_eq!(
+            after.sample_holder_on_z_offset,
+            round7(before.sample_holder_on_z_offset - 0.00002)
+        );
+        assert_eq!(
+            after.sample_holder_on_y_offset, before.sample_holder_on_y_offset,
+            "the axis with no measurement keeps its slot"
+        );
+        assert_eq!(
+            after.holder_multi_x_offsets, before.holder_multi_x_offsets,
+            "the rack is a different seat"
+        );
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.contains("# Insertion-depth trim"), "comments survive");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A scalar key that is not there is refused for the reason a list
+    /// key is: half a correction written is worse than none, and the
+    /// stage's three offsets are optional in the file's schema, so a
+    /// file without them must fail loudly rather than default to zero
+    /// and add to it.
+    #[test]
+    fn persist_refuses_a_missing_stage_scalar() {
+        let path = temp_copy("stage_missing");
+        let text = std::fs::read_to_string(&path)
+            .expect("read")
+            .replace("sample_holder_on_position_y_offset", "renamed_away");
+        std::fs::write(&path, &text).expect("write");
+        let err = persist_stage_trims(&path, None, Some(0.0002), None);
+        assert!(err.is_err(), "{err:?}");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), text);
         std::fs::remove_file(&path).ok();
     }
 

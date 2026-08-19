@@ -25,7 +25,7 @@ use crate::model::{JointMap, Model};
 use crate::motion::{
     Bracket, Centring, Motion, NEGLIGIBLE_MM, ProbeLimits, Probed, TiltLimits, Tilted,
 };
-use crate::waypoints::{WaypointData, persist_holder_trims};
+use crate::waypoints::{WaypointData, persist_holder_trims, persist_stage_trims};
 
 const POLL: Duration = Duration::from_millis(100);
 /// How often the hand-eye aiming hold asks the detector where the tag is.
@@ -89,6 +89,42 @@ struct RunWaypoints {
     sh_on_pos: JointMap,
 }
 
+/// Which seat a grip null is working on: `Robot:Holder = 0` is the
+/// stage bore, 1-10 the rack wells.
+///
+/// The two differ in three things and nothing else — the taught poses
+/// the pick uses, the trim slots the correction lands in, and what the
+/// log calls them. The correction rule itself does not differ, because
+/// it is stated in the tool frame and both seats are gripped by the same
+/// tool; the stage is only turned about 92 degrees from the rack around
+/// the approach axis, which the frame handles rather than a second
+/// mapping.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Seat {
+    Stage,
+    Holder(i32),
+}
+
+impl Seat {
+    fn label(self) -> String {
+        match self {
+            Self::Stage => "the stage".into(),
+            Self::Holder(h) => format!("holder {h}"),
+        }
+    }
+
+    fn persist(
+        self,
+        path: &std::path::Path,
+        d: [Option<f64>; 3],
+    ) -> Result<Vec<String>, SequencerError> {
+        match self {
+            Self::Stage => persist_stage_trims(path, d[0], d[1], d[2]),
+            Self::Holder(h) => persist_holder_trims(path, h, d[0], d[1], d[2]),
+        }
+    }
+}
+
 /// One height's worth of seat probing: where the arm stood, and what it
 /// found from there.
 /// The three base directions the sweep moves along, expressed in the
@@ -126,7 +162,32 @@ impl Axes {
             up: motion.base_dir_in_tool(&Vector3::z())?,
         })
     }
+
+    /// A base-frame vector said in this tool frame: each base component
+    /// carries its own tool-frame direction, so the sum is the same
+    /// vector re-expressed.
+    fn say(&self, base: &[f64; 3]) -> [f64; 3] {
+        let v = self.x * base[0] + self.y * base[1] + self.up * base[2];
+        [v.x, v.y, v.z]
+    }
 }
+
+/// Index order of every grip-null triple: the wrench the loop steers
+/// on, the trim slots it writes, the stiffness it divides by, and the
+/// log. The tool frame, not the base frame, because the trim slots are
+/// tool offsets -- `Model::apply_cartesian_offset` translates along the
+/// tool axes -- and because it is the frame the fingers close in, which
+/// is what makes one rule serve a rack well and the stage bore 92
+/// degrees round from it.
+const NULL_AXES: [&str; 3] = ["tool x", "tool y (depth)", "tool z"];
+
+/// Which way each tool axis is corrected against the force it reads.
+/// Measured on the rack, not derived: both signs come out opposite to
+/// the obvious argument about which way a closing finger drags an arm.
+/// They are a property of the tool, so they carry to any seat the same
+/// tool grips -- which is an inference, and one a new seat confirms on
+/// its first run rather than assumes.
+const NULL_TOOL_SIGN: [f64; 3] = [-1.0, 1.0, -1.0];
 
 struct Level {
     /// Height above the pose the mode was triggered at, mm.
@@ -408,10 +469,20 @@ impl<'a> Sequencer<'a> {
                     log::info(&format!("Puck moved into holder {holder_number}"))
                 }
                 (CalibMode::GripNull, Outcome::Wrote) => log::info(&format!(
-                    "Grip null finished for holder {holder_number}; trims written above"
+                    "Grip null finished for {}; trims written above",
+                    if holder_number == 0 {
+                        "the stage".into()
+                    } else {
+                        format!("holder {holder_number}")
+                    }
                 )),
                 (CalibMode::GripNull, _) => log::info(&format!(
-                    "Grip null finished for holder {holder_number}; nothing written"
+                    "Grip null finished for {}; nothing written",
+                    if holder_number == 0 {
+                        "the stage".into()
+                    } else {
+                        format!("holder {holder_number}")
+                    }
                 )),
             }
             log::info("========================================");
@@ -925,15 +996,25 @@ impl<'a> Sequencer<'a> {
     /// into a seat that is not empty, so a non-zero `StartStep` is
     /// refused rather than honored.
     fn run_grip_null(&mut self, holder: i32, start: i32) -> Result<Outcome, SequencerError> {
+        let seat = match holder {
+            0 => Seat::Stage,
+            1..=10 => Seat::Holder(holder),
+            _ => {
+                return Err(SequencerError(format!(
+                    "grip null: Holder is {holder}; it must name a rack holder 1-10 \
+                     or 0 for the stage"
+                )));
+            }
+        };
         let mut report = NullReport {
             state: NullState::Running,
             iteration: 0,
             total_mm: [0.0; 3],
             force_n: 0.0,
-            message: format!("holder {holder}: starting"),
+            message: format!("{}: starting", seat.label()),
         };
         self.epics.publish_null(&report);
-        let result = self.grip_null_loop(holder, start, &mut report);
+        let result = self.grip_null_loop(seat, start, &mut report);
         // The single place a terminal state is stamped. Every exit from
         // the loop lands here, so `Running` cannot outlive the run.
         report.state = match &result {
@@ -951,13 +1032,10 @@ impl<'a> Sequencer<'a> {
     /// writes the terminal state.
     fn grip_null_loop(
         &mut self,
-        holder: i32,
+        seat: Seat,
         start: i32,
         report: &mut NullReport,
     ) -> Result<Outcome, NullFailure> {
-        /// Index order of every triple here: the wrench components the
-        /// loop reads, the trim slots it writes, and the log.
-        const AXES: [&str; 3] = ["base x", "base y", "depth"];
         if start != 0 {
             return Err(NullFailure::new(
                 "refused: StartStep must be 0",
@@ -974,29 +1052,51 @@ impl<'a> Sequencer<'a> {
         // calibrated with one puck wants the fetch and the null on one
         // trigger, and the carry is mode 7's, unchanged.
         let source = self.epics.read_map_source();
-        let fetched = source != 0 && source != holder;
+        let target = match seat {
+            Seat::Holder(h) => h,
+            // The carry is rack to rack; a puck reaches the stage only
+            // by the Normal sequence's own leg, which is a different
+            // run with a different meaning. So the stage nulls whatever
+            // is already seated in it.
+            Seat::Stage => {
+                if source != 0 {
+                    return Err(NullFailure::new(
+                        format!("refused: MapSource {source} cannot feed the stage"),
+                        format!(
+                            "grip null: MapSource is {source}, but the fetch carries \
+                             rack to rack; put the puck on the stage with a Normal \
+                             run and set MapSource to 0"
+                        ),
+                    ));
+                }
+                0
+            }
+        };
+        let fetched = source != 0 && source != target;
         if fetched {
             if !(1..=10).contains(&source) {
                 return Err(NullFailure::new(
                     format!("refused: MapSource {source} is not a holder"),
                     format!(
                         "grip null: MapSource is {source}; it must name a holder \
-                         1-10, or 0 for the puck already in holder {holder}"
+                         1-10, or 0 for the puck already in {}",
+                        seat.label()
                     ),
                 ));
             }
             log::info(&format!(
                 ">>> GRIP NULL MODE: fetching holder {source}'s puck into holder \
-                 {holder} first <<<"
+                 {target} first <<<"
             ));
             report.message = format!("fetching the puck from holder {source}");
             self.epics.publish_null(report);
             let wd = WaypointData::load(&self.config.sequence.waypoints_yaml)?;
             let base = self.compute_base_waypoints(&wd)?;
-            self.carry_puck(&wd, &base, source, holder)?;
+            self.carry_puck(&wd, &base, source, target)?;
         }
         log::info(&format!(
-            ">>> GRIP NULL MODE: holder {holder}, up to {} iterations <<<",
+            ">>> GRIP NULL MODE: {}, up to {} iterations <<<",
+            seat.label(),
             g.max_iterations
         ));
         let mut total_mm = [0.0f64; 3];
@@ -1015,7 +1115,17 @@ impl<'a> Sequencer<'a> {
             // to pick the puck with.
             let wd = WaypointData::load(&self.config.sequence.waypoints_yaml)?;
             let base = self.compute_base_waypoints(&wd)?;
-            let run = self.compute_run_waypoints(&wd, &base, holder)?;
+            let (standby, above, on_pos) = match seat {
+                Seat::Stage => (
+                    base.sample_holder_standby.clone(),
+                    base.sample_holder_above.clone(),
+                    base.sample_holder_on.clone(),
+                ),
+                Seat::Holder(h) => {
+                    let run = self.compute_run_waypoints(&wd, &base, h)?;
+                    (run.standby, run.above, run.on_pos)
+                }
+            };
             log::info(&format!(
                 "--- grip null iteration {iteration} of {} ---",
                 g.max_iterations
@@ -1024,18 +1134,22 @@ impl<'a> Sequencer<'a> {
             report.message = format!("iteration {iteration} of {}", g.max_iterations);
             self.epics.publish_null(report);
             self.hand(0, "open_hand", true, 0)?;
-            self.arm(1, "holder_standby", &run.standby, 0)?;
-            self.cartesian(2, "holder_above", &run.above, 0)?;
-            self.cartesian(3, "holder_on_position", &run.on_pos, 0)?;
+            self.arm(1, "holder_standby", &standby, 0)?;
+            self.cartesian(2, "holder_above", &above, 0)?;
+            self.cartesian(3, "holder_on_position", &on_pos, 0)?;
             let measured = self.hand(4, "close_gripper", false, 0)?;
+            // Taken here, with the arm still in the seat: the wrench is
+            // read in the base frame and every axis below is a tool
+            // axis, and this is the pose that relates them.
+            let axes = Axes::in_tool(&mut self.motion)?;
             // The puck goes back before anything is decided: the reading
             // is already taken, and every exit below -- settled, capped,
             // out of iterations -- must leave the seat as it found it.
-            self.cartesian(5, "holder_above_return", &run.above, 0)?;
-            self.cartesian(20, "holder_on_position_final", &run.on_pos, 0)?;
+            self.cartesian(5, "holder_above_return", &above, 0)?;
+            self.cartesian(20, "holder_on_position_final", &on_pos, 0)?;
             self.hand(21, "open_gripper_final", true, 0)?;
-            self.cartesian(22, "holder_above_final_return", &run.above, 0)?;
-            self.cartesian(23, "holder_standby_final", &run.standby, 0)?;
+            self.cartesian(22, "holder_above_final_return", &above, 0)?;
+            self.cartesian(23, "holder_standby_final", &standby, 0)?;
 
             let Some(w) = measured else {
                 return Err(NullFailure::new(
@@ -1046,13 +1160,28 @@ impl<'a> Sequencer<'a> {
                         .into(),
                 ));
             };
-            let force = [w[0], w[1], w[2]];
+            // The same wrench, said in the frame the trims are written
+            // in: each base component carries its own tool-frame
+            // direction, so the sum is the base vector re-expressed.
+            let force = axes.say(&[w[0], w[1], w[2]]);
             report.force_n = force.iter().map(|f| f * f).sum::<f64>().sqrt();
             self.epics.publish_null(report);
             log::info(&format!(
-                "  grip null: the close left ({:+.2}, {:+.2}, {:+.2}) N, \
-                 ({:+.3}, {:+.3}, {:+.3}) Nm",
-                w[0], w[1], w[2], w[3], w[4], w[5]
+                "  grip null: the close left ({:+.2}, {:+.2}, {:+.2}) N base, \
+                 ({:+.3}, {:+.3}, {:+.3}) Nm; in tool ({:+.2}, {:+.2}, {:+.2}) N \
+                 for {}, {}, {}",
+                w[0],
+                w[1],
+                w[2],
+                w[3],
+                w[4],
+                w[5],
+                force[0],
+                force[1],
+                force[2],
+                NULL_AXES[0],
+                NULL_AXES[1],
+                NULL_AXES[2]
             ));
             // An axis inside the noise floor is left alone on both
             // counts, so "settled" and "not written" are one rule.
@@ -1075,9 +1204,9 @@ impl<'a> Sequencer<'a> {
                         total_mm[0],
                         total_mm[1],
                         total_mm[2],
-                        AXES[0],
-                        AXES[1],
-                        AXES[2]
+                        NULL_AXES[0],
+                        NULL_AXES[1],
+                        NULL_AXES[2]
                     ));
                     report.message = format!("settled at iteration {iteration}");
                     return Ok(if wrote { Outcome::Wrote } else { Outcome::Ran });
@@ -1118,16 +1247,16 @@ impl<'a> Sequencer<'a> {
             }
             let step_mm: [f64; 3] = std::array::from_fn(|i| {
                 if live[i] {
-                    -force[i] / stiffness[i] * g.damping
+                    NULL_TOOL_SIGN[i] * force[i] / stiffness[i] * g.damping
                 } else {
                     0.0
                 }
             });
             log::info(&format!(
                 "  grip null: steering on {:.1}, {:.1}, {:.1} N/mm for {}, {}, {}",
-                stiffness[0], stiffness[1], stiffness[2], AXES[0], AXES[1], AXES[2]
+                stiffness[0], stiffness[1], stiffness[2], NULL_AXES[0], NULL_AXES[1], NULL_AXES[2]
             ));
-            for (i, axis) in AXES.iter().enumerate() {
+            for (i, axis) in NULL_AXES.iter().enumerate() {
                 if step_mm[i].abs() > g.max_step_mm {
                     return Err(NullFailure::new(
                         format!("failed: {axis} past the step cap"),
@@ -1152,15 +1281,13 @@ impl<'a> Sequencer<'a> {
                     ));
                 }
             }
-            // x trim is base x, z trim is base y, y trim is depth: the
-            // mapping every hand-tuned trim in the file already uses.
+            // Slot order is axis order: the trims are tool x, y and z,
+            // which is what the loop has been steering in since the
+            // wrench was rotated.
             let over = |i: usize| live[i].then_some(step_mm[i] / 1000.0);
-            for line in persist_holder_trims(
+            for line in seat.persist(
                 &self.config.sequence.waypoints_yaml,
-                holder,
-                over(0),
-                over(2),
-                over(1),
+                [over(0), over(1), over(2)],
             )? {
                 log::info(&line);
             }
@@ -1176,10 +1303,12 @@ impl<'a> Sequencer<'a> {
         Err(NullFailure::new(
             format!("failed: {} iterations, still moving", g.max_iterations),
             format!(
-                "grip null: {} iterations did not bring holder {holder} under \
-                 {:.2} N. The puck is seated and the arm is at standby; the trims \
-                 written so far are kept, so a fresh trigger continues from here",
-                g.max_iterations, g.settled_n
+                "grip null: {} iterations did not bring {} under {:.2} N. The \
+                 puck is seated and the arm is at standby; the trims written so \
+                 far are kept, so a fresh trigger continues from here",
+                g.max_iterations,
+                seat.label(),
+                g.settled_n
             ),
         ))
     }
@@ -2504,20 +2633,29 @@ impl<'a> Sequencer<'a> {
         base: &BaseWaypoints,
         holder_number: i32,
     ) -> Result<RunWaypoints, SequencerError> {
+        // Refused rather than extrapolated. The pitch below is applied
+        // to any number given, so holder 0 -- which `Robot:Holder` now
+        // accepts, meaning the stage to a grip null -- would otherwise
+        // put a rack seat one pitch short of holder 1 and drive to it
+        // without a word.
+        if !(1..=10).contains(&holder_number) {
+            return Err(SequencerError(format!(
+                "holder {holder_number} is not a rack seat; Robot:Holder must be \
+                 1-10 for this mode (0 is the stage, which only a grip null takes)"
+            )));
+        }
+        let idx = (holder_number - 1) as usize;
         let mut y_offset = f64::from(holder_number - 1) * self.config.sequence.holder_offset;
         let mut x_offset = 0.0;
         let mut z_offset = 0.0;
-        if (1..=10).contains(&holder_number) {
-            let idx = (holder_number - 1) as usize;
-            if let Some(x) = w.holder_multi_x_offsets.get(idx) {
-                x_offset = *x;
-            }
-            if let Some(y) = w.holder_multi_y_offsets.get(idx) {
-                y_offset += *y;
-            }
-            if let Some(z) = w.holder_multi_z_offsets.get(idx) {
-                z_offset = *z;
-            }
+        if let Some(x) = w.holder_multi_x_offsets.get(idx) {
+            x_offset = *x;
+        }
+        if let Some(y) = w.holder_multi_y_offsets.get(idx) {
+            y_offset += *y;
+        }
+        if let Some(z) = w.holder_multi_z_offsets.get(idx) {
+            z_offset = *z;
         }
 
         let wrist3 = w.wrist3_rotation_offset;
@@ -2612,6 +2750,73 @@ impl<'a> Sequencer<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The grip null used to read the base wrench and hand its three
+    /// components to trim slots by a hardcoded permutation: x from base
+    /// x, the depth trim from base z, the z trim from base y, each
+    /// negated. Saying the wrench in the tool frame first has to land on
+    /// exactly that at a rack seat, because that mapping is what nulled
+    /// h10 and h7 on the arm — the rewrite is meant to reach the stage,
+    /// not to re-aim the rack. One case per base axis, since each is a
+    /// separate row of the permutation.
+    ///
+    /// Not to the last bit: the taught seat stands 0.21 deg off the
+    /// ideal frame, so saying the wrench properly moves the main slot by
+    /// 6 ppm and puts up to 1.2e-4 mm/N into a slot the permutation
+    /// dropped it from. At the 18 N a bad seat closes with, that is
+    /// 2e-3 mm against a null plateau sixty times wider, so the bounds
+    /// below are what the rack tolerated rather than what the
+    /// arithmetic happens to do.
+    #[test]
+    fn the_tool_frame_rule_reproduces_the_rack_mapping() {
+        use crate::config::Config;
+        use crate::model::Model;
+
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/sequencer.yaml"
+        ));
+        let config = Config::load(path).expect("load config");
+        let model = Model::load(&config).expect("load model");
+        let w = WaypointData::load(&config.sequence.waypoints_yaml).expect("waypoints");
+        let joints: JointMap = WaypointData::arm_joints(&w.holder1_on_position)
+            .into_iter()
+            .collect();
+        let r = model.fk(&joints).expect("fk").rotation.inverse();
+        let axes = Axes {
+            x: r * Vector3::x(),
+            y: r * Vector3::y(),
+            up: r * Vector3::z(),
+        };
+        // Tool order [x, depth, z]; the old code indexed the same three
+        // numbers as [base x, base y, depth].
+        let k = config.grip_null.stiffness_n_per_mm;
+        let old_k = [k[0], k[2], k[1]];
+
+        // (base axis, the slot the old permutation sent it to, the old
+        // stiffness index it divided by).
+        for (base_axis, slot, old_index) in [(0, 0, 0), (1, 2, 1), (2, 1, 2)] {
+            let mut force_base = [0.0; 3];
+            force_base[base_axis] = 1.0;
+            let force = axes.say(&force_base);
+            let step: [f64; 3] = std::array::from_fn(|i| NULL_TOOL_SIGN[i] * force[i] / k[i]);
+            let want = -1.0 / old_k[old_index];
+            assert!(
+                (step[slot] - want).abs() < want.abs() * 1e-3,
+                "base axis {base_axis}: slot {slot} moved {:+.9} mm/N, the old rule \
+                 moved {want:+.9}",
+                step[slot]
+            );
+            for (other, moved) in step.iter().enumerate() {
+                if other != slot {
+                    assert!(
+                        moved.abs() < 2e-4,
+                        "base axis {base_axis} leaked {moved:+.9} mm/N into slot {other}"
+                    );
+                }
+            }
+        }
+    }
 
     /// A correction is a physical displacement, so re-expressing it in
     /// another tool frame must rotate it. The boundaries that matter are

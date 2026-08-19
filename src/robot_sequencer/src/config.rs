@@ -37,15 +37,18 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct GripNullConfig {
-    /// Seed for the first step, N/mm, in the order base x, base y,
-    /// depth: the force the close leaves per mm of taught-pose error.
+    /// Seed for the first step, N/mm, in tool x, tool y (depth) and
+    /// tool z: the force the close leaves per mm of taught-pose error.
+    /// Tool axes because that is what the trims are and what the loop
+    /// steers in; at a rack seat tool x is base x, tool y is -base z
+    /// and tool z is base y.
     ///
     /// Only the first. After that the loop divides by the slope it has
     /// measured itself, because a seed alone cannot be trusted to set
-    /// even the rate: at h8 the seeded 100 N/mm in base y bought 0.006 mm
+    /// even the rate: at h8 the seeded 100 N/mm in tool z bought 0.006 mm
     /// a round against a force that did not respond, and six rounds
     /// moved 0.031 mm (2026-08-19). Measured at two holders — h9 read
-    /// 29.4 N/mm in base x and 103 in base y, h10 28-36 in base x and
+    /// 29.4 N/mm in tool x and 103 in tool z, h10 28-36 in tool x and
     /// 36.6 in depth.
     pub stiffness_n_per_mm: [f64; 3],
     /// Fraction of the computed step actually taken.
@@ -79,7 +82,7 @@ pub struct GripNullConfig {
 impl Default for GripNullConfig {
     fn default() -> Self {
         Self {
-            stiffness_n_per_mm: [30.0, 100.0, 37.0],
+            stiffness_n_per_mm: [30.0, 37.0, 100.0],
             damping: 0.7,
             settled_n: 0.5,
             // A first correction at h10, the worst holder measured, was
