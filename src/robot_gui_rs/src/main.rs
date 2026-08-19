@@ -60,6 +60,32 @@ fn waypoints_path(explicit: Option<PathBuf>) -> PathBuf {
 /// rather than stacking a second one.
 const CAMERA_VIEWPORT: &str = "d405-camera";
 
+/// Space between cards, and the page's outer margin.
+const GAP: f32 = 8.0;
+
+/// Row heights, each set by the tallest card in that row so the row is
+/// a clean rectangle. A `ui.group` on its own shrinks to its content,
+/// which is what left the panel looking like scattered boxes.
+const H_STATE: f32 = 248.0;
+const H_RUN: f32 = 216.0;
+const H_MANUAL: f32 = 140.0;
+const H_TEACH: f32 = 430.0;
+
+/// One box on the page's three-column grid.
+///
+/// The width comes from the column, never from the content: two cards
+/// in the same column across two rows share an edge only if both were
+/// told the same width.
+fn card(ui: &mut egui::Ui, size: egui::Vec2, add: impl FnOnce(&mut egui::Ui)) {
+    ui.allocate_ui(size, |ui| {
+        ui.group(|ui| {
+            ui.set_min_size(size - egui::Vec2::splat(GAP));
+            ui.set_max_width(size.x - GAP);
+            ui.vertical(add);
+        });
+    });
+}
+
 struct RobotGui {
     // The engine owns the tokio runtime and every connection; it must
     // outlive the widgets holding Channel handles.
@@ -111,38 +137,52 @@ impl RobotGui {
         }
     }
 
-    /// The control surface: state at the top, the things that start a
-    /// move in the middle, the taught numbers they write at the bottom.
+    /// The control surface, on one three-column grid: state at the top,
+    /// the things that start a move in the middle, the taught numbers
+    /// they write at the bottom. Every card is one or two columns wide
+    /// and every row is one height, so the edges line up down the page.
     fn control_page(&mut self, ui: &mut egui::Ui) {
+        // A minimum width rather than a fit: below it the cards would
+        // clip their own contents, and a horizontal scrollbar is the
+        // better failure.
+        let one = (((ui.available_width() - 2.0 * GAP) / 3.0) - GAP).max(248.0);
+        let two = one * 2.0 + GAP;
+
         ui.heading("State");
         ui.horizontal_top(|ui| {
-            ui.group(|ui| self.ops.status_group(ui));
-            ui.group(|ui| self.ops.null_status_group(ui));
+            card(ui, egui::vec2(one, H_STATE), |ui| self.ops.status_group(ui));
+            card(ui, egui::vec2(two, H_STATE), |ui| {
+                self.ops.null_status_group(ui)
+            });
         });
 
-        ui.add_space(8.0);
+        ui.add_space(GAP);
         ui.heading("Run");
         ui.horizontal_top(|ui| {
-            ui.group(|ui| self.ops.sample_group(ui));
-            ui.vertical(|ui| {
-                ui.group(|ui| self.ops.grip_null_group(ui));
-                ui.group(|ui| self.ops.move_puck_group(ui));
+            card(ui, egui::vec2(one, H_RUN), |ui| self.ops.sample_group(ui));
+            card(ui, egui::vec2(one, H_RUN), |ui| {
+                self.ops.grip_null_group(ui)
             });
-            ui.vertical(|ui| {
-                ui.group(|ui| self.ops.gripper_group(ui));
-                ui.group(|ui| self.ops.advanced_group(ui));
+            card(ui, egui::vec2(one, H_RUN), |ui| {
+                self.ops.move_puck_group(ui)
+            });
+        });
+        ui.horizontal_top(|ui| {
+            card(ui, egui::vec2(one, H_MANUAL), |ui| {
+                self.ops.gripper_group(ui)
+            });
+            card(ui, egui::vec2(two, H_MANUAL), |ui| {
+                self.ops.advanced_group(ui)
             });
         });
         self.ops.note_line(ui);
 
-        ui.add_space(8.0);
+        ui.add_space(GAP);
         ui.heading("Teach");
         ui.horizontal_top(|ui| {
-            ui.group(|ui| {
-                ui.vertical(|ui| self.calib.jog_group(ui));
-            });
-            ui.group(|ui| {
-                ui.vertical(|ui| self.calib.table_group(ui));
+            card(ui, egui::vec2(one, H_TEACH), |ui| self.calib.jog_group(ui));
+            card(ui, egui::vec2(two, H_TEACH), |ui| {
+                self.calib.table_group(ui)
             });
         });
         self.calib.note_line(ui);

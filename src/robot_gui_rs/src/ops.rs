@@ -97,6 +97,19 @@ const GREEN: egui::Color32 = egui::Color32::from_rgb(0x4c, 0xaf, 0x50);
 const RED: egui::Color32 = egui::Color32::from_rgb(0xf4, 0x43, 0x36);
 const AMBER: egui::Color32 = egui::Color32::from_rgb(0xff, 0xb3, 0x00);
 
+/// Width of every card's label column. Set here rather than left to the
+/// content so the fields line up from one card to the next, not just
+/// within one.
+const LABEL_W: f32 = 92.0;
+
+/// A card's label/field rows.
+fn fields(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Grid::new(id)
+        .num_columns(2)
+        .min_col_width(LABEL_W)
+        .show(ui, add);
+}
+
 /// The three components and their magnitude, monospaced so the columns
 /// hold still while the numbers move.
 fn triple(v: &[f64]) -> String {
@@ -285,56 +298,59 @@ impl OpsPanel {
         let holder = ival(&self.holder);
         let loaded = ival(&self.loaded).unwrap_or(0) != 0;
         let paused = ival(&self.stop).unwrap_or(0) != 0;
-        egui::Grid::new("status").striped(true).show(ui, |ui| {
-            ui.label("EPICS:");
-            if connected {
-                ui.colored_label(GREEN, "connected");
-            } else {
-                ui.colored_label(RED, "DISCONNECTED");
-            }
-            ui.end_row();
-            ui.label("Step:");
-            match step {
-                Some(s) => ui.label(format!("{s}  {}", step_name(s))),
-                None => ui.label("-"),
-            };
-            ui.end_row();
-            ui.label("Mode:");
-            ui.label(
-                mode.and_then(|m| MODE_NAMES.get(m as usize).copied())
-                    .unwrap_or("-"),
-            );
-            ui.end_row();
-            ui.label("Holder:");
-            ui.label(holder.map_or("-".to_string(), |h| h.to_string()));
-            ui.end_row();
-            ui.label("Sample:");
-            ui.label(if loaded { "Loaded" } else { "Not loaded" });
-            ui.end_row();
-            ui.label("Motion:");
-            ui.label(if paused { "PAUSED" } else { "run" });
-            ui.end_row();
-            ui.label("Gripper:");
-            self.gripper_rbv.show(ui);
-            ui.end_row();
-            // Base frame, the frame the grip-null trims are written in:
-            // x -> holder x trim, y -> z trim, z -> depth (y) trim.
-            let w = self.wrench.state();
-            let w = w.value.as_ref().and_then(PvValue::as_f64_slice);
-            let w = w.filter(|v| v.len() >= 6);
-            ui.label("Force (N):");
-            match w {
-                Some(v) => ui.monospace(triple(&v[0..3])),
-                None => ui.label("-"),
-            };
-            ui.end_row();
-            ui.label("Torque (Nm):");
-            match w {
-                Some(v) => ui.monospace(triple(&v[3..6])),
-                None => ui.label("-"),
-            };
-            ui.end_row();
-        });
+        egui::Grid::new("status")
+            .striped(true)
+            .min_col_width(LABEL_W)
+            .show(ui, |ui| {
+                ui.label("EPICS:");
+                if connected {
+                    ui.colored_label(GREEN, "connected");
+                } else {
+                    ui.colored_label(RED, "DISCONNECTED");
+                }
+                ui.end_row();
+                ui.label("Step:");
+                match step {
+                    Some(s) => ui.label(format!("{s}  {}", step_name(s))),
+                    None => ui.label("-"),
+                };
+                ui.end_row();
+                ui.label("Mode:");
+                ui.label(
+                    mode.and_then(|m| MODE_NAMES.get(m as usize).copied())
+                        .unwrap_or("-"),
+                );
+                ui.end_row();
+                ui.label("Holder:");
+                ui.label(holder.map_or("-".to_string(), |h| h.to_string()));
+                ui.end_row();
+                ui.label("Sample:");
+                ui.label(if loaded { "Loaded" } else { "Not loaded" });
+                ui.end_row();
+                ui.label("Motion:");
+                ui.label(if paused { "PAUSED" } else { "run" });
+                ui.end_row();
+                ui.label("Gripper:");
+                self.gripper_rbv.show(ui);
+                ui.end_row();
+                // Base frame, the frame the grip-null trims are written in:
+                // x -> holder x trim, y -> z trim, z -> depth (y) trim.
+                let w = self.wrench.state();
+                let w = w.value.as_ref().and_then(PvValue::as_f64_slice);
+                let w = w.filter(|v| v.len() >= 6);
+                ui.label("Force (N):");
+                match w {
+                    Some(v) => ui.monospace(triple(&v[0..3])),
+                    None => ui.label("-"),
+                };
+                ui.end_row();
+                ui.label("Torque (Nm):");
+                match w {
+                    Some(v) => ui.monospace(triple(&v[3..6])),
+                    None => ui.label("-"),
+                };
+                ui.end_row();
+            });
     }
 
     /// The pending-action confirmation. Drawn once a frame, before any
@@ -363,29 +379,32 @@ impl OpsPanel {
                 3 => ("FAILED", RED),
                 _ => ("idle", ui.visuals().weak_text_color()),
             };
-            egui::Grid::new("nullstatus").striped(true).show(ui, |ui| {
-                ui.label("Result:");
-                ui.colored_label(color, label);
-                ui.end_row();
-                ui.label("Iteration:");
-                ui.label(ival(&self.null_iter).map_or("-".into(), |i| i.to_string()));
-                ui.end_row();
-                ui.label("Correction:");
-                let d: Vec<Option<f64>> = self.null_d.iter().map(fval).collect();
-                match (d[0], d[1], d[2]) {
-                    (Some(x), Some(y), Some(z)) => {
-                        ui.monospace(format!("{x:+7.3} {y:+7.3} {z:+7.3} mm"))
-                    }
-                    _ => ui.label("-"),
-                };
-                ui.end_row();
-                ui.label("Close wrench:");
-                match fval(&self.null_force) {
-                    Some(f) => ui.label(format!("{f:.2} N")),
-                    None => ui.label("-"),
-                };
-                ui.end_row();
-            });
+            egui::Grid::new("nullstatus")
+                .striped(true)
+                .min_col_width(LABEL_W)
+                .show(ui, |ui| {
+                    ui.label("Result:");
+                    ui.colored_label(color, label);
+                    ui.end_row();
+                    ui.label("Iteration:");
+                    ui.label(ival(&self.null_iter).map_or("-".into(), |i| i.to_string()));
+                    ui.end_row();
+                    ui.label("Correction:");
+                    let d: Vec<Option<f64>> = self.null_d.iter().map(fval).collect();
+                    match (d[0], d[1], d[2]) {
+                        (Some(x), Some(y), Some(z)) => {
+                            ui.monospace(format!("{x:+7.3} {y:+7.3} {z:+7.3} mm"))
+                        }
+                        _ => ui.label("-"),
+                    };
+                    ui.end_row();
+                    ui.label("Close wrench:");
+                    match fval(&self.null_force) {
+                        Some(f) => ui.label(format!("{f:.2} N")),
+                        None => ui.label("-"),
+                    };
+                    ui.end_row();
+                });
             ui.label("(correction is base x, base y, depth — the trim columns X, Z, Y)");
             let msg = sval(&self.null_msg).unwrap_or_default();
             if !msg.is_empty() {
@@ -402,9 +421,10 @@ impl OpsPanel {
         let paused = ival(&self.stop).unwrap_or(0) != 0;
         ui.vertical(|ui| {
             ui.strong("Sample");
-            ui.horizontal(|ui| {
+            fields(ui, "sample-fields", |ui| {
                 ui.label("Holder:");
                 ui.add(egui::DragValue::new(&mut self.holder_sel).range(1..=10));
+                ui.end_row();
             });
             if ui.button("Mount on stage").clicked() {
                 self.request(Action::Mount(self.holder_sel));
@@ -453,11 +473,13 @@ impl OpsPanel {
         ui.vertical(|ui| {
             ui.strong("Grip null");
             ui.label("Close on the puck, write the trims the wrench asks for.");
-            ui.horizontal(|ui| {
+            fields(ui, "gripnull-fields", |ui| {
                 ui.label("Holder:");
                 ui.add(egui::DragValue::new(&mut self.null_holder).range(1..=10));
+                ui.end_row();
                 ui.label("Puck from:");
                 ui.add(egui::DragValue::new(&mut self.null_source).range(0..=10));
+                ui.end_row();
             });
             let own = self.null_source == 0 || self.null_source == self.null_holder;
             ui.label(if own {
@@ -478,11 +500,13 @@ impl OpsPanel {
         ui.vertical(|ui| {
             ui.strong("Move puck");
             ui.label("Holder to holder, no stage leg.");
-            ui.horizontal(|ui| {
-                ui.label("From:");
+            fields(ui, "movepuck-fields", |ui| {
+                ui.label("From holder:");
                 ui.add(egui::DragValue::new(&mut self.xfer_src).range(1..=10));
-                ui.label("To:");
+                ui.end_row();
+                ui.label("To holder:");
                 ui.add(egui::DragValue::new(&mut self.xfer_target).range(1..=10));
+                ui.end_row();
             });
             let same = self.xfer_src == self.xfer_target;
             ui.label(if same {
@@ -519,7 +543,7 @@ impl OpsPanel {
     pub fn advanced_group(&mut self, ui: &mut egui::Ui) {
         ui.vertical(|ui| {
             ui.strong("Advanced");
-            ui.horizontal(|ui| {
+            fields(ui, "advanced-fields", |ui| {
                 ui.label("Mode:");
                 egui::ComboBox::from_id_salt("adv-mode")
                     .selected_text(MODE_NAMES[self.adv_mode])
@@ -528,24 +552,27 @@ impl OpsPanel {
                             ui.selectable_value(&mut self.adv_mode, i, *name);
                         }
                     });
-            });
-            ui.horizontal(|ui| {
+                ui.end_row();
                 ui.label("Start step:");
-                ui.add(egui::DragValue::new(&mut self.adv_start).range(0..=23));
-                if ui.button("Trigger").clicked() {
-                    self.request(Action::Advanced {
-                        mode: self.adv_mode as i64,
-                        start: self.adv_start,
-                    });
-                }
-            });
-            ui.horizontal(|ui| {
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut self.adv_start).range(0..=23));
+                    if ui.button("Trigger").clicked() {
+                        self.request(Action::Advanced {
+                            mode: self.adv_mode as i64,
+                            start: self.adv_start,
+                        });
+                    }
+                });
+                ui.end_row();
                 ui.label("Pause at step:");
-                ui.add(egui::DragValue::new(&mut self.pause_step_input).range(0..=23));
-                if ui.button("Set").clicked() {
-                    self.pause_step.put(PvValue::Int(self.pause_step_input));
-                }
-                ui.label(format!("(now {})", ival(&self.pause_step).unwrap_or(0)));
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut self.pause_step_input).range(0..=23));
+                    if ui.button("Set").clicked() {
+                        self.pause_step.put(PvValue::Int(self.pause_step_input));
+                    }
+                    ui.label(format!("(now {})", ival(&self.pause_step).unwrap_or(0)));
+                });
+                ui.end_row();
             });
         });
     }
