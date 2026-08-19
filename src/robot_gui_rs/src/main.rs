@@ -199,7 +199,17 @@ impl eframe::App for RobotGui {
 }
 
 fn main() -> eframe::Result {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    // This host is multihomed and every robot PV is served on both
+    // interfaces, so each CA beacon arrives twice and the client's
+    // anomaly detector reads the halved period as "IOC may have
+    // restarted", several times a minute, forever. It is wrong here by
+    // construction, and a CA failure that matters already shows on the
+    // page as a red DISCONNECTED rather than in a log the operator does
+    // not have open. `RUST_LOG` still overrides this.
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("warn,epics_ca_rs::client=error"),
+    )
+    .init();
     eframe::run_native(
         "UR3e Sample Changer",
         eframe::NativeOptions {
