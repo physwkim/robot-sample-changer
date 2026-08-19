@@ -66,7 +66,6 @@ gripper:
   mode: "simulated"
   open_position: 0.025
   close_position: 0.0
-  close_settle_target: 0.01
   reach_tolerance: 0.0015
   settle_timeout: 5.0
   open_threshold: 0.02

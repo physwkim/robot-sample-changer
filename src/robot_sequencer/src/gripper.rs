@@ -51,11 +51,69 @@ enum Backend {
     },
 }
 
+/// What ended a settle wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Exit {
+    /// The fingers arrived where they were sent. Only an open can.
+    Reached,
+    /// They stopped moving — at a hard stop, or on an object.
+    Settled,
+    /// Neither happened before `settle_timeout`.
+    TimedOut,
+}
+
+/// The exit test for a settle wait, kept apart from the sleeping so it
+/// can be driven at chosen times.
+///
+/// Split out because the bug it now encodes is invisible in a
+/// simulation: the simulated backend's fingers stop instantly, so
+/// "returned while they were still moving" cannot be reproduced by
+/// commanding one. Driving the test with times and positions can.
+struct Settle {
+    /// `Some((target, tolerance))` only where arriving is a thing that
+    /// happens — an open, at the gripper's hard stop. `None` makes an
+    /// early [`Exit::Reached`] unrepresentable rather than merely
+    /// unlikely, which is what the close needs.
+    arrival: Option<(f64, f64)>,
+    t0: Instant,
+    last_move: Instant,
+    prev: Option<f64>,
+    timeout: Duration,
+}
+
+impl Settle {
+    fn new(arrival: Option<(f64, f64)>, timeout: Duration, now: Instant) -> Self {
+        Self {
+            arrival,
+            t0: now,
+            last_move: now,
+            prev: None,
+            timeout,
+        }
+    }
+
+    /// One observation. `Some(exit)` ends the wait.
+    fn poll(&mut self, pos: f64, now: Instant) -> Option<Exit> {
+        if let Some((target, tolerance)) = self.arrival
+            && (pos - target).abs() < tolerance
+        {
+            return Some(Exit::Reached);
+        }
+        if self.prev.is_none_or(|p| (pos - p).abs() >= STALL_EPSILON) {
+            self.last_move = now;
+        }
+        self.prev = Some(pos);
+        if now - self.t0 > STALL_DWELL && now - self.last_move > STALL_QUIET {
+            return Some(Exit::Settled);
+        }
+        (now - self.t0 > self.timeout).then_some(Exit::TimedOut)
+    }
+}
+
 pub struct Gripper {
     backend: Backend,
     open_position: f64,
     close_position: f64,
-    close_settle_target: f64,
     reach_tolerance: f64,
     settle_timeout: Duration,
     open_threshold: f64,
@@ -97,7 +155,6 @@ impl Gripper {
             backend,
             open_position: g.open_position,
             close_position: g.close_position,
-            close_settle_target: g.close_settle_target,
             reach_tolerance: g.reach_tolerance,
             settle_timeout: Duration::from_secs_f64(g.settle_timeout),
             open_threshold: g.open_threshold,
@@ -226,67 +283,65 @@ impl Gripper {
         (settled > self.open_position - self.reach_tolerance).then_some(settled)
     }
 
-    /// Port of the C++ `wait_gripper_reached`: block until the gripper
-    /// reaches the wait target or stalls (reached its limit, or grabbed an
-    /// object — which is why the close wait target is `close_settle_target`
-    /// rather than the commanded position), up to `settle_timeout`, which
-    /// only warns. Keeps `Gripper_RBV` fresh while the fingers move.
+    /// Port of the C++ `wait_gripper_reached`: block until the fingers
+    /// arrive or stop moving, up to `settle_timeout`, which only warns.
+    /// Keeps `Gripper_RBV` fresh while they move.
+    ///
+    /// Only an open has somewhere to arrive at: it ends against the
+    /// gripper's own hard stop, at `open_position`, which the fingers
+    /// really do reach. A close ends wherever the object is, which is
+    /// the thing the wait exists to find out — so it has no arrival
+    /// test at all, and finishes only once the fingers have stopped.
+    ///
+    /// It used to have one, a band of `reach_tolerance` (1.5 mm) around
+    /// a nominal closed-on-a-puck width, and a puck neck is 11.0-11.4 mm
+    /// against that band's 8.5-11.5: every sequence close therefore
+    /// returned as the fingers *entered* the band, still moving, and the
+    /// step that lifts the puck began before the grip had closed on it.
+    /// The same early return made `empty_close` unreachable — fingers
+    /// closing on nothing pass straight through the band on their way to
+    /// the hard stop, so the guard read a fly-through width instead of
+    /// where they came to rest.
     pub fn wait_reached(&mut self, open: bool, epics: &dyn RbvSink) {
-        let target = if open {
-            self.open_position
-        } else {
-            self.close_settle_target
-        };
-        self.settle_at(target, self.reach_tolerance, epics);
+        let arrival = open.then_some((self.open_position, self.reach_tolerance));
+        self.settle(arrival, self.close_position, epics);
     }
 
-    /// Commands `target` and waits for the fingers to come to rest there or
-    /// against something, with no tolerance band.
+    /// Commands `target` and waits for the fingers to come to rest there
+    /// or against something.
     ///
-    /// The band is what makes [`Gripper::wait_reached`] unusable for a
-    /// small move: `reach_tolerance` is 1.5 mm and the probe's release is
-    /// smaller than that, so "reached" is already true at the first poll
-    /// and the wait would return before the fingers had moved at all.
-    /// Waiting for the
-    /// stall instead costs the ~0.55 s the stall dwell takes and answers
-    /// the question actually being asked — where did they end up.
+    /// No arrival test, for the same reason a close has none, and one
+    /// more: `reach_tolerance` is 1.5 mm and the probe's release is
+    /// smaller than that, so any band would already be satisfied at the
+    /// first poll and the wait would return before the fingers had moved
+    /// at all. Waiting for the stall costs the ~0.55 s the dwell takes
+    /// and answers the question actually being asked — where did they
+    /// end up.
     fn settle_to(&mut self, target: f64, grip: Grip, epics: &dyn RbvSink) {
         match &mut self.backend {
             Backend::Hande(driver) => driver.set_position(target, grip),
             Backend::Simulated { position } => *position = target,
         }
-        self.settle_at(target, 0.0, epics);
+        self.settle(None, target, epics);
     }
 
-    /// Blocks until the fingers come within `tolerance` of `target` or stop
-    /// moving. Shared by [`Gripper::wait_reached`] and the probe's
-    /// partial-release pair, so that "stalled on something" means the same
-    /// thing for all of them.
-    fn settle_at(&mut self, target: f64, tolerance: f64, epics: &dyn RbvSink) {
-        let t0 = Instant::now();
-        let mut last_move = t0;
-        let mut prev: Option<f64> = None;
+    /// Blocks until [`Settle`] says the wait is over, keeping
+    /// `Gripper_RBV` fresh meanwhile. `heading` is only for the log —
+    /// where the fingers were sent, which is not where they will stop.
+    fn settle(&mut self, arrival: Option<(f64, f64)>, heading: f64, epics: &dyn RbvSink) {
+        let mut settle = Settle::new(arrival, self.settle_timeout, Instant::now());
         loop {
             let pos = self.position();
-            let now = Instant::now();
-            if (pos - target).abs() < tolerance {
-                log::info(&format!("  Gripper reached target (pos={pos:.4})"));
-                break;
-            }
-            if prev.is_none_or(|p| (pos - p).abs() >= STALL_EPSILON) {
-                last_move = now;
-            }
-            prev = Some(pos);
-            if now - t0 > STALL_DWELL && now - last_move > STALL_QUIET {
-                log::info(&format!(
-                    "  Gripper settled (pos={pos:.4}, target={target:.4})"
-                ));
-                break;
-            }
-            if now - t0 > self.settle_timeout {
-                log::warn(&format!(
-                    "  Gripper settle timeout (pos={pos:.4}, target={target:.4})"
-                ));
+            if let Some(exit) = settle.poll(pos, Instant::now()) {
+                match exit {
+                    Exit::Reached => log::info(&format!("  Gripper reached target (pos={pos:.4})")),
+                    Exit::Settled => log::info(&format!(
+                        "  Gripper settled (pos={pos:.4}, heading={heading:.4})"
+                    )),
+                    Exit::TimedOut => log::warn(&format!(
+                        "  Gripper settle timeout (pos={pos:.4}, heading={heading:.4})"
+                    )),
+                }
                 break;
             }
             self.update_rbv(epics);
@@ -322,7 +377,6 @@ mod tests {
             backend: Backend::Simulated { position: at_m },
             open_position: 0.025,
             close_position: 0.0,
-            close_settle_target: 0.01,
             reach_tolerance: 0.0015,
             settle_timeout: Duration::from_secs(1),
             open_threshold: 0.02,
@@ -333,6 +387,70 @@ mod tests {
             min_grip_position: 0.008,
             last_rbv: None,
         }
+    }
+
+    /// The defect this replaced: a puck neck is 11.0-11.4 mm and the
+    /// old close waited on a 1.5 mm band around 10 mm, so it reported
+    /// completion as the fingers crossed 11.5 on their way down. The
+    /// step that lifts the puck then began on a grip that had not
+    /// closed. A close has no arrival test now, so travelling through
+    /// that width ends nothing.
+    #[test]
+    fn a_close_is_not_finished_while_the_fingers_are_still_moving() {
+        let t0 = Instant::now();
+        let mut settle = Settle::new(None, Duration::from_secs(5), t0);
+        // Straight through the old 8.5-11.5 mm band, a poll apart.
+        for (i, pos) in [0.0150, 0.0130, 0.0115, 0.0113].iter().enumerate() {
+            let now = t0 + SETTLE_POLL * (i as u32 + 1);
+            assert_eq!(settle.poll(*pos, now), None, "pos={pos}");
+        }
+        // Stopped on the puck: quiet for longer than the dwell.
+        let quiet = t0 + STALL_DWELL + STALL_QUIET + SETTLE_POLL * 2;
+        assert_eq!(settle.poll(0.0113, quiet), Some(Exit::Settled));
+    }
+
+    /// The other side of the same boundary: an open does end at a known
+    /// position, because the fingers really reach their hard stop.
+    #[test]
+    fn an_open_is_finished_when_it_reaches_its_hard_stop() {
+        let t0 = Instant::now();
+        let mut settle = Settle::new(Some((0.025, 0.0015)), Duration::from_secs(5), t0);
+        assert_eq!(settle.poll(0.0150, t0 + SETTLE_POLL), None);
+        assert_eq!(
+            settle.poll(0.0245, t0 + SETTLE_POLL * 2),
+            Some(Exit::Reached)
+        );
+    }
+
+    /// A gripper that never moves must not hold the wait open forever;
+    /// the timeout is the only exit left to it.
+    #[test]
+    fn a_wait_on_fingers_that_never_move_times_out() {
+        let t0 = Instant::now();
+        let timeout = Duration::from_secs(5);
+        let mut settle = Settle::new(None, timeout, t0);
+        assert_eq!(settle.poll(0.0247, t0 + SETTLE_POLL), None);
+        // Never moving is also never moving *quietly*, so the stall exit
+        // claims it first — which is the honest answer: they stopped.
+        assert_eq!(
+            settle.poll(0.0247, t0 + STALL_DWELL + STALL_QUIET + SETTLE_POLL),
+            Some(Exit::Settled)
+        );
+        // With movement keeping the stall test alive, the timeout is what
+        // ends it.
+        let mut settle = Settle::new(None, timeout, t0);
+        let mut pos = 0.0;
+        for i in 1..12u32 {
+            pos += 0.001;
+            let now = t0 + Duration::from_millis(500) * i;
+            let exit = settle.poll(pos, now);
+            if now - t0 > timeout {
+                assert_eq!(exit, Some(Exit::TimedOut));
+                return;
+            }
+            assert_eq!(exit, None, "i={i}");
+        }
+        panic!("the timeout never fired");
     }
 
     /// The holder-2 incident: the puck held at 11.4 mm is gone by the

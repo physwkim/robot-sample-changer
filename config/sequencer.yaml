@@ -96,9 +96,9 @@ gripper:
   close_position: 0.0            # m, close command (production closes via
                                  # SRDF named target "close" = 0.0; the
                                  # gripper stalls on a gripped sample)
-  close_settle_target: 0.01      # m, settle-wait target for close
-                                 # (reference gripper_close_position)
-  reach_tolerance: 0.0015        # m
+  reach_tolerance: 0.0015        # m, how near the open command counts as
+                                 # arrived. Open only: a close has nowhere to
+                                 # arrive at, it stops where the object is
   settle_timeout: 5.0            # s
   open_threshold: 0.02           # m, Gripper_RBV open/close boundary
   min_grip_position: 0.008       # m; a sequence close settling narrower than

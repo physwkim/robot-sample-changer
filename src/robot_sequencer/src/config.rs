@@ -165,7 +165,6 @@ pub struct GripperConfig {
     pub mode: GripperMode,
     pub open_position: f64,
     pub close_position: f64,
-    pub close_settle_target: f64,
     pub reach_tolerance: f64,
     pub settle_timeout: f64,
     pub open_threshold: f64,
