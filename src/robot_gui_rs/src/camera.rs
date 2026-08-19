@@ -253,9 +253,7 @@ impl ImagePane {
             let at = (pointer - origin) / scale;
             if at.x >= 0.0 && at.y >= 0.0 && at.x < w && at.y < h {
                 let text = self.readout((at.x as usize, at.y as usize));
-                resp.on_hover_ui(|ui| {
-                    ui.monospace(text);
-                });
+                paint_readout(ui, &painter, rect, pointer, text);
             }
         }
     }
@@ -289,6 +287,58 @@ impl ImagePane {
             }
         });
     }
+}
+
+/// The pixel readout, drawn at the cursor by this pane rather than
+/// handed to `Response::on_hover_ui`.
+///
+/// A tooltip is the wrong widget for it twice over: egui anchors one to
+/// the hovered widget, and the widget here is the whole pane, so the
+/// text sat at an edge instead of at the pixel it describes; and a
+/// tooltip only appears once the pointer has hovered long enough, while
+/// this has to answer the moment the cursor arrives — it is a probe,
+/// not a hint. Painting it costs the same frame the cursor moved in.
+///
+/// The box is kept inside `rect` by flipping to the other side of the
+/// cursor before it would cross an edge, so a pixel in the bottom-right
+/// corner reads as easily as one in the middle.
+fn paint_readout(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    pointer: egui::Pos2,
+    text: String,
+) {
+    const PAD: egui::Vec2 = egui::vec2(6.0, 3.0);
+    const OFFSET: egui::Vec2 = egui::vec2(16.0, 16.0);
+
+    let visuals = ui.visuals();
+    let galley = painter.layout_no_wrap(
+        text,
+        egui::FontId::monospace(12.0),
+        visuals.strong_text_color(),
+    );
+    let size = galley.size() + PAD * 2.0;
+    let mut min = pointer + OFFSET;
+    if min.x + size.x > rect.max.x {
+        min.x = pointer.x - OFFSET.x - size.x;
+    }
+    if min.y + size.y > rect.max.y {
+        min.y = pointer.y - OFFSET.y - size.y;
+    }
+    let min = min.max(rect.min);
+    let box_rect = egui::Rect::from_min_size(min, size);
+    // Opaque, not tinted: it sits on top of an image whose colours are
+    // the thing being measured, and a translucent panel would make the
+    // digits change contrast as the cursor crosses the frame.
+    painter.rect_filled(box_rect, 4.0, visuals.panel_fill);
+    painter.rect_stroke(
+        box_rect,
+        4.0,
+        egui::Stroke::new(1.0, visuals.weak_text_color()),
+        egui::StrokeKind::Inside,
+    );
+    painter.galley(box_rect.min + PAD, galley, visuals.strong_text_color());
 }
 
 /// The 2nd-to-98th percentile of the returns, so a few stray far pixels
