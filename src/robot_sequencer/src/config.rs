@@ -901,7 +901,9 @@ impl Config {
             let baseline_mm = MIN_BASELINE_SAMPLES as f64 * depth.step_mm;
             if heights.last().is_some_and(|h| *h < baseline_mm) {
                 return Err(SequencerError(format!(
-                    "{name} must end at least {baseline_mm} mm above the trigger pose                      ({MIN_BASELINE_SAMPLES} depth steps), so the floor probe has                      somewhere to take its baseline before it meets the floor"
+                    "{name} must end at least {baseline_mm} mm above the trigger pose \
+                     ({MIN_BASELINE_SAMPLES} depth steps), so the floor probe has \
+                     somewhere to take its baseline before it meets the floor"
                 )));
             }
         }

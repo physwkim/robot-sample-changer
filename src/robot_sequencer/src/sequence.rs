@@ -1399,7 +1399,9 @@ impl<'a> Sequencer<'a> {
             let settled_m = self.gripper.regrip(&self.epics);
             if (settled_m - held_m).abs() > self.gripper.reach_tolerance() {
                 let msg = format!(
-                    "the restored grip settled at {:.1} mm where the puck was                      held at {:.1} mm — the puck is no longer between the                      fingers; find it before the next trigger",
+                    "the restored grip settled at {:.1} mm where the puck was \
+                     held at {:.1} mm — the puck is no longer between the \
+                     fingers; find it before the next trigger",
                     settled_m * 1000.0,
                     held_m * 1000.0
                 );
@@ -2066,7 +2068,8 @@ impl<'a> Sequencer<'a> {
         }
         if !open && let Some(settled) = self.gripper.empty_close() {
             return Err(SequencerError(format!(
-                "{name}: the fingers closed to {:.1} mm — nothing was                  gripped; the seat this step picked from is empty",
+                "{name}: the fingers closed to {:.1} mm — nothing was \
+                 gripped; the seat this step picked from is empty",
                 settled * 1000.0
             )));
         }
