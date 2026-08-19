@@ -411,15 +411,19 @@ probe:
                           # two: the descent that reaches this floor is three
                           # steps long and has none of its own to spare. The
                           # half-abort bound stops it sooner on a stiff floor
-    heights_mm: [2.0]     # where the laterals are measured, mm above the taught
+    heights_mm: [2.0, 0.0]
+                          # where the laterals are measured, mm above the taught
                           # seat. At the seat a taught residual larger than the
                           # play starts the bracket already pressed into a wall,
                           # so it saturates before it has measured anything; the
                           # force it reports there is the arm bending. Lifted, the
                           # puck hangs in the grip inside a wider cross-section and
-                          # the same 0.05 mm step has room again. The floor probe
-                          # is NOT moved -- the depth trim is measured against the
-                          # seat's own floor, at level zero, as before
+                          # the same 0.05 mm step has room again. The ladder then
+                          # returns to 0.0 so the floor probe starts from the
+                          # centre those brackets found: a descent begun above the
+                          # well meets its mouth 0.8 mm before the floor (h7,
+                          # twice), and at the untrimmed seat there is no travel
+                          # to measure at all
     persist_deadband_mm: 0.01
                           # smallest centre worth rewriting the taught pose for.
                           # Its own number, NOT lateral.step_mm, which is what the

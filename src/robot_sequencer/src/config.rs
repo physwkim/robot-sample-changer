@@ -748,8 +748,10 @@ impl Default for WellConfig {
                 // The half-abort bound stops it sooner on a stiff floor.
                 overtravel_steps: 4,
             },
-            // Off the seat, where the bracket has room for its step.
-            heights_mm: vec![2.0],
+            // Up off the seat, where the brackets can measure with no
+            // tension on it, then back down so the floor probe starts
+            // from the centre they found.
+            heights_mm: vec![2.0, 0.0],
             // Not one lateral step, which is what the map used to read:
             // a bracket's walls are fitted from the force slope over
             // MEASURED travel, and the arm undershoots its commands, so

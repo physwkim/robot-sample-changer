@@ -169,11 +169,16 @@ struct Seat {
     /// force-versus-depth fit rather than the trip point, which carries
     /// the threshold and up to a step of overshoot in it. Trims tool y.
     ///
-    /// Probed from the same height as the centres and converted here, so
-    /// every field of this struct is in the taught pose's frame whatever
-    /// height it was measured at. At the seat there is nothing to probe:
-    /// the taught pose holds the puck against the floor, so a downward
-    /// step loads it without travelling and measures no distance at all.
+    /// From the LAST level, converted here so every field of this struct
+    /// is in the taught pose's frame whatever height it was measured at.
+    /// It cannot come from the same height as the centres: a descent
+    /// started above the well meets the well's own mouth long before the
+    /// floor and reports that instead (h7 tripped at 0.815 mm ABOVE the
+    /// taught pose, twice, 2026-08-19). It cannot come from the first
+    /// level either, where the taught pose holds the puck against the
+    /// floor and a downward step loads it without travelling. So the
+    /// ladder ends by putting the puck back down on the centre the
+    /// lifted level found, and the floor is probed from there.
     floor_mm: Option<f64>,
 }
 
@@ -771,22 +776,31 @@ impl<'a> Sequencer<'a> {
             })?;
 
         let lifted = !seat.heights_mm.is_empty();
-        // Everything comes from the last height that was ASKED for — by
-        // index, so a walk that stopped short leaves the trims unmeasured
-        // instead of quietly handing back the preloaded seat readings it
-        // did reach. The floor arrives measured from that level and is
-        // brought back to the taught pose here, which is the frame the
-        // trims are written in.
+        // Each trim comes from the level whose physics can measure it,
+        // picked by LADDER INDEX so a walk that stopped short leaves it
+        // unmeasured rather than quietly handing back a reading from
+        // somewhere else. The laterals want the highest level, where the
+        // seat holds no tension; the floor wants the last one, which is
+        // where the ladder has put the puck back down.
         // measure_level order: brackets[0] = base x, [1] = base y.
-        let top = levels.get(seat.heights_mm.len());
+        let ladder: Vec<f64> = std::iter::once(0.0)
+            .chain(seat.heights_mm.iter().copied())
+            .collect();
+        let highest = ladder
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .map_or(0, |(i, _)| i);
+        let free = levels.get(highest);
         let seat = Seat {
-            centre_x_mm: top
+            centre_x_mm: free
                 .and_then(|l| l.brackets.first())
                 .and_then(Bracket::centre_mm),
-            centre_y_mm: top
+            centre_y_mm: free
                 .and_then(|l| l.brackets.get(1))
                 .and_then(Bracket::centre_mm),
-            floor_mm: top
+            floor_mm: levels
+                .get(ladder.len() - 1)
                 .and_then(|l| Some((l, l.floor.as_ref()?.wall_mm()?)))
                 .map(|(l, floor)| floor - l.height_mm),
         };
