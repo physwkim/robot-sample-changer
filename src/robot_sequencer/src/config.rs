@@ -462,6 +462,20 @@ pub struct BoreConfig {
     pub lateral: ProbeAxisConfig,
     /// Downward, toward the bore floor.
     pub depth: ProbeAxisConfig,
+    /// Keeping the sideways force at nothing while changing height.
+    ///
+    /// The bore's, and only the bore's: `WellConfig` has no counterpart
+    /// on purpose, the same way it has no `loosen_mm`. Yielding sideways
+    /// needs somewhere to yield into, and 0.50 mm of radial clearance
+    /// has it where 0.05 mm does not.
+    ///
+    /// A straight climb out of the taught seat pose built 14.30 N in
+    /// base y by +0.5 mm while the TCP stayed within 0.018 mm of the
+    /// line it was sent along, and the same climb in free air stayed
+    /// under 0.15 N (doc §16.13). Brackets measured at the top of the
+    /// straight climb measure the arm's deflection under that load; the
+    /// point of the correction is that they measure the hole instead.
+    pub centring: CentringConfig,
     /// Heights above the pose the probe was triggered at, mm, probed in
     /// the order given and returned from at the end.
     ///
@@ -540,6 +554,9 @@ pub struct SeatProbe {
     pub lateral: ProbeAxisConfig,
     pub depth: ProbeAxisConfig,
     pub heights_mm: Vec<f64>,
+    /// How a climb between heights holds its line, or `None` for
+    /// straight up the taught corridor. See [`Motion::climb_centred`].
+    pub centring: Option<CentringConfig>,
 }
 
 impl BoreConfig {
@@ -550,6 +567,7 @@ impl BoreConfig {
             lateral: self.lateral,
             depth: self.depth,
             heights_mm: self.heights_mm.clone(),
+            centring: Some(self.centring),
         }
     }
 }
@@ -562,6 +580,7 @@ impl WellConfig {
             lateral: self.lateral,
             depth: self.depth,
             heights_mm: self.heights_mm.clone(),
+            centring: None,
         }
     }
 }
@@ -608,15 +627,6 @@ pub struct ProbeConfig {
     /// Turning the sample in place at every level, instead of pushing it
     /// around.
     pub tilt: TiltConfig,
-    /// Keeping the sideways force at nothing while changing height.
-    ///
-    /// A straight climb out of the taught seat pose built 14.30 N in
-    /// base y by +0.5 mm while the TCP stayed within 0.018 mm of the
-    /// line it was sent along, and the same climb in free air stayed
-    /// under 0.15 N (doc §16.13). Brackets measured at the top of the
-    /// straight climb measure the arm's deflection under that load; the
-    /// point of the correction is that they measure the hole instead.
-    pub centring: CentringConfig,
 }
 
 impl Default for BoreConfig {
@@ -666,6 +676,7 @@ impl Default for BoreConfig {
                 // sample in the hard part of the contact.
                 overtravel_steps: 2,
             },
+            centring: CentringConfig::default(),
             heights_mm: Vec::new(),
         }
     }
@@ -760,7 +771,6 @@ impl Default for ProbeConfig {
             // What the bore's depth probe used, which is proven to
             // execute on this rig: 2 mm is twenty steps.
             lift_step_mm: 0.10,
-            centring: CentringConfig::default(),
             tilt: TiltConfig::default(),
         }
     }
@@ -1015,14 +1025,14 @@ impl Config {
                 "probe.tilt.abort_nm must be within 0.05..2 Nm".into(),
             ));
         }
-        let centring = &config.probe.centring;
+        let centring = &config.probe.bore.centring;
         // Below the arm's own scatter standing still (0.073 N, §16.1)
         // there is no load to null; above a lateral probe's contact
         // threshold the climb would carry a load the brackets then call
         // a wall.
         if !(0.2..=5.0).contains(&centring.settled_n) {
             return Err(SequencerError(
-                "probe.centring.settled_n must be within 0.2..5 N (below that is \
+                "probe.bore.centring.settled_n must be within 0.2..5 N (below that is \
                  the arm's own noise, above it is what a probe calls a wall)"
                     .into(),
             ));
@@ -1032,14 +1042,14 @@ impl Config {
         // puck across the bore in a single nudge.
         if !(MIN_EXECUTABLE_MM..=0.5).contains(&centring.step_mm) {
             return Err(SequencerError(format!(
-                "probe.centring.step_mm must be within {MIN_EXECUTABLE_MM}..0.5 mm"
+                "probe.bore.centring.step_mm must be within {MIN_EXECUTABLE_MM}..0.5 mm"
             )));
         }
         // Zero would fail the first correction it needed rather than
         // disable correcting, so the range starts at one step's worth.
         if !(centring.step_mm..=3.0).contains(&centring.travel_mm) {
             return Err(SequencerError(
-                "probe.centring.travel_mm must be within one step and 3 mm (a climb \
+                "probe.bore.centring.travel_mm must be within one step and 3 mm (a climb \
                  that has moved further sideways than that is not centring)"
                     .into(),
             ));
@@ -1247,18 +1257,18 @@ mod tests {
             // inside a bore on a force reading.
             (
                 "centring_settled_under_noise",
-                "probe:\n  centring:\n    settled_n: 0.05\n",
-                "probe.centring.settled_n",
+                "probe:\n  bore:\n    centring:\n      settled_n: 0.05\n",
+                "probe.bore.centring.settled_n",
             ),
             (
                 "centring_step_too_small",
-                "probe:\n  centring:\n    step_mm: 0.005\n",
-                "probe.centring.step_mm",
+                "probe:\n  bore:\n    centring:\n      step_mm: 0.005\n",
+                "probe.bore.centring.step_mm",
             ),
             (
                 "centring_travel_under_one_step",
-                "probe:\n  centring:\n    step_mm: 0.1\n    travel_mm: 0.05\n",
-                "probe.centring.travel_mm",
+                "probe:\n  bore:\n    centring:\n      step_mm: 0.1\n      travel_mm: 0.05\n",
+                "probe.bore.centring.travel_mm",
             ),
             // A slipped decimal point here opens the fingers 12 mm over an
             // open rack with a sample in them.

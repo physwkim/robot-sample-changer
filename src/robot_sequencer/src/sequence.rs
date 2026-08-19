@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use cspace_core::geometry::Vector3;
 
-use crate::config::{Config, SeatProbe};
+use crate::config::{CentringConfig, Config, SeatProbe};
 use crate::epics::{CalibMode, Epics, VisionKind, WaitStatus};
 use crate::error::SequencerError;
 use crate::gripper::Gripper;
@@ -764,7 +764,7 @@ impl<'a> Sequencer<'a> {
         // mode's whole output is what it printed.
         let (play_mm, grip_lost, (levels, walked, returned)) = self
             .with_grip_loosened(seat.loosen_mm, |s| {
-                Ok(s.sweep_heights(limits, &seat.heights_mm))
+                Ok(s.sweep_heights(limits, &seat.heights_mm, seat.centring))
             })?;
 
         let lifted = !seat.heights_mm.is_empty();
@@ -1069,6 +1069,7 @@ impl<'a> Sequencer<'a> {
         &mut self,
         limits: Limits,
         extra_heights_mm: &[f64],
+        centring: Option<CentringConfig>,
     ) -> (
         Vec<Level>,
         Result<(), SequencerError>,
@@ -1088,7 +1089,7 @@ impl<'a> Sequencer<'a> {
         // move this mode makes goes through it, so the way back is one
         // subtraction rather than a history to replay.
         let mut from_trigger = Vector3::zeros();
-        let centring = Centring::new(&self.config.probe.centring);
+        let centring = centring.map(|c| Centring::new(&c));
         let walked = self.walk_heights(
             &heights,
             &axes,
@@ -1112,7 +1113,7 @@ impl<'a> Sequencer<'a> {
         heights: &[f64],
         axes: &Axes,
         limits: Limits,
-        centring: Centring,
+        centring: Option<Centring>,
         from_trigger: &mut Vector3,
         levels: &mut Vec<Level>,
     ) -> Result<(), SequencerError> {

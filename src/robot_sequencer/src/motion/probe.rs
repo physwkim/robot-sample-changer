@@ -1180,7 +1180,19 @@ impl Motion<'_> {
     }
 
     /// Climbs `mm` along `up`, stopping between steps to move sideways
-    /// until the force is back to nothing.
+    /// until the force is back to nothing — or, with no `centring`,
+    /// straight up the line it was sent along.
+    ///
+    /// Which one is right is a property of the seat, not a preference.
+    /// Yielding sideways needs somewhere to yield INTO: the stage bore's
+    /// 0.50 mm of radial clearance has it, a holder well's 0.05 mm does
+    /// not, and at h7 the correction did not converge there — it spent
+    /// its whole 1.00 mm allowance inside 0.30 mm of climb while the
+    /// load went 2.55, 0.70, 5.68, 1.20, 5.46 N (2026-08-19). What the
+    /// well has instead is a taught corridor that the production
+    /// sequence lifts through on every cycle, so a straight climb is not
+    /// an unguarded one: it follows the line the teaching proved, with
+    /// `abort_n` still reading every step.
     ///
     /// A straight climb out of the seat does not stay straight. Lifting
     /// off the taught pose, the base y force grew to 14.30 N by +0.5 mm
@@ -1207,7 +1219,7 @@ impl Motion<'_> {
         sideways: [Vector3; 2],
         mm: f64,
         lift: ProbeLimits,
-        centring: Centring,
+        centring: Option<Centring>,
         label: &str,
     ) -> Result<Climbed, SequencerError> {
         if mm.abs() < NEGLIGIBLE_MM {
@@ -1240,7 +1252,7 @@ impl Motion<'_> {
         sideways: [Vector3; 2],
         mm: f64,
         lift: ProbeLimits,
-        centring: Centring,
+        centring: Option<Centring>,
         label: &str,
         out: &mut Contact,
     ) -> Result<Climbed, SequencerError> {
@@ -1262,29 +1274,39 @@ impl Motion<'_> {
         ];
         out.visited.push(start_joints);
         log::info(&format!(
-            "{label}: climbing {mm:+.2} mm in {steps} steps of {step_mm:.3} mm, \
-             keeping the sideways force under {:.2} N with up to {:.2} mm of \
-             correction, abort at {:.2} N",
-            centring.settled_n, centring.travel_mm, lift.abort_n
+            "{label}: climbing {mm:+.2} mm in {steps} steps of {step_mm:.3} mm, {}, \
+             abort at {:.2} N",
+            match centring {
+                Some(c) => format!(
+                    "keeping the sideways force under {:.2} N with up to {:.2} mm of \
+                     correction",
+                    c.settled_n, c.travel_mm
+                ),
+                None => "straight — the taught corridor is the line".into(),
+            },
+            lift.abort_n
         ));
 
-        let mut spent = Sideways::new(centring.travel_mm);
+        let mut spent = Sideways::new(centring.map_or(0.0, |c| c.travel_mm));
         let mut load = Vector3::zeros();
         for _ in 0..steps as usize {
             let d = up * step_mm;
             self.probe_step(d.x, d.y, d.z, lift.velocity_scale)?;
             let df = self.record(out, reference, &base_up, &start_pose, label)?;
             self.check_load(&df, lift.abort_n, label)?;
-            load = self.centre_out(
-                &base_side,
-                centring,
-                lift,
-                reference,
-                &start_pose,
-                label,
-                out,
-                &mut spent,
-            )?;
+            load = match centring {
+                Some(centring) => self.centre_out(
+                    &base_side,
+                    centring,
+                    lift,
+                    reference,
+                    &start_pose,
+                    label,
+                    out,
+                    &mut spent,
+                )?,
+                None => df,
+            };
         }
         log::info(&format!(
             "{label}: arrived carrying ({:+.2}, {:+.2}, {:+.2}) N after {:.3} mm \
