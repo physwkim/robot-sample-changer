@@ -1038,6 +1038,20 @@ impl Motion<'_> {
         })
     }
 
+    /// The tool pose and the whole wrench, without moving anything.
+    ///
+    /// Six components and not the three [`Self::wrench_change`] keeps: a
+    /// sample that turns inside the pads loads the tool in torque while
+    /// the force barely moves, so dropping the moments hides exactly the
+    /// thing a caller reads this to see.
+    pub fn pose_and_wrench(&mut self) -> Result<(Isometry3, [f64; 6]), SequencerError> {
+        let (q, wrench) = self
+            .rtde
+            .session()?
+            .mean_q_and_wrench(SAMPLES_PER_READING)?;
+        Ok((self.model.fk(&q_to_map(&q))?, wrench))
+    }
+
     /// The force change against `reference`, base N, without moving or
     /// recording anything.
     fn wrench_change(&mut self, reference: [f64; 6]) -> Result<Vector3, SequencerError> {

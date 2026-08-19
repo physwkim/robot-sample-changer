@@ -13,7 +13,7 @@
 
 use std::time::Duration;
 
-use cspace_core::geometry::Vector3;
+use cspace_core::geometry::{Isometry3, Vector3};
 
 use crate::config::{CentringConfig, Config, SeatProbe};
 use crate::epics::{CalibMode, Epics, VisionKind, WaitStatus};
@@ -2102,8 +2102,10 @@ impl<'a> Sequencer<'a> {
         if !self.step_prologue(step, name, start) {
             return Ok(());
         }
+        let before = self.grip_reading(name);
         self.gripper.command(open);
         self.gripper.wait_reached(open, &self.epics);
+        self.report_grip_shift(name, before);
         if !open && let Some(stuck) = self.gripper.dead_close() {
             return Err(SequencerError(format!(
                 "{name}: the fingers never left open ({:.1} mm) — the Hand-E is \
@@ -2120,6 +2122,53 @@ impl<'a> Sequencer<'a> {
         }
         log::info("  -> Completed");
         self.step_epilogue(step)
+    }
+
+    /// Where the tool is and what it feels, for the pair either side of a
+    /// gripper move. `None` when the read failed, which is reported here
+    /// and then costs nothing: this measures the move, it does not
+    /// perform it, so a sequence must not die because a reading did not
+    /// arrive.
+    fn grip_reading(&mut self, name: &str) -> Option<(Isometry3, [f64; 6])> {
+        match self.motion.pose_and_wrench() {
+            Ok(v) => Some(v),
+            Err(e) => {
+                log::info(&format!("  {name}: no grip reading ({})", e.0));
+                None
+            }
+        }
+    }
+
+    /// What closing or opening on the sample did to the arm.
+    ///
+    /// Pose and torque together, because they answer different halves of
+    /// the same question: fingers that turn the sample inside the pads
+    /// build torque against an arm that has not moved, while fingers that
+    /// push the arm move both. Only the first is invisible to every trim
+    /// this daemon can write.
+    fn report_grip_shift(&mut self, name: &str, before: Option<(Isometry3, [f64; 6])>) {
+        let (Some((was, w0)), Some((now, w1))) = (before, self.grip_reading(name)) else {
+            return;
+        };
+        let moved = (now.translation.vector - was.translation.vector) * 1000.0;
+        let turned = (was.rotation.inverse() * now.rotation).scaled_axis() * 1000.0;
+        log::info(&format!(
+            "  {name}: tool moved ({:+.3}, {:+.3}, {:+.3}) mm, turned \
+             ({:+.2}, {:+.2}, {:+.2}) mrad, wrench ({:+.2}, {:+.2}, {:+.2}) N \
+             ({:+.3}, {:+.3}, {:+.3}) Nm",
+            moved.x,
+            moved.y,
+            moved.z,
+            turned.x,
+            turned.y,
+            turned.z,
+            w1[0] - w0[0],
+            w1[1] - w0[1],
+            w1[2] - w0[2],
+            w1[3] - w0[3],
+            w1[4] - w0[4],
+            w1[5] - w0[5],
+        ));
     }
 
     // ---- PV wait loops -------------------------------------------------
