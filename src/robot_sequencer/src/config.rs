@@ -197,6 +197,14 @@ pub struct GripperConfig {
     /// instead of the run building on an empty hand. Metres; 0 disables.
     /// Ignored by the simulated gripper, whose fingers always reach the
     /// commanded position exactly.
+    ///
+    /// It is a *settle* width, so it only became measurable once the
+    /// close stopped ending on a position band: measured 2026-08-19, a
+    /// held puck settles at 3.9 mm and the pads meeting each other in
+    /// free air at 0.7 mm. The 8 mm this carried before was read off the
+    /// band-exit values, which a close reported at 11.0-11.4 mm whether
+    /// or not anything was between the fingers — above a real grip, so
+    /// on the true readings it failed every successful pick.
     #[serde(default)]
     pub min_grip_position: f64,
 }

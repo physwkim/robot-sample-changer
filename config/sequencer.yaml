@@ -101,11 +101,16 @@ gripper:
                                  # arrive at, it stops where the object is
   settle_timeout: 5.0            # s
   open_threshold: 0.02           # m, Gripper_RBV open/close boundary
-  min_grip_position: 0.008       # m; a sequence close settling narrower than
+  min_grip_position: 0.002       # m; a sequence close settling narrower than
                                  # this gripped nothing and the step fails.
-                                 # The puck neck grips at 11.4 mm; the close
-                                 # over holder 2's emptied seat settled at
-                                 # 3.9 mm (2026-08-19).
+                                 # Measured 2026-08-19 once the close waited
+                                 # for the fingers to stop instead of for a
+                                 # position band: a held puck settles at
+                                 # 3.9 mm, the pads meeting each other in free
+                                 # air at 0.7 mm. The old 8 mm was read off
+                                 # band-exit values (11.0-11.4 mm) that a close
+                                 # reported whether or not it held anything,
+                                 # and it sits ABOVE a real grip.
   grip_force: 0.05               # of the Hand-E's 20-185 N, so ~28 N, just
                                  # above the 20 N register floor. The puck
                                  # hangs in the finger detent, so carrying
