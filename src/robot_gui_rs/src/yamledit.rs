@@ -44,15 +44,27 @@ pub fn f64_at(params: &BTreeMap<String, Value>, key: &str) -> f64 {
     params.get(key).and_then(Value::as_f64).unwrap_or(0.0)
 }
 
-pub fn vec_at(params: &BTreeMap<String, Value>, key: &str, len: usize) -> Vec<f64> {
-    match params.get(key).and_then(Value::as_sequence) {
-        Some(list) => {
-            let mut v: Vec<f64> = list.iter().filter_map(Value::as_f64).collect();
-            v.resize(len, 0.0);
-            v
-        }
-        None => vec![0.0; len],
+pub fn vec_at(params: &BTreeMap<String, Value>, key: &str, len: usize) -> Result<Vec<f64>, String> {
+    let Some(list) = params.get(key).and_then(Value::as_sequence) else {
+        return Ok(vec![0.0; len]);
+    };
+    // Length checked, not resized. These lists are read positionally --
+    // row N shows entry N -- so a list one entry longer than this build
+    // expects does not read as "one extra holder", it reads as every row
+    // showing its neighbour's trim. That is exactly what a GUI built
+    // before holder 1 got its own entry did with the migrated file: h7's
+    // trim appeared under Holder 8 (2026-08-19).
+    if list.len() != len {
+        return Err(format!(
+            "'{key}' has {} entries, expected {len}; this build reads the \
+             list positionally, so it cannot show it without shifting every \
+             holder. Rebuild against the file's format.",
+            list.len()
+        ));
     }
+    list.iter()
+        .map(|v| v.as_f64().ok_or_else(|| format!("non-number in '{key}'")))
+        .collect()
 }
 
 /// Rounds like the sequencer's persist: 7 decimals, 0.1 um in metres.
@@ -209,7 +221,8 @@ mod tests {
     #[test]
     fn edits_scalar_and_wrapped_list_preserving_comments() {
         let path = temp_copy("mix");
-        let before = vec_at(&load(&path).expect("load"), "holder_multi_z_offsets", 10);
+        let before =
+            vec_at(&load(&path).expect("load"), "holder_multi_z_offsets", 10).expect("len");
         apply_edits(
             &path,
             &[
@@ -220,7 +233,7 @@ mod tests {
         .expect("apply");
         let params = load(&path).expect("reload");
         assert_eq!(f64_at(&params, "holder_on_position_tilt_z_deg"), 0.1);
-        let z = vec_at(&params, "holder_multi_z_offsets", 10);
+        let z = vec_at(&params, "holder_multi_z_offsets", 10).expect("len");
         assert_eq!(z[3], 0.00025);
         // Read against what the file held, not a constant: these are live
         // trims an operator edits, so an absolute expectation here is a

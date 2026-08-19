@@ -66,11 +66,11 @@ fn load_cells(path: &std::path::Path) -> Result<Cells, String> {
     cells[1][3] = Some(scalar("holder_on_position_tilt_x_deg"));
     cells[1][4] = Some(scalar("holder_on_position_tilt_z_deg"));
     let lists = [
-        yamledit::vec_at(&p, "holder_multi_x_offsets", ROWS - 2),
-        yamledit::vec_at(&p, "holder_multi_y_offsets", ROWS - 2),
-        yamledit::vec_at(&p, "holder_multi_z_offsets", ROWS - 2),
-        yamledit::vec_at(&p, "holder_multi_tilt_x_deg", ROWS - 2),
-        yamledit::vec_at(&p, "holder_multi_tilt_z_deg", ROWS - 2),
+        yamledit::vec_at(&p, "holder_multi_x_offsets", ROWS - 2)?,
+        yamledit::vec_at(&p, "holder_multi_y_offsets", ROWS - 2)?,
+        yamledit::vec_at(&p, "holder_multi_z_offsets", ROWS - 2)?,
+        yamledit::vec_at(&p, "holder_multi_tilt_x_deg", ROWS - 2)?,
+        yamledit::vec_at(&p, "holder_multi_tilt_z_deg", ROWS - 2)?,
     ];
     for row in 2..ROWS {
         for (col, list) in lists.iter().enumerate() {
