@@ -1885,6 +1885,14 @@ impl<'a> Sequencer<'a> {
         }
         self.gripper.command(open);
         self.gripper.wait_reached(open, &self.epics);
+        if !open && let Some(stuck) = self.gripper.dead_close() {
+            return Err(SequencerError(format!(
+                "{name}: the fingers never left open ({:.1} mm) — the Hand-E is \
+                 ignoring motion commands (activation lost; a program resend \
+                 power-cycles the tool). Restart the daemon to reactivate",
+                stuck * 1000.0
+            )));
+        }
         if !open && let Some(settled) = self.gripper.empty_close() {
             return Err(SequencerError(format!(
                 "{name}: the fingers closed to {:.1} mm — nothing was                  gripped; the seat this step picked from is empty",

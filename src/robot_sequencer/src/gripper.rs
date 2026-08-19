@@ -210,6 +210,22 @@ impl Gripper {
         (settled < self.min_grip_position).then_some(settled)
     }
 
+    /// After a close: `Some(settled_m)` when the fingers never left the
+    /// open position — the close's opposite failure to [`Gripper::empty_close`].
+    /// A Hand-E whose activation was dropped (a tool power cycle rides on
+    /// every external-control program resend) still answers position
+    /// queries but ignores motion commands, so the close "settles" at
+    /// open width. No object is anywhere near the open width, so a close
+    /// that ends there executed nothing. Real backend only, as with
+    /// `empty_close`.
+    pub fn dead_close(&self) -> Option<f64> {
+        if matches!(self.backend, Backend::Simulated { .. }) {
+            return None;
+        }
+        let settled = self.position();
+        (settled > self.open_position - self.reach_tolerance).then_some(settled)
+    }
+
     /// Port of the C++ `wait_gripper_reached`: block until the gripper
     /// reaches the wait target or stalls (reached its limit, or grabbed an
     /// object — which is why the close wait target is `close_settle_target`
@@ -367,6 +383,12 @@ mod tests {
     /// The empty-close check must never fire on the simulated backend —
     /// its fingers always reach the command exactly, and flagging that
     /// would fail every URSim rehearsal close.
+    #[test]
+    fn a_simulated_close_is_never_reported_dead() {
+        let g = gripped_at(0.025);
+        assert_eq!(g.dead_close(), None);
+    }
+
     #[test]
     fn a_simulated_close_is_never_reported_empty() {
         let gr = gripped_at(0.0);
