@@ -113,21 +113,34 @@ impl Seat {
         }
     }
 
-    /// Which way this seat is corrected against the force it reads.
+    /// Which tool axes this seat has a null on at all.
     ///
-    /// A seat property, not a tool property, because the two seats
-    /// measurably disagree in depth. Nulling the stage on the rack's
-    /// depth sign walked the wrong way and grew the wrench with every
-    /// step -- 2.07 N at the taught pose, 2.26 at +0.039 mm and 2.74 at
-    /// +0.163 mm, against 1.86 N at -0.050 mm (2026-08-19). Four points,
-    /// monotone, 4.1 N/mm: the stage nulls shallower, where a rack well
-    /// nulls deeper. The two lateral entries were never over the floor
-    /// at the stage (tool x 0.05-0.20 N, tool z 0.32-0.46 N), so they
-    /// are the rack's, still unconfirmed here.
-    fn tool_sign(self) -> [f64; 3] {
+    /// The stage has none in depth, and its wrench does not say so --
+    /// 2.05 N at the taught pose falling smoothly to 1.93, 1.53 and
+    /// 0.92 N as the arm backed off to -0.45 mm (2026-08-19), exactly
+    /// what a pose error being corrected looks like. It is not one. The
+    /// slope collapses as it goes (37, then 19, 8, 2.5 N/mm), and at
+    /// -0.93 mm the fingers closed to 7.5 mm where every other close on
+    /// this puck reads 3.9: they had left the neck for a wider feature,
+    /// and the wrench jumped to 3.4 N. The force was falling because the
+    /// grip was letting go, not because the seat was being found, so
+    /// there is no zero anywhere the puck is actually held. What depth
+    /// reads at the stage is the close pressing a puck onto a surface
+    /// that cannot yield; a rack well carries 0.13 N through the same
+    /// close, because there the neck sits proud of the well.
+    ///
+    /// Sideways the stage nulls like a well, and this is measured, not
+    /// assumed from the near-zero readings at the taught pose: pushed a
+    /// deliberate +0.20 mm in tool x, the close read +4.37 N -- 22 N/mm,
+    /// the same order as the rack seed -- and the loop walked it back to
+    /// +0.27 N in four rounds. So the stage's 0.50 mm bore, ten times a
+    /// well's play, does not let the puck yield out of a lateral
+    /// measurement, and the floor-level laterals there mean the taught
+    /// stage pose is sideways-correct to about 0.02 mm.
+    fn nullable(self) -> [bool; 3] {
         match self {
-            Self::Holder(_) => NULL_RACK_SIGN,
-            Self::Stage => [NULL_RACK_SIGN[0], -NULL_RACK_SIGN[1], NULL_RACK_SIGN[2]],
+            Self::Holder(_) => [true; 3],
+            Self::Stage => [true, false, true],
         }
     }
 
@@ -199,16 +212,19 @@ impl Axes {
 /// degrees round from it.
 const NULL_AXES: [&str; 3] = ["tool x", "tool y (depth)", "tool z"];
 
-/// Which way each tool axis is corrected against the force it reads,
-/// at a rack well. Measured, not derived: the lateral signs come out
-/// opposite to the obvious argument about which way a closing finger
-/// drags an arm.
+/// Which way each tool axis is corrected against the force it reads.
+/// Measured, not derived: the lateral signs come out opposite to the
+/// obvious argument about which way a closing finger drags an arm. A
+/// property of the tool, so it holds at any seat the tool can null --
+/// which is not every axis of every seat; see [`Seat::nullable`].
 ///
-/// The depth entry rests on one point -- h7 read -0.80 N, went 0.015 mm
-/// deeper and came back at -0.14 N (2026-08-19) -- and 0.80 N is barely
-/// over the 0.50 N floor, so it is the weakest of the three. The stage
-/// disagrees with it outright; see [`Seat::tool_sign`].
-const NULL_RACK_SIGN: [f64; 3] = [-1.0, 1.0, -1.0];
+/// The lateral two are confirmed at both seats: a deliberate +0.20 mm
+/// in tool x at the stage read +4.37 N and this sign walked it back to
+/// +0.27 N in four rounds (2026-08-19). The depth entry rests on one
+/// point -- h7 read -0.80 N, went 0.015 mm deeper and came back at
+/// -0.14 N -- and 0.80 N is barely over the 0.50 N floor, so it is the
+/// weakest of the three.
+const NULL_TOOL_SIGN: [f64; 3] = [-1.0, 1.0, -1.0];
 
 struct Level {
     /// Height above the pose the mode was triggered at, mm.
@@ -1206,7 +1222,9 @@ impl<'a> Sequencer<'a> {
             ));
             // An axis inside the noise floor is left alone on both
             // counts, so "settled" and "not written" are one rule.
-            let live = force.map(|f| f.abs() >= g.settled_n);
+            let nullable = seat.nullable();
+            let live: [bool; 3] =
+                std::array::from_fn(|i| nullable[i] && force[i].abs() >= g.settled_n);
             if !live.iter().any(|l| *l) {
                 // Confirmed, not declared. The scatter on one reading is
                 // an appreciable fraction of the floor, so a single
@@ -1266,10 +1284,9 @@ impl<'a> Sequencer<'a> {
                     }
                 }
             }
-            let sign = seat.tool_sign();
             let step_mm: [f64; 3] = std::array::from_fn(|i| {
                 if live[i] {
-                    sign[i] * force[i] / stiffness[i] * g.damping
+                    NULL_TOOL_SIGN[i] * force[i] / stiffness[i] * g.damping
                 } else {
                     0.0
                 }
@@ -2773,27 +2790,24 @@ impl<'a> Sequencer<'a> {
 mod tests {
     use super::*;
 
-    /// The stage and a rack well disagree about which way depth is
-    /// corrected, and agree about the other two. Pinned because the
-    /// disagreement is a measurement (four monotone points at the stage
-    /// on 2026-08-19, against one noise-level point at h7), not a
-    /// derivation — anyone tempted to collapse the two back into one
-    /// constant has to move a puck to do it.
+    /// The stage has no depth null and a rack well does; both null
+    /// sideways. Pinned because both halves are measurements, not
+    /// derivations (see [`Seat::nullable`]): the stage's depth wrench
+    /// looks exactly like a correctable pose error right up to the
+    /// point the fingers slide off the puck, and its laterals were
+    /// proven live by injecting 0.20 mm and watching the loop walk it
+    /// out. Turning depth back on there means moving a puck to justify
+    /// it.
     #[test]
-    fn the_stage_nulls_depth_the_other_way_from_a_rack_well() {
-        let rack = Seat::Holder(1).tool_sign();
-        let stage = Seat::Stage.tool_sign();
-        assert_eq!(stage[1], -rack[1], "depth is the axis they disagree on");
-        assert_eq!(
-            stage[0], rack[0],
-            "tool x was never over the floor at the stage"
+    fn the_stage_has_no_depth_null_and_a_rack_well_does() {
+        let rack = Seat::Holder(1).nullable();
+        let stage = Seat::Stage.nullable();
+        assert_eq!(rack, [true; 3], "a well is nullable on all three");
+        assert!(
+            !stage[1],
+            "the stage's depth wrench is the close pressing the puck down, not a pose error"
         );
-        assert_eq!(stage[2], rack[2], "nor was tool z");
-        for s in [rack, stage] {
-            for axis in s {
-                assert_eq!(axis.abs(), 1.0, "a sign, not a gain");
-            }
-        }
+        assert!(stage[0] && stage[2], "the stage nulls sideways at 22 N/mm");
     }
 
     /// The grip null used to read the base wrench and hand its three
@@ -2844,8 +2858,7 @@ mod tests {
             let mut force_base = [0.0; 3];
             force_base[base_axis] = 1.0;
             let force = axes.say(&force_base);
-            let sign = Seat::Holder(1).tool_sign();
-            let step: [f64; 3] = std::array::from_fn(|i| sign[i] * force[i] / k[i]);
+            let step: [f64; 3] = std::array::from_fn(|i| NULL_TOOL_SIGN[i] * force[i] / k[i]);
             let want = -1.0 / old_k[old_index];
             assert!(
                 (step[slot] - want).abs() < want.abs() * 1e-3,
