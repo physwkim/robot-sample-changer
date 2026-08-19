@@ -248,6 +248,22 @@ fn gate_correction(d: [f64; 3], min_mm: f64, max_mm: f64) -> Gate {
     }
 }
 
+/// What a run left behind, for the one line the operator reads at the
+/// end of it.
+///
+/// This was a `bool` that meant "skipped" to `Normal` and nothing to
+/// every other mode, so the holder map had no way to say it had written
+/// and its summary read "nothing written" over three trim lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// The run did what the mode says, with nothing else to report.
+    Ran,
+    /// Normal mode, Wait PV = 2: steps 13-23 were not run.
+    Skipped,
+    /// Holder map: the seat's trims in the taught file were rewritten.
+    Wrote,
+}
+
 impl<'a> Sequencer<'a> {
     pub fn new(
         epics: Epics,
@@ -379,24 +395,20 @@ impl<'a> Sequencer<'a> {
                         self.sequence_count
                     ))
                 }
-                (CalibMode::Normal, true) => log::info(&format!(
+                (CalibMode::Normal, Outcome::Skipped) => log::info(&format!(
                     "Sequence #{}: Steps 13-23 skipped (Wait PV = 2)",
                     self.sequence_count
                 )),
-                (CalibMode::Normal, false) => log::info(&format!(
+                (CalibMode::Normal, _) => log::info(&format!(
                     "Sequence #{} completed successfully!",
                     self.sequence_count
                 )),
                 (CalibMode::Recover, _) => log::info("Arm returned to holder standby"),
                 (CalibMode::SeatProbe, _) => log::info("Seat probe finished; nothing written"),
-                // The run's own return value is whether the trims moved,
-                // so the summary reads it instead of claiming. It used to
-                // say "nothing written" for every map, including the ones
-                // that had just logged three trim lines above it.
-                (CalibMode::HolderMap, true) => log::info(&format!(
+                (CalibMode::HolderMap, Outcome::Wrote) => log::info(&format!(
                     "Holder map finished for holder {holder_number}; trims written above"
                 )),
-                (CalibMode::HolderMap, false) => log::info(&format!(
+                (CalibMode::HolderMap, _) => log::info(&format!(
                     "Holder map finished for holder {holder_number}; nothing written"
                 )),
             }
@@ -450,7 +462,7 @@ impl<'a> Sequencer<'a> {
     /// skipped it the arm is somewhere else, so no measurement is taken.
     /// Calibration modes get no hooks: they exist to measure the taught
     /// error, which a correction would mask.
-    fn run_normal(&mut self, w: &RunWaypoints, start: i32) -> Result<bool, SequencerError> {
+    fn run_normal(&mut self, w: &RunWaypoints, start: i32) -> Result<Outcome, SequencerError> {
         self.hand(0, "open_hand", true, start)?;
         self.arm(1, "holder_standby", &w.standby, start)?;
 
@@ -538,7 +550,11 @@ impl<'a> Sequencer<'a> {
             self.cartesian(23, "holder_standby_final", &w.standby, start)?;
             self.vision_seating_check(start <= 23, "seating@rack")?;
         }
-        Ok(skip_remaining)
+        Ok(if skip_remaining {
+            Outcome::Skipped
+        } else {
+            Outcome::Ran
+        })
     }
 
     /// Puts the arm back at the holder standby after a run stopped part
@@ -562,7 +578,7 @@ impl<'a> Sequencer<'a> {
     /// drop the very sample this exists to protect, and where that
     /// sample should go is a decision for the operator, not for a
     /// recovery move.
-    fn run_recover(&mut self, w: &RunWaypoints) -> Result<bool, SequencerError> {
+    fn run_recover(&mut self, w: &RunWaypoints) -> Result<Outcome, SequencerError> {
         log::info(">>> RECOVER MODE: returning to holder standby <<<");
         let v = self.config.sequence.velocity_scale;
         let a = self.config.sequence.acceleration_scale;
@@ -570,7 +586,7 @@ impl<'a> Sequencer<'a> {
             .motion
             .move_planned(&w.standby, v, a, "recover_standby")
         {
-            Ok(()) => return Ok(false),
+            Ok(()) => return Ok(Outcome::Ran),
             Err(e) => log::warn(&format!(
                 "recover: cannot plan to standby from here ({e}); \
                  trying by way of holder_retreat"
@@ -580,12 +596,16 @@ impl<'a> Sequencer<'a> {
             .move_cartesian(&w.retreat, v, a, "recover_retreat")?;
         self.motion
             .move_planned(&w.standby, v, a, "recover_standby")
-            .map(|()| false)
+            .map(|()| Outcome::Ran)
     }
 
     /// Holder calibration: pick and hold above the holder (0-5), let the
     /// operator jog, then return the sample (20-23) on the next trigger.
-    fn run_calib_holder(&mut self, w: &RunWaypoints, start: i32) -> Result<bool, SequencerError> {
+    fn run_calib_holder(
+        &mut self,
+        w: &RunWaypoints,
+        start: i32,
+    ) -> Result<Outcome, SequencerError> {
         log::info(">>> HOLDER CALIBRATION MODE: Steps 0-5, wait, 20-23 <<<");
         self.hand(0, "open_hand", true, start)?;
         self.arm(1, "holder_standby", &w.standby, start)?;
@@ -601,7 +621,7 @@ impl<'a> Sequencer<'a> {
         self.hand(21, "open_gripper_final", true, start)?;
         self.cartesian(22, "holder_above_final_return", &w.above, start)?;
         self.cartesian(23, "holder_standby_final", &w.standby, start)?;
-        Ok(false)
+        Ok(Outcome::Ran)
     }
 
     /// Sample-holder calibration: carry to the sample holder above pose
@@ -610,7 +630,7 @@ impl<'a> Sequencer<'a> {
         &mut self,
         w: &RunWaypoints,
         start: i32,
-    ) -> Result<bool, SequencerError> {
+    ) -> Result<Outcome, SequencerError> {
         log::info(">>> SAMPLE HOLDER CALIBRATION MODE: Steps 0-8, wait, 16-23 <<<");
         self.hand(0, "open_hand", true, start)?;
         self.arm(1, "holder_standby", &w.standby, start)?;
@@ -633,7 +653,7 @@ impl<'a> Sequencer<'a> {
         self.hand(21, "open_gripper_final", true, start)?;
         self.cartesian(22, "holder_above_final_return", &w.above, start)?;
         self.cartesian(23, "holder_standby_final", &w.standby, start)?;
-        Ok(false)
+        Ok(Outcome::Ran)
     }
 
     /// Hand-eye calibration capture: rotate the tool in place about each
@@ -649,13 +669,13 @@ impl<'a> Sequencer<'a> {
     /// sequence to resume from" everywhere else, and a capture is not
     /// resumable — the arm returns to the pose it started from, so the
     /// remedy for any failure is to fix the setup and trigger again.
-    fn run_handeye(&mut self) -> Result<bool, SequencerError> {
+    fn run_handeye(&mut self) -> Result<Outcome, SequencerError> {
         log::info(">>> HAND-EYE CALIBRATION MODE: tool rotations in place <<<");
         let mut detector = match handeye::Detector::spawn(&self.config.handeye) {
             Ok(d) => d,
             Err(e) => {
                 log::error(&e.to_string());
-                return Ok(false);
+                return Ok(Outcome::Ran);
             }
         };
         // Taken before anything moves, so the mode can put the arm back:
@@ -676,7 +696,7 @@ impl<'a> Sequencer<'a> {
             None => log::error("Hand-eye capture produced nothing usable; not written"),
         }
         self.handeye_return(&entry)?;
-        Ok(false)
+        Ok(Outcome::Ran)
     }
 
     /// Feels for the seat the arm is standing in: both walls along base
@@ -708,7 +728,7 @@ impl<'a> Sequencer<'a> {
     /// mode is entered mid-run with a sample in the fingers, and neither
     /// deciding how to lift a puck back out of a bore nor claiming the
     /// run is over belongs here.
-    fn run_seat_probe(&mut self) -> Result<bool, SequencerError> {
+    fn run_seat_probe(&mut self) -> Result<Outcome, SequencerError> {
         log::info(">>> SEAT PROBE MODE: step into contact, measure, write nothing <<<");
         log::info("========================================");
         log::info("SEAT PROBE: jog the gripped puck down into the seat");
@@ -726,7 +746,7 @@ impl<'a> Sequencer<'a> {
         );
         match soft {
             Some(e) => Err(e),
-            None => Ok(false),
+            None => Ok(Outcome::Ran),
         }
     }
 
@@ -918,7 +938,7 @@ impl<'a> Sequencer<'a> {
         base: &BaseWaypoints,
         target: i32,
         start: i32,
-    ) -> Result<bool, SequencerError> {
+    ) -> Result<Outcome, SequencerError> {
         if start != 0 {
             return Err(SequencerError(format!(
                 "holder map always runs from the top; StartStep is {start} — set \
@@ -1016,7 +1036,7 @@ impl<'a> Sequencer<'a> {
         holder: i32,
         seat: Seat,
         lift_mm: f64,
-    ) -> Result<bool, SequencerError> {
+    ) -> Result<Outcome, SequencerError> {
         const PERSIST_CAP_MM: f64 = 1.0;
         let missing: Vec<&str> = [
             ("base x wall bracket", seat.centre_x_mm.is_none()),
@@ -1065,13 +1085,13 @@ impl<'a> Sequencer<'a> {
                  deadband; the taught trims already hold the optimum and \
                  were kept"
             ));
-            return Ok(false);
+            return Ok(Outcome::Ran);
         }
         for line in persist_holder_trims(&self.config.sequence.waypoints_yaml, holder, dx, dy, dz)?
         {
             log::info(&line);
         }
-        Ok(false)
+        Ok(Outcome::Wrote)
     }
 
     /// Probes at every configured height and always brings the arm back
