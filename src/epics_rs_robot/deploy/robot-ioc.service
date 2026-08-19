@@ -1,6 +1,6 @@
 [Unit]
 Description=Robot EPICS soft IOC (robot_ioc) via procServ
-Documentation=file:///home/bl9b/ws/CLAUDE.md
+Documentation=file:///home/bl9b/work/robot-sample-changer/CLAUDE.md
 After=network-online.target
 Wants=network-online.target
 
@@ -11,7 +11,16 @@ Group=bl9b
 WorkingDirectory=/home/bl9b/ws/src/epics_rs_robot/robot_ioc
 
 # robot_ioc reads these (defaulted in main.rs, set explicitly for clarity).
-Environment=ROBOT_DB=/home/bl9b/ws/db
+#
+# ROBOT_DB must be this repository's db, not main.rs's /home/bl9b/ws/db
+# default: that older copy has no CalibMode 3-7 state labels and no
+# Robot:MapSource record, so grip null (6) and holder transfer (7) lose the
+# PVs they steer by. The daemon reads an undefined mbbo value fine, but
+# MapSource simply would not exist.
+Environment=ROBOT_DB=/home/bl9b/work/robot-sample-changer/db
+# ROBOT_IOC stays under the tree the binary was built from -- it is where
+# autosave/robot_state.sav already lives, and moving it would start the IOC
+# from an empty saved state.
 Environment=ROBOT_IOC=/home/bl9b/ws/src/epics_rs_robot/robot_ioc
 
 # procServ runs the IOC as a child and exposes its iocsh console on TCP 20001
