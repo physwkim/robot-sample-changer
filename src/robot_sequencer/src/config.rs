@@ -767,12 +767,17 @@ impl Default for ProbeConfig {
             velocity_scale: 0.02,
             bore: BoreConfig::default(),
             well: WellConfig::default(),
-            // Above the 10.14 N the first lift reached, so the force
-            // through that feature can be recorded rather than aborted
-            // at, and below the 23 N a rubbing insert was measured at
-            // (doc §16.2) — the level this whole mode exists to keep the
-            // sequence away from.
-            lift_abort_n: 15.0,
+            // Above the drag a lift actually carries, and below the
+            // 23 N a rubbing insert was measured at (doc §16.2) — the
+            // level this whole mode exists to keep the sequence away
+            // from. 15.0 was not above the drag: pulling h7's puck up
+            // its well plateaus at 14.5 N (14.49, 14.50, 14.55 over
+            // 0.2 mm — flat, so sliding friction and not a wedge), and
+            // the bore's own straight climb reaches 14.30 N, so which
+            // side of the limit a run lands on was noise. Two identical
+            // h7 climbs split on it: one carried 14.65 N to +1.94 mm,
+            // the next tripped at 15.02 N by +1.04 mm (2026-08-19).
+            lift_abort_n: 20.0,
             // What the bore's depth probe used, which is proven to
             // execute on this rig: 2 mm is twenty steps.
             lift_step_mm: 0.10,

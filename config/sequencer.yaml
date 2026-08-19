@@ -383,7 +383,7 @@ probe:
       abort_n: 12.0       # clamped probing has no finger play to absorb the seat's
                           # own cross-axis tension, and that tension is what met
                           # the bore's 5.0: h7 base x+ read 8.12 N total with only
-                          # 1.17 N along the axis. Below lift_abort_n (15) and well
+                          # 1.17 N along the axis. Below lift_abort_n (20) and well
                           # below the 23 N of a rubbing insert
       overtravel_steps: 5 # a well wall is rigid and the run stops at half of
                           # abort_n anyway, so more steps buy rising samples on a
