@@ -24,7 +24,8 @@ mod scene;
 pub(crate) use probe::ProbeLimits;
 pub(crate) use scene::LevelToolConstraint;
 pub(crate) use scene::{
-    SceneAsset, first_collision_index, load_scene_assets, scene_with_assets, shortcut_keep_indices,
+    SceneAsset, first_new_collision_index, load_scene_assets, scene_with_assets,
+    shortcut_keep_indices,
 };
 
 use std::net::TcpStream;
@@ -255,7 +256,7 @@ impl<'m> Motion<'m> {
 
     /// Whether [`Motion::move_direct`] would carry the arm from `from` to
     /// `to`: the whole straight line reachable, and no state on it
-    /// colliding.
+    /// adding a collision the start pose does not already stand in.
     ///
     /// This is the question a caller generating candidate goals has to ask
     /// before it commits to one, and it is deliberately the *path*
@@ -274,7 +275,7 @@ impl<'m> Motion<'m> {
         if fraction < FULL_LINE || states.len() < 2 {
             return Ok(false);
         }
-        let hit = first_collision_index(
+        let hit = first_new_collision_index(
             self.model,
             &self.scene_assets,
             &self.allow_collisions_with,
@@ -284,7 +285,8 @@ impl<'m> Motion<'m> {
     }
 
     /// Straight-line `ik_frame` move to the pose FK gives at `goal`, with
-    /// every interpolated state collision-checked and no planned fallback.
+    /// every interpolated state checked for collisions the start pose did
+    /// not already stand in, and no planned fallback.
     ///
     /// For motions that are meant to stay small. [`Motion::move_planned`]
     /// answers "some collision-free path exists", not "the line asked
@@ -322,14 +324,14 @@ impl<'m> Motion<'m> {
                 fraction * 100.0
             )));
         }
-        if let Some(i) = first_collision_index(
+        if let Some(i) = first_new_collision_index(
             self.model,
             &self.scene_assets,
             &self.allow_collisions_with,
             &states,
         )? {
             return Err(SequencerError(format!(
-                "{label}: the straight path collides at waypoint {i} of {}",
+                "{label}: the straight path enters a new collision at waypoint {i} of {}",
                 states.len()
             )));
         }
@@ -734,11 +736,19 @@ impl<'m> Motion<'m> {
         // used the core-layer interpolator with no validity callback, so
         // the jog and [`Motion::move_direct`] gate; the steps do not.
         //
+        // The gate is relative to its start: contact pairs the starting
+        // pose already stands in are exempt along the path
+        // ([`first_new_collision_index`]). The ungated steps park the arm
+        // "inside" the convex stage parts wherever the decomposition
+        // fills a recess, and an absolute check refused every jog out of
+        // holder 10's above hold at 0.0% — fingers against `stage1` in a
+        // pose the sequence itself taught.
+        //
         // Reachability is checked either way below: whether IK can follow
         // the line is a question about the arm, not about the scene, and
         // no guard excuses a caller from it.
         if matches!(guard, Guard::Scene)
-            && let Some(i) = first_collision_index(
+            && let Some(i) = first_new_collision_index(
                 self.model,
                 &self.scene_assets,
                 &self.allow_collisions_with,

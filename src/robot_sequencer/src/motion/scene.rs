@@ -141,32 +141,85 @@ pub(crate) fn scene_with_assets<'m>(
     (scene, env)
 }
 
-/// Index of the first state that collides (self or scene world, ACM
-/// applied), or `None` when the whole path is clear. Used by the jog
-/// gate to truncate an interpolated path; see the comment at its call
-/// site for the C++ split this preserves.
-pub(crate) fn first_collision_index(
+/// Sets the scene's current state to `state`'s group positions.
+fn sync_scene_state(
+    scene: &mut PlanningScene<'_>,
+    group: &str,
+    state: &RobotState<'_>,
+) -> Result<(), SequencerError> {
+    let q = state
+        .joint_group_positions(group)
+        .map_err(|e| SequencerError(format!("collision check: state positions: {e}")))?;
+    scene
+        .current_state_mut()
+        .set_joint_group_positions(group, &q)
+        .map_err(|e| SequencerError(format!("collision check: scene state: {e}")))?;
+    scene.current_state_mut().update();
+    Ok(())
+}
+
+/// Index of the first state that adds a collision (self or scene world,
+/// ACM applied) the path did not start with, or `None` when no state
+/// does. Used by the jog gate to truncate an interpolated path; see the
+/// comment at its call site for the C++ split this preserves.
+///
+/// Contact pairs already present at `states[0]` are exempt along the
+/// whole path. The stage parts are a convex decomposition, so recesses
+/// fill in, and a pose the (ungated) sequence steps legally stand in
+/// can read as "inside" a part — holder 10's taught above hold reads as
+/// finger-stage contact, and an absolute gate refused every jog
+/// direction out of it at 0.0%. What this gate owes its callers is that
+/// the motion adds no contact the start did not already have; contacts
+/// the start stands in are the pose's situation, not the motion's.
+pub(crate) fn first_new_collision_index(
     model: &Model,
     assets: &[SceneAsset],
     allow_collisions_with: &[String],
     states: &[RobotState<'_>],
 ) -> Result<Option<usize>, SequencerError> {
+    let Some(start) = states.first() else {
+        return Ok(None);
+    };
     let (mut scene, env) = scene_with_assets(model, assets, allow_collisions_with);
+    sync_scene_state(&mut scene, &model.group, start)?;
+    let start_contacts = CollisionRequest {
+        contacts: true,
+        max_contacts: usize::MAX,
+        max_contacts_per_pair: 1,
+        ..CollisionRequest::default()
+    };
+    if let Some(data) = scene.check_collision(&env, &start_contacts).contacts {
+        let acm = scene.allowed_collision_matrix_mut();
+        for (a, b) in data.by_pair.keys() {
+            acm.set_entry(a, b, true);
+        }
+    }
     let request = CollisionRequest::default();
-    for (i, state) in states.iter().enumerate() {
-        let q = state
-            .joint_group_positions(&model.group)
-            .map_err(|e| SequencerError(format!("collision check: state positions: {e}")))?;
-        scene
-            .current_state_mut()
-            .set_joint_group_positions(&model.group, &q)
-            .map_err(|e| SequencerError(format!("collision check: scene state: {e}")))?;
-        scene.current_state_mut().update();
+    for (i, state) in states.iter().enumerate().skip(1) {
+        sync_scene_state(&mut scene, &model.group, state)?;
         if scene.check_collision(&env, &request).collision {
             return Ok(Some(i));
         }
     }
     Ok(None)
+}
+
+/// Whether `state` collides at all (self or scene world, ACM applied) —
+/// the absolute question, as opposed to the gate's start-relative one.
+/// Tests document scene properties with it; production motion has no
+/// caller because every gated path asks [`first_new_collision_index`].
+#[cfg(test)]
+pub(crate) fn state_collides(
+    model: &Model,
+    assets: &[SceneAsset],
+    allow_collisions_with: &[String],
+    state: &RobotState<'_>,
+) -> Result<bool, SequencerError> {
+    let (mut scene, env) = scene_with_assets(model, assets, allow_collisions_with);
+    sync_scene_state(&mut scene, &model.group, state)?;
+    Ok(scene
+        .check_collision(&env, &CollisionRequest::default())
+        .collision)
 }
 
 /// One interpolated sample of a candidate shortcut splice, held to the
@@ -518,10 +571,9 @@ mod tests {
             .expect("fk");
 
         let at_tcp = cube_asset("box", Isometry3::from_parts(tcp.translation, tcp.rotation));
-        let states = [model.state_with_joints(&joints).expect("state")];
-        assert_eq!(
-            first_collision_index(&model, &[at_tcp], &[], &states).expect("check"),
-            Some(0),
+        let checked = model.state_with_joints(&joints).expect("state");
+        assert!(
+            state_collides(&model, &[at_tcp], &[], &checked).expect("check"),
             "cube at the TCP must collide"
         );
 
@@ -529,9 +581,8 @@ mod tests {
             "box",
             Isometry3::from_parts(Translation3::new(3.0, 3.0, 3.0), tcp.rotation),
         );
-        assert_eq!(
-            first_collision_index(&model, &[far], &[], &states).expect("check"),
-            None,
+        assert!(
+            !state_collides(&model, &[far], &[], &checked).expect("check"),
             "cube 3 m away must not collide"
         );
     }
@@ -540,10 +591,12 @@ mod tests {
     ///
     /// The stage is an approximate convex decomposition, so thin
     /// concavities fill in and a bore stops being a hole — the config says
-    /// so about `holder1_on_position` in its own words. That makes the
-    /// taught in-bore pose a collision, and therefore makes every jog out
-    /// of it a collision too: measured on the arm, a 2 mm jog straight up
-    /// out of the bore was refused at 0.0%.
+    /// so about `holder1_on_position` in its own words. The taught
+    /// in-bore pose therefore reads as a standing collision: everything
+    /// the probe does down there happens inside one fictitious contact
+    /// pair, where a geometric guard is blind and only measured force can
+    /// judge. (The jog gate lives with the same fact by exempting the
+    /// pairs its start already stands in — `first_new_collision_index`.)
     ///
     /// If this ever fails, the decomposition has become fine enough to
     /// represent the bore and `Guard::ContactForce` should be re-examined
@@ -562,16 +615,10 @@ mod tests {
         let joints: JointMap = WaypointData::arm_joints(&waypoints.holder1_on_position)
             .into_iter()
             .collect();
-        let states = [model.state_with_joints(&joints).expect("state")];
+        let state = model.state_with_joints(&joints).expect("state");
         assert!(
-            first_collision_index(
-                &model,
-                &assets,
-                &config.scene.allow_collisions_with,
-                &states
-            )
-            .expect("check")
-            .is_some(),
+            state_collides(&model, &assets, &config.scene.allow_collisions_with, &state)
+                .expect("check"),
             "holder1_on_position must read as a scene collision — that is the \
              whole reason a force probe cannot borrow the jog's scene gate"
         );
@@ -679,11 +726,59 @@ mod tests {
         let at_tcp = cube_asset("box", Isometry3::from_parts(tcp.translation, tcp.rotation));
 
         let all_links: Vec<String> = model.robot.link_names().to_vec();
-        let states = [model.state_with_joints(&joints).expect("state")];
-        assert_eq!(
-            first_collision_index(&model, &[at_tcp], &all_links, &states).expect("check"),
-            None,
+        let checked = model.state_with_joints(&joints).expect("state");
+        assert!(
+            !state_collides(&model, &[at_tcp], &all_links, &checked).expect("check"),
             "allowing every link must suppress the cube hit"
+        );
+    }
+
+    /// The gate is relative to its start: a pose standing in a scene
+    /// contact (as every hull-filled recess pose does) must still be
+    /// allowed to move within that contact, and must still be refused a
+    /// contact it did not start with. Cube "hull" stands in for the
+    /// convex part the start is inside; cube "metal" for what a bad jog
+    /// would enter. The pan span matches the shortcut test's dogleg —
+    /// far enough that "metal" at the end pose cannot reach the start.
+    #[test]
+    fn a_start_contact_is_exempt_but_a_new_contact_is_not() {
+        let (model, taught) = production_model_and_state();
+        let mut panned = taught.clone();
+        *panned.get_mut("shoulder_pan_joint").expect("pan") += 0.3;
+
+        let tcp_of = |joints: &JointMap| {
+            let mut state = model.state_with_joints(joints).expect("state");
+            state
+                .update()
+                .global_link_transform(&model.ik_frame)
+                .expect("fk")
+        };
+        let start_tcp = tcp_of(&taught);
+        let end_tcp = tcp_of(&panned);
+        let hull = || {
+            cube_asset(
+                "hull",
+                Isometry3::from_parts(start_tcp.translation, start_tcp.rotation),
+            )
+        };
+        let metal = cube_asset(
+            "metal",
+            Isometry3::from_parts(end_tcp.translation, end_tcp.rotation),
+        );
+        let path = [
+            model.state_with_joints(&taught).expect("state"),
+            model.state_with_joints(&panned).expect("state"),
+        ];
+
+        assert_eq!(
+            first_new_collision_index(&model, &[hull()], &[], &path).expect("check"),
+            None,
+            "motion within the start's own contact must pass the gate"
+        );
+        assert_eq!(
+            first_new_collision_index(&model, &[hull(), metal], &[], &path).expect("check"),
+            Some(1),
+            "a contact the start did not stand in must still be refused"
         );
     }
 }
@@ -781,16 +876,10 @@ mod run_waypoint_goals {
             }
             previous = standby.clone();
 
-            let states = [model.state_with_joints(&standby).expect("state")];
-            assert_eq!(
-                first_collision_index(
-                    &model,
-                    &assets,
-                    &config.scene.allow_collisions_with,
-                    &states
-                )
-                .expect("check"),
-                None,
+            let state = model.state_with_joints(&standby).expect("state");
+            assert!(
+                !state_collides(&model, &assets, &config.scene.allow_collisions_with, &state)
+                    .expect("check"),
                 "holder {holder} standby collides with the scene"
             );
         }
