@@ -113,6 +113,24 @@ impl Seat {
         }
     }
 
+    /// Which way this seat is corrected against the force it reads.
+    ///
+    /// A seat property, not a tool property, because the two seats
+    /// measurably disagree in depth. Nulling the stage on the rack's
+    /// depth sign walked the wrong way and grew the wrench with every
+    /// step -- 2.07 N at the taught pose, 2.26 at +0.039 mm and 2.74 at
+    /// +0.163 mm, against 1.86 N at -0.050 mm (2026-08-19). Four points,
+    /// monotone, 4.1 N/mm: the stage nulls shallower, where a rack well
+    /// nulls deeper. The two lateral entries were never over the floor
+    /// at the stage (tool x 0.05-0.20 N, tool z 0.32-0.46 N), so they
+    /// are the rack's, still unconfirmed here.
+    fn tool_sign(self) -> [f64; 3] {
+        match self {
+            Self::Holder(_) => NULL_RACK_SIGN,
+            Self::Stage => [NULL_RACK_SIGN[0], -NULL_RACK_SIGN[1], NULL_RACK_SIGN[2]],
+        }
+    }
+
     fn persist(
         self,
         path: &std::path::Path,
@@ -181,13 +199,16 @@ impl Axes {
 /// degrees round from it.
 const NULL_AXES: [&str; 3] = ["tool x", "tool y (depth)", "tool z"];
 
-/// Which way each tool axis is corrected against the force it reads.
-/// Measured on the rack, not derived: both signs come out opposite to
-/// the obvious argument about which way a closing finger drags an arm.
-/// They are a property of the tool, so they carry to any seat the same
-/// tool grips -- which is an inference, and one a new seat confirms on
-/// its first run rather than assumes.
-const NULL_TOOL_SIGN: [f64; 3] = [-1.0, 1.0, -1.0];
+/// Which way each tool axis is corrected against the force it reads,
+/// at a rack well. Measured, not derived: the lateral signs come out
+/// opposite to the obvious argument about which way a closing finger
+/// drags an arm.
+///
+/// The depth entry rests on one point -- h7 read -0.80 N, went 0.015 mm
+/// deeper and came back at -0.14 N (2026-08-19) -- and 0.80 N is barely
+/// over the 0.50 N floor, so it is the weakest of the three. The stage
+/// disagrees with it outright; see [`Seat::tool_sign`].
+const NULL_RACK_SIGN: [f64; 3] = [-1.0, 1.0, -1.0];
 
 struct Level {
     /// Height above the pose the mode was triggered at, mm.
@@ -1245,9 +1266,10 @@ impl<'a> Sequencer<'a> {
                     }
                 }
             }
+            let sign = seat.tool_sign();
             let step_mm: [f64; 3] = std::array::from_fn(|i| {
                 if live[i] {
-                    NULL_TOOL_SIGN[i] * force[i] / stiffness[i] * g.damping
+                    sign[i] * force[i] / stiffness[i] * g.damping
                 } else {
                     0.0
                 }
@@ -2751,6 +2773,29 @@ impl<'a> Sequencer<'a> {
 mod tests {
     use super::*;
 
+    /// The stage and a rack well disagree about which way depth is
+    /// corrected, and agree about the other two. Pinned because the
+    /// disagreement is a measurement (four monotone points at the stage
+    /// on 2026-08-19, against one noise-level point at h7), not a
+    /// derivation — anyone tempted to collapse the two back into one
+    /// constant has to move a puck to do it.
+    #[test]
+    fn the_stage_nulls_depth_the_other_way_from_a_rack_well() {
+        let rack = Seat::Holder(1).tool_sign();
+        let stage = Seat::Stage.tool_sign();
+        assert_eq!(stage[1], -rack[1], "depth is the axis they disagree on");
+        assert_eq!(
+            stage[0], rack[0],
+            "tool x was never over the floor at the stage"
+        );
+        assert_eq!(stage[2], rack[2], "nor was tool z");
+        for s in [rack, stage] {
+            for axis in s {
+                assert_eq!(axis.abs(), 1.0, "a sign, not a gain");
+            }
+        }
+    }
+
     /// The grip null used to read the base wrench and hand its three
     /// components to trim slots by a hardcoded permutation: x from base
     /// x, the depth trim from base z, the z trim from base y, each
@@ -2799,7 +2844,8 @@ mod tests {
             let mut force_base = [0.0; 3];
             force_base[base_axis] = 1.0;
             let force = axes.say(&force_base);
-            let step: [f64; 3] = std::array::from_fn(|i| NULL_TOOL_SIGN[i] * force[i] / k[i]);
+            let sign = Seat::Holder(1).tool_sign();
+            let step: [f64; 3] = std::array::from_fn(|i| sign[i] * force[i] / k[i]);
             let want = -1.0 / old_k[old_index];
             assert!(
                 (step[slot] - want).abs() < want.abs() * 1e-3,
