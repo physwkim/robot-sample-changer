@@ -423,7 +423,10 @@ impl OpsPanel {
                     };
                     ui.end_row();
                 });
-            ui.label("(correction is base x, base y, depth — the trim columns X, Z, Y)");
+            ui.label(
+                "(correction is tool x, tool y (depth, never steered), tool z — \
+                 the trim columns X, Y, Z)",
+            );
             let msg = sval(&self.null_msg).unwrap_or_default();
             if !msg.is_empty() {
                 ui.label(egui::RichText::new(msg).italics());
