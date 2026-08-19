@@ -725,10 +725,11 @@ impl Default for WellConfig {
                 // was tried to buy more and the arm simply did not take
                 // it (commanded 0.020, moved -0.002 at h7, 2026-08-19).
                 step_mm: 0.05,
-                // Four times the hover, so "no floor within" says the seat
-                // is not where the pose believes rather than that the
-                // probe stopped short.
-                travel_mm: 0.6,
+                // The descent starts at the top of `heights_mm`, so it
+                // has to cover the lift plus the hover with margin.
+                // "No floor within" then says the seat is not where the
+                // pose believes rather than that the probe stopped short.
+                travel_mm: 3.0,
                 // The floor answers at about 16 N/mm, so one step is
                 // 0.32 N and contact is caught within two of them. The
                 // bore's 1.0 N would be three steps deep by the time it

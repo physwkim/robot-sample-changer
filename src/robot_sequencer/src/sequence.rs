@@ -163,14 +163,15 @@ struct Seat {
     /// Lateral bracket centre along base y, which trims tool z. Same
     /// height as `centre_x_mm`.
     centre_y_mm: Option<f64>,
-    /// How far below the start pose the floor is, from the
+    /// How far below the TAUGHT pose the floor is, from the
     /// force-versus-depth fit rather than the trip point, which carries
     /// the threshold and up to a step of overshoot in it. Trims tool y.
     ///
-    /// From the seat level and only from there — the depth the sequence
-    /// hovers at is measured against the seat's floor, and a floor probe
-    /// started 2 mm higher either misses it or hits it after a travel
-    /// that means something else.
+    /// Probed from the same height as the centres and converted here, so
+    /// every field of this struct is in the taught pose's frame whatever
+    /// height it was measured at. At the seat there is nothing to probe:
+    /// the taught pose holds the puck against the floor, so a downward
+    /// step loads it without travelling and measures no distance at all.
     floor_mm: Option<f64>,
 }
 
@@ -768,26 +769,24 @@ impl<'a> Sequencer<'a> {
             })?;
 
         let lifted = !seat.heights_mm.is_empty();
-        // Level zero is the taught seat pose, so its floor IS the depth
-        // residual the taught trims carry. The laterals come from the
-        // last height that was ASKED for — by index, so a walk that
-        // stopped short leaves them unmeasured instead of quietly
-        // handing back the preloaded seat brackets it did reach.
+        // Everything comes from the last height that was ASKED for — by
+        // index, so a walk that stopped short leaves the trims unmeasured
+        // instead of quietly handing back the preloaded seat readings it
+        // did reach. The floor arrives measured from that level and is
+        // brought back to the taught pose here, which is the frame the
+        // trims are written in.
         // measure_level order: brackets[0] = base x, [1] = base y.
-        let lateral_level = seat.heights_mm.len();
+        let top = levels.get(seat.heights_mm.len());
         let seat = Seat {
-            centre_x_mm: levels
-                .get(lateral_level)
+            centre_x_mm: top
                 .and_then(|l| l.brackets.first())
                 .and_then(Bracket::centre_mm),
-            centre_y_mm: levels
-                .get(lateral_level)
+            centre_y_mm: top
                 .and_then(|l| l.brackets.get(1))
                 .and_then(Bracket::centre_mm),
-            floor_mm: levels
-                .first()
-                .and_then(|l| l.floor.as_ref())
-                .and_then(Probed::wall_mm),
+            floor_mm: top
+                .and_then(|l| Some((l, l.floor.as_ref()?.wall_mm()?)))
+                .map(|(l, floor)| floor - l.height_mm),
         };
         log::info("========================================");
         log::info("SEAT PROBE RESULT (measured from the pose the probe started at)");
@@ -1117,7 +1116,8 @@ impl<'a> Sequencer<'a> {
         from_trigger: &mut Vector3,
         levels: &mut Vec<Level>,
     ) -> Result<(), SequencerError> {
-        for &height in heights {
+        let top = heights.len() - 1;
+        for (index, &height) in heights.iter().enumerate() {
             let climb = height - from_trigger.z;
             // Not a plain move: a lift out of the seat drags the puck
             // sideways with 30 N/mm behind it, and a bracket measured
@@ -1146,7 +1146,7 @@ impl<'a> Sequencer<'a> {
             // Pushed before it is filled, and filled in place, so that a
             // fault part way through a level still leaves the axes it had
             // already measured in the report.
-            Self::measure_level(&mut self.motion, axes, level, limits)?;
+            Self::measure_level(&mut self.motion, axes, level, limits, index == top)?;
             Self::centre_here(&mut self.motion, axes, level, from_trigger, limits.lateral)?;
         }
         Ok(())
@@ -1228,6 +1228,7 @@ impl<'a> Sequencer<'a> {
         axes: &Axes,
         level: &mut Level,
         limits: Limits,
+        floor: bool,
     ) -> Result<(), SequencerError> {
         for (name, dir) in [("base x", axes.x), ("base y", axes.y)] {
             level
@@ -1246,12 +1247,20 @@ impl<'a> Sequencer<'a> {
                 level.tilts.push(motion.tilt_scan(axis, limits.tilt, name)?);
             }
         }
+        // The top level only. A probe measures a distance it travels,
+        // and at the seat there is none left to travel: the taught pose
+        // holds the puck against the floor, so pushing down loads it
+        // without moving it (h7 commanded 0.050 mm, moved 0.001 mm at
+        // 0.43 N, 2026-08-19). The same lift that gives the brackets
+        // room gives this one its approach.
+        //
         // Straight down in base, not along whichever tool axis happens
         // to point that way: the seat floor is horizontal and the puck's
-        // own weight is already resting on it, so the probe has to push
-        // along the same line that weight acts on for the slope to mean
-        // depth.
-        level.floor = Some(motion.probe_until_contact(-axes.up, limits.depth, "base z-")?);
+        // own weight acts on it, so the probe has to push along the same
+        // line that weight acts on for the slope to mean depth.
+        if floor {
+            level.floor = Some(motion.probe_until_contact(-axes.up, limits.depth, "base z-")?);
+        }
         Ok(())
     }
 

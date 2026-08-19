@@ -395,9 +395,10 @@ probe:
                           # it (h7 commanded 0.020 mm, moved -0.002 mm against
                           # 0.32 N, 2026-08-19) -- the depth axis failing
                           # exactly the way the lateral one had
-      travel_mm: 0.6      # 4x the hover, so "no floor within" means the seat is
-                          # not where the pose believes rather than the probe
-                          # stopped short
+      travel_mm: 3.0      # the descent starts at the top of heights_mm, so it
+                          # has to cover the lift plus the hover with margin --
+                          # "no floor within" then means the seat is not where
+                          # the pose believes rather than the probe stopped short
       threshold_n: 0.5    # the floor answers at ~16 N/mm, so one step is 0.32 N
                           # and contact is caught within two. The bore's 1.0 N
                           # would be three steps deep, most of the hover
