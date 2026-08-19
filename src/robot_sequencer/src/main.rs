@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::config::Config;
-use crate::epics::Epics;
+use crate::epics::{Epics, NullReport, NullState};
 use crate::error::SequencerError;
 use crate::gripper::Gripper;
 use crate::model::Model;
@@ -52,6 +52,16 @@ fn run() -> Result<(), SequencerError> {
     // A trigger left at 1 by a crash must not fire a sequence the moment
     // the daemon returns; clearing it is the C++ node's startup behavior.
     epics.write_trigger(0);
+    // Same reasoning for the grip null's status: the result on the
+    // screen belongs to a run this daemon is no longer in, so it is
+    // cleared rather than left to look current.
+    epics.publish_null(&NullReport {
+        state: NullState::Idle,
+        iteration: 0,
+        total_mm: [0.0; 3],
+        force_n: 0.0,
+        message: String::new(),
+    });
 
     let motion = Motion::connect(&model, &config)?;
     let gripper = Gripper::connect(&config)?;

@@ -156,10 +156,21 @@ pub struct EpicsConfig {
     /// reason.
     #[serde(default = "default_map_source_pv")]
     pub map_source_pv: String,
+    /// Prefix of the grip null's progress records — the family is
+    /// `State`, `Iter`, `DX`, `DY`, `DZ`, `Force` and `Msg`. One prefix
+    /// rather than seven names because `db/robot.db` adds and removes
+    /// them together; there is no configuration in which one of them
+    /// lives somewhere else.
+    #[serde(default = "default_null_prefix_pv")]
+    pub null_prefix_pv: String,
 }
 
 fn default_map_source_pv() -> String {
     "Robot:MapSource".into()
+}
+
+fn default_null_prefix_pv() -> String {
+    "Robot:Null:".into()
 }
 
 /// The level-tool path constraint (see [`SequenceConfig::level_tool`]).

@@ -16,7 +16,7 @@ use std::time::Duration;
 use cspace_core::geometry::{Isometry3, Vector3};
 
 use crate::config::{CentringConfig, Config, SeatProbe};
-use crate::epics::{CalibMode, Epics, VisionKind, WaitStatus};
+use crate::epics::{CalibMode, Epics, NullReport, NullState, VisionKind, WaitStatus};
 use crate::error::SequencerError;
 use crate::gripper::Gripper;
 use crate::handeye;
@@ -216,6 +216,39 @@ fn gate_correction(d: [f64; 3], min_mm: f64, max_mm: f64) -> Gate {
 /// This was a `bool` that meant "skipped" to `Normal` and nothing to
 /// every other mode, so a mode that writes trims had no way to say it
 /// had, and its summary read "nothing written" over three trim lines.
+/// A grip-null failure carrying the one line the operator sees on
+/// `Robot:Null:Msg` alongside the full error.
+///
+/// The headline is part of the error type rather than something the
+/// failing site remembers to set, so no exit from the loop — including
+/// the `?` on a move, a file read or a trim write — can leave the last
+/// running message on the screen as if it were the result.
+struct NullFailure {
+    headline: String,
+    error: SequencerError,
+}
+
+impl From<SequencerError> for NullFailure {
+    fn from(error: SequencerError) -> Self {
+        // Nothing site-specific to say: the error's own opening words
+        // are the best summary available, and `publish_null` cuts them
+        // to what the record holds.
+        Self {
+            headline: error.0.clone(),
+            error,
+        }
+    }
+}
+
+impl NullFailure {
+    fn new(headline: impl Into<String>, error: String) -> Self {
+        Self {
+            headline: headline.into(),
+            error: SequencerError(error),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Outcome {
     /// The run did what the mode says, with nothing else to report.
@@ -892,15 +925,48 @@ impl<'a> Sequencer<'a> {
     /// into a seat that is not empty, so a non-zero `StartStep` is
     /// refused rather than honored.
     fn run_grip_null(&mut self, holder: i32, start: i32) -> Result<Outcome, SequencerError> {
+        let mut report = NullReport {
+            state: NullState::Running,
+            iteration: 0,
+            total_mm: [0.0; 3],
+            force_n: 0.0,
+            message: format!("holder {holder}: starting"),
+        };
+        self.epics.publish_null(&report);
+        let result = self.grip_null_loop(holder, start, &mut report);
+        // The single place a terminal state is stamped. Every exit from
+        // the loop lands here, so `Running` cannot outlive the run.
+        report.state = match &result {
+            Ok(_) => NullState::Settled,
+            Err(f) => {
+                report.message = f.headline.clone();
+                NullState::Failed
+            }
+        };
+        self.epics.publish_null(&report);
+        result.map_err(|f| f.error)
+    }
+
+    /// The loop itself. Reports progress into `report`; only its caller
+    /// writes the terminal state.
+    fn grip_null_loop(
+        &mut self,
+        holder: i32,
+        start: i32,
+        report: &mut NullReport,
+    ) -> Result<Outcome, NullFailure> {
         /// Index order of every triple here: the wrench components the
         /// loop reads, the trim slots it writes, and the log.
         const AXES: [&str; 3] = ["base x", "base y", "depth"];
         if start != 0 {
-            return Err(SequencerError(format!(
-                "grip null always runs from the top; StartStep is {start} — set \
-                 it to 0 (recover a failed run with CalibMode=4 and a fresh \
-                 trigger instead)"
-            )));
+            return Err(NullFailure::new(
+                "refused: StartStep must be 0",
+                format!(
+                    "grip null always runs from the top; StartStep is {start} — set \
+                     it to 0 (recover a failed run with CalibMode=4 and a fresh \
+                     trigger instead)"
+                ),
+            ));
         }
         let g = self.config.grip_null.clone();
         // `MapSource` names where the puck comes from, 0 or the target
@@ -911,15 +977,20 @@ impl<'a> Sequencer<'a> {
         let fetched = source != 0 && source != holder;
         if fetched {
             if !(1..=10).contains(&source) {
-                return Err(SequencerError(format!(
-                    "grip null: MapSource is {source}; it must name a holder \
-                     1-10, or 0 for the puck already in holder {holder}"
-                )));
+                return Err(NullFailure::new(
+                    format!("refused: MapSource {source} is not a holder"),
+                    format!(
+                        "grip null: MapSource is {source}; it must name a holder \
+                         1-10, or 0 for the puck already in holder {holder}"
+                    ),
+                ));
             }
             log::info(&format!(
                 ">>> GRIP NULL MODE: fetching holder {source}'s puck into holder \
                  {holder} first <<<"
             ));
+            report.message = format!("fetching the puck from holder {source}");
+            self.epics.publish_null(report);
             let wd = WaypointData::load(&self.config.sequence.waypoints_yaml)?;
             let base = self.compute_base_waypoints(&wd)?;
             self.carry_puck(&wd, &base, source, holder)?;
@@ -949,6 +1020,9 @@ impl<'a> Sequencer<'a> {
                 "--- grip null iteration {iteration} of {} ---",
                 g.max_iterations
             ));
+            report.iteration = iteration as i32;
+            report.message = format!("iteration {iteration} of {}", g.max_iterations);
+            self.epics.publish_null(report);
             self.hand(0, "open_hand", true, 0)?;
             self.arm(1, "holder_standby", &run.standby, 0)?;
             self.cartesian(2, "holder_above", &run.above, 0)?;
@@ -964,7 +1038,8 @@ impl<'a> Sequencer<'a> {
             self.cartesian(23, "holder_standby_final", &run.standby, 0)?;
 
             let Some(w) = measured else {
-                return Err(SequencerError(
+                return Err(NullFailure::new(
+                    "failed: the close reported no wrench",
                     "grip null: the close reported no wrench, so there is \
                      nothing to steer on; the puck is back in its seat and \
                      the taught trims are unchanged"
@@ -972,6 +1047,8 @@ impl<'a> Sequencer<'a> {
                 ));
             };
             let force = [w[0], w[1], w[2]];
+            report.force_n = force.iter().map(|f| f * f).sum::<f64>().sqrt();
+            self.epics.publish_null(report);
             log::info(&format!(
                 "  grip null: the close left ({:+.2}, {:+.2}, {:+.2}) N, \
                  ({:+.3}, {:+.3}, {:+.3}) Nm",
@@ -1002,6 +1079,7 @@ impl<'a> Sequencer<'a> {
                         AXES[1],
                         AXES[2]
                     ));
+                    report.message = format!("settled at iteration {iteration}");
                     return Ok(if wrote { Outcome::Wrote } else { Outcome::Ran });
                 }
                 log::info("  grip null: under the floor; one more round to confirm");
@@ -1051,21 +1129,27 @@ impl<'a> Sequencer<'a> {
             ));
             for (i, axis) in AXES.iter().enumerate() {
                 if step_mm[i].abs() > g.max_step_mm {
-                    return Err(SequencerError(format!(
-                        "grip null: iteration {iteration} asks for {:+.3} mm in \
-                         {axis} from {:+.2} N, past the {:.2} mm step cap — that \
-                         is not a trim error; nothing was written this round",
-                        step_mm[i], force[i], g.max_step_mm
-                    )));
+                    return Err(NullFailure::new(
+                        format!("failed: {axis} past the step cap"),
+                        format!(
+                            "grip null: iteration {iteration} asks for {:+.3} mm in \
+                             {axis} from {:+.2} N, past the {:.2} mm step cap — that \
+                             is not a trim error; nothing was written this round",
+                            step_mm[i], force[i], g.max_step_mm
+                        ),
+                    ));
                 }
                 if (total_mm[i] + step_mm[i]).abs() > g.max_total_mm {
-                    return Err(SequencerError(format!(
-                        "grip null: {axis} would reach {:+.3} mm from the taught \
-                         pose, past the {:.2} mm total cap — the seat is wrong, \
-                         not the trim; nothing was written this round",
-                        total_mm[i] + step_mm[i],
-                        g.max_total_mm
-                    )));
+                    return Err(NullFailure::new(
+                        format!("failed: {axis} past the total cap"),
+                        format!(
+                            "grip null: {axis} would reach {:+.3} mm from the taught \
+                             pose, past the {:.2} mm total cap — the seat is wrong, \
+                             not the trim; nothing was written this round",
+                            total_mm[i] + step_mm[i],
+                            g.max_total_mm
+                        ),
+                    ));
                 }
             }
             // x trim is base x, z trim is base y, y trim is depth: the
@@ -1085,14 +1169,19 @@ impl<'a> Sequencer<'a> {
                 total_mm[i] += step_mm[i];
                 since_mm[i] += step_mm[i];
             }
+            report.total_mm = total_mm;
+            self.epics.publish_null(report);
             previous = Some(force);
         }
-        Err(SequencerError(format!(
-            "grip null: {} iterations did not bring holder {holder} under \
-             {:.2} N. The puck is seated and the arm is at standby; the trims \
-             written so far are kept, so a fresh trigger continues from here",
-            g.max_iterations, g.settled_n
-        )))
+        Err(NullFailure::new(
+            format!("failed: {} iterations, still moving", g.max_iterations),
+            format!(
+                "grip null: {} iterations did not bring holder {holder} under \
+                 {:.2} N. The puck is seated and the arm is at standby; the trims \
+                 written so far are kept, so a fresh trigger continues from here",
+                g.max_iterations, g.settled_n
+            ),
+        ))
     }
 
     /// Carry one puck from `MapSource` to `Holder`, straight across.

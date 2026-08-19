@@ -203,3 +203,54 @@ record(ao, "Robot:Vision:Tilt")
     field(PREC, "2")
     field(EGU,  "deg")
 }
+
+# Grip null (CalibMode=6) progress and result. The daemon owns every one
+# of these; nothing else writes them. State is a plain longin rather than
+# an mbbi so the labels live with the GUI, next to step_name().
+record(longin, "Robot:Null:State")
+{
+    field(DESC, "Grip null 0=Idle 1=Run 2=Settled 3=Fail")
+    field(VAL,  "0")
+    field(HOPR, "3")
+    field(LOPR, "0")
+}
+record(longin, "Robot:Null:Iter")
+{
+    field(DESC, "Grip null iteration in progress")
+    field(VAL,  "0")
+    field(HOPR, "99")
+    field(LOPR, "0")
+}
+record(ai, "Robot:Null:DX")
+{
+    field(DESC, "Grip null cumulative move, base x")
+    field(VAL,  "0.0")
+    field(PREC, "3")
+    field(EGU,  "mm")
+}
+record(ai, "Robot:Null:DY")
+{
+    field(DESC, "Grip null cumulative move, base y")
+    field(VAL,  "0.0")
+    field(PREC, "3")
+    field(EGU,  "mm")
+}
+record(ai, "Robot:Null:DZ")
+{
+    field(DESC, "Grip null cumulative move, depth")
+    field(VAL,  "0.0")
+    field(PREC, "3")
+    field(EGU,  "mm")
+}
+record(ai, "Robot:Null:Force")
+{
+    field(DESC, "Grip null last close wrench magnitude")
+    field(VAL,  "0.0")
+    field(PREC, "2")
+    field(EGU,  "N")
+}
+record(stringin, "Robot:Null:Msg")
+{
+    field(DESC, "Grip null result, 39 chars")
+    field(VAL,  "")
+}

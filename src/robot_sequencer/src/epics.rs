@@ -134,6 +134,76 @@ pub struct Epics {
     jog_z: Option<CaChannel>,
     jog_step: Option<CaChannel>,
     vision: Option<VisionChannels>,
+    null: Option<NullChannels>,
+}
+
+/// The grip null's progress records. All seven or none: a half-present
+/// family would show the operator a state without the numbers that
+/// explain it, which is worse than showing nothing.
+struct NullChannels {
+    state: CaChannel,
+    iteration: CaChannel,
+    dx: CaChannel,
+    dy: CaChannel,
+    dz: CaChannel,
+    force: CaChannel,
+    message: CaChannel,
+}
+
+/// What `Robot:Null:State` means. The labels live in the GUI, next to
+/// `step_name`, so the record stays a plain longin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NullState {
+    Idle,
+    Running,
+    Settled,
+    Failed,
+}
+
+impl NullState {
+    fn code(self) -> i32 {
+        match self {
+            Self::Idle => 0,
+            Self::Running => 1,
+            Self::Settled => 2,
+            Self::Failed => 3,
+        }
+    }
+}
+
+/// One snapshot of the grip null, published as a whole.
+///
+/// Publishing a struct rather than seven setters is deliberate: the
+/// state and the numbers that justify it are written together or not at
+/// all, so no path can advance the state and leave a stale correction
+/// on the screen.
+#[derive(Debug, Clone)]
+pub struct NullReport {
+    pub state: NullState,
+    pub iteration: i32,
+    /// Cumulative move so far, mm, in base x, base y and depth.
+    pub total_mm: [f64; 3],
+    /// Magnitude of the last close wrench's force, N.
+    pub force_n: f64,
+    /// One line for the operator. `stringin` holds 39 characters, and
+    /// [`Epics::publish_null`] truncates on a character boundary.
+    pub message: String,
+}
+
+/// Connect the whole `Robot:Null:` family, or none of it.
+fn null_channels(
+    optional: &dyn Fn(&str) -> Option<CaChannel>,
+    prefix: &str,
+) -> Option<NullChannels> {
+    Some(NullChannels {
+        state: optional(&format!("{prefix}State"))?,
+        iteration: optional(&format!("{prefix}Iter"))?,
+        dx: optional(&format!("{prefix}DX"))?,
+        dy: optional(&format!("{prefix}DY"))?,
+        dz: optional(&format!("{prefix}DZ"))?,
+        force: optional(&format!("{prefix}Force"))?,
+        message: optional(&format!("{prefix}Msg"))?,
+    })
 }
 
 fn value_to_i32(value: &EpicsValue) -> Option<i32> {
@@ -228,6 +298,7 @@ impl Epics {
             jog_z: optional(&config.jog_z_pv),
             jog_step: optional(&config.jog_step_pv),
             vision,
+            null: null_channels(&optional, &config.null_prefix_pv),
             _client: client,
             rt,
         };
@@ -246,6 +317,48 @@ impl Epics {
         self.rt
             .block_on(channel.put_with_timeout(&EpicsValue::Long(value), timeout))
             .is_ok()
+    }
+
+    fn put_f64(&self, channel: &CaChannel, value: f64, timeout: Duration) -> bool {
+        self.rt
+            .block_on(channel.put_with_timeout(&EpicsValue::Double(value), timeout))
+            .is_ok()
+    }
+
+    fn put_str(&self, channel: &CaChannel, value: &str, timeout: Duration) -> bool {
+        self.rt
+            .block_on(channel.put_with_timeout(&EpicsValue::String(value.into()), timeout))
+            .is_ok()
+    }
+
+    /// Publish a whole grip-null snapshot. A no-op against an IOC whose
+    /// database predates the records, and a failed put is logged at most
+    /// once per call: this reports progress, it does not gate it, so a
+    /// sequence must not die because a status write did not land.
+    pub fn publish_null(&self, report: &NullReport) {
+        let Some(n) = &self.null else {
+            return;
+        };
+        let mut ok = self.put_i32(&n.state, report.state.code(), GET_TIMEOUT);
+        ok &= self.put_i32(&n.iteration, report.iteration, GET_TIMEOUT);
+        for (channel, value) in [
+            (&n.dx, report.total_mm[0]),
+            (&n.dy, report.total_mm[1]),
+            (&n.dz, report.total_mm[2]),
+            (&n.force, report.force_n),
+        ] {
+            ok &= self.put_f64(channel, value, GET_TIMEOUT);
+        }
+        // `stringin` is 40 bytes including the terminator, and the cut
+        // has to land on a character boundary or the put is not UTF-8.
+        let mut end = report.message.len().min(39);
+        while !report.message.is_char_boundary(end) {
+            end -= 1;
+        }
+        ok &= self.put_str(&n.message, &report.message[..end], GET_TIMEOUT);
+        if !ok {
+            log::warn("grip null status: at least one Robot:Null: put failed");
+        }
     }
 
     /// Trigger value, `-1` on read error (the C++ node's sentinel).
