@@ -166,6 +166,13 @@ pub struct EpicsConfig {
     /// lives somewhere else.
     #[serde(default = "default_null_prefix_pv")]
     pub null_prefix_pv: String,
+    /// Prefix of the jog accumulator's records — `DX`, `DY`, `DZ`,
+    /// `Target` and `Apply`. One prefix for the same reason as
+    /// `null_prefix_pv`: the five live and die together in
+    /// `db/robot.db`, and an accumulator without its apply button is
+    /// not a configuration anyone wants.
+    #[serde(default = "default_jog_prefix_pv")]
+    pub jog_prefix_pv: String,
 }
 
 fn default_map_source_pv() -> String {
@@ -174,6 +181,10 @@ fn default_map_source_pv() -> String {
 
 fn default_null_prefix_pv() -> String {
     "Robot:Null:".into()
+}
+
+fn default_jog_prefix_pv() -> String {
+    "Robot:Jog:".into()
 }
 
 /// The level-tool path constraint (see [`SequenceConfig::level_tool`]).

@@ -130,6 +130,39 @@ record(ao, "Robot:JogStep")
     field(PREC, "1")
     field(EGU,  "mm")
 }
+record(ai, "Robot:Jog:DX")
+{
+    field(DESC, "Jog travel this run, tool x")
+    field(VAL,  "0.0")
+    field(PREC, "3")
+    field(EGU,  "mm")
+}
+record(ai, "Robot:Jog:DY")
+{
+    field(DESC, "Jog travel this run, tool y (depth)")
+    field(VAL,  "0.0")
+    field(PREC, "3")
+    field(EGU,  "mm")
+}
+record(ai, "Robot:Jog:DZ")
+{
+    field(DESC, "Jog travel this run, tool z")
+    field(VAL,  "0.0")
+    field(PREC, "3")
+    field(EGU,  "mm")
+}
+record(stringin, "Robot:Jog:Target")
+{
+    field(DESC, "Seat a jog apply would trim, empty=none")
+    field(VAL,  "")
+}
+record(bo, "Robot:Jog:Apply")
+{
+    field(DESC, "Write the jog travel into the seat trims")
+    field(VAL,  "0")
+    field(ZNAM, "Idle")
+    field(ONAM, "Apply")
+}
 record(longout, "Robot:Vision:Req")
 {
     field(DESC, "Vision request id (sequencer writes)")

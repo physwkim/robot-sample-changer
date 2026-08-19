@@ -135,6 +135,7 @@ pub struct Epics {
     jog_step: Option<CaChannel>,
     vision: Option<VisionChannels>,
     null: Option<NullChannels>,
+    jog_total: Option<JogChannels>,
 }
 
 /// The grip null's progress records. All seven or none: a half-present
@@ -191,6 +192,29 @@ pub struct NullReport {
     /// One line for the operator. `stringin` holds 39 characters, and
     /// [`Epics::publish_null`] truncates on a character boundary.
     pub message: String,
+}
+
+/// The jog accumulator's records. All five or none, like the null
+/// family: the three totals are what an operator reads before pressing
+/// Apply, and `Target` is what tells them the press will land
+/// somewhere.
+struct JogChannels {
+    d: [CaChannel; 3],
+    target: CaChannel,
+    apply: CaChannel,
+}
+
+/// Connect the whole `Robot:Jog:` family, or none of it.
+fn jog_channels(optional: &dyn Fn(&str) -> Option<CaChannel>, prefix: &str) -> Option<JogChannels> {
+    Some(JogChannels {
+        d: [
+            optional(&format!("{prefix}DX"))?,
+            optional(&format!("{prefix}DY"))?,
+            optional(&format!("{prefix}DZ"))?,
+        ],
+        target: optional(&format!("{prefix}Target"))?,
+        apply: optional(&format!("{prefix}Apply"))?,
+    })
 }
 
 /// Connect the whole `Robot:Null:` family, or none of it.
@@ -302,6 +326,7 @@ impl Epics {
             jog_step: optional(&config.jog_step_pv),
             vision,
             null: null_channels(&optional, &config.null_prefix_pv),
+            jog_total: jog_channels(&optional, &config.jog_prefix_pv),
             _client: client,
             rt,
         };
@@ -508,6 +533,43 @@ impl Epics {
             .ok()
             .and_then(|(_, value)| value_to_f64(&value))
             .unwrap_or(1.0)
+    }
+
+    /// Publish the jog accumulator: the three tool-frame totals in mm
+    /// and the seat an apply would write them to (empty = none, which is
+    /// how the GUI knows to grey the button out). A no-op against an IOC
+    /// whose database predates the records; a failed put is logged, not
+    /// returned, because this reports state and does not gate it.
+    pub fn publish_jog_total(&self, mm: [f64; 3], target: &str) {
+        let Some(j) = &self.jog_total else {
+            return;
+        };
+        let mut ok = true;
+        for (channel, value) in j.d.iter().zip(mm) {
+            ok &= self.put_f64(channel, value, GET_TIMEOUT);
+        }
+        ok &= self.put_str(&j.target, target, GET_TIMEOUT);
+        if !ok {
+            log::warn("jog total: at least one Robot:Jog: put failed");
+        }
+    }
+
+    /// Takes a pending apply request, resetting the record the way
+    /// `read_and_reset_jog` does: the request is an edge, and leaving it
+    /// latched would re-apply the next accumulation without anyone
+    /// asking.
+    pub fn take_jog_apply(&self) -> bool {
+        let Some(j) = &self.jog_total else {
+            return false;
+        };
+        let Some(value) = self.get_i32(&j.apply, JOG_TIMEOUT) else {
+            return false;
+        };
+        if value == 0 {
+            return false;
+        }
+        let _ = self.put_i32(&j.apply, 0, JOG_TIMEOUT);
+        true
     }
 
     fn get_f64(&self, channel: &CaChannel, timeout: Duration) -> Option<f64> {

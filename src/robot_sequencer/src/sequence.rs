@@ -125,6 +125,41 @@ impl Seat {
     }
 }
 
+/// The tool-frame sum of every jog the daemon has executed since it was
+/// last zeroed, in mm, together with the seat those millimetres would be
+/// a trim for.
+///
+/// A jog and a trim are the same three axes and the same units up to the
+/// factor of a thousand: [`Motion::jog`] translates along the
+/// `ik_frame`'s own axes and [`Model::apply_cartesian_offset`] performs
+/// the identical rigid motion. Neither turns the tool, so the axes the
+/// sum adds along do not move between one jog and the next and the total
+/// needs no frame carried alongside it, unlike a vision
+/// [`Correction`].
+struct JogTotal {
+    mm: [f64; 3],
+    /// The seat the current wait stands at, or `None` where it stands at
+    /// none — the idle standby, the hand-eye aim, the seat probe the
+    /// operator carried in mid-run. An apply is refused there rather
+    /// than guessing: the trims move a seat's `on_position`, and a jog
+    /// from anywhere else is not a measurement of one.
+    seat: Option<Seat>,
+}
+
+/// The three trim deltas an apply writes, in metres, from a jog total
+/// in mm. An axis the arm never moved along is left out rather than
+/// written as a zero: `persist_trims` skips a `None` slot entirely, so a
+/// jog along one axis edits one line of the taught file and leaves the
+/// other two exactly as they were, comment and formatting included.
+fn jog_apply_deltas(mm: [f64; 3]) -> [Option<f64>; 3] {
+    std::array::from_fn(|i| (mm[i].abs() >= JOG_APPLY_MIN_MM).then_some(mm[i] / 1000.0))
+}
+
+/// Below this an apply has nothing to write: it is "did the arm move",
+/// not a deadband (the smallest step the GUI offers is 0.01 mm, a
+/// hundred times larger).
+const JOG_APPLY_MIN_MM: f64 = 1e-4;
+
 /// One height's worth of seat probing: where the arm stood, and what it
 /// found from there.
 /// The three base directions the sweep moves along, expressed in the
@@ -262,6 +297,9 @@ pub struct Sequencer<'a> {
     sequence_count: u32,
     /// Monotonic id for the vision handshake (`Robot:Vision:Req`/`Done`).
     vision_req_id: i32,
+    /// How far the operator has jogged since the last run started, and
+    /// where that would be written.
+    jog: JogTotal,
 }
 
 /// A measured correction gated against the configured deadband/limit.
@@ -385,6 +423,10 @@ impl<'a> Sequencer<'a> {
             last_gripper_cmd: -1,
             sequence_count: 0,
             vision_req_id,
+            jog: JogTotal {
+                mm: [0.0; 3],
+                seat: None,
+            },
         }
     }
 
@@ -393,8 +435,12 @@ impl<'a> Sequencer<'a> {
     /// for.
     pub fn run(&mut self) -> Result<(), SequencerError> {
         loop {
-            let start_from_step = self.wait_for_trigger(false);
+            let start_from_step = self.wait_for_trigger(None);
             self.sequence_count += 1;
+            // Steps 0 and 1 plan to taught poses, undoing anything the
+            // operator jogged while the daemon was idle. The total has
+            // to start from zero for the same reason.
+            self.jog_zero();
 
             let holder_number = self.epics.read_holder();
             let calib_mode = self.epics.read_calib_mode();
@@ -456,7 +502,9 @@ impl<'a> Sequencer<'a> {
                     _ => self
                         .compute_run_waypoints(&waypoints, &base, holder_number)
                         .and_then(|run| match calib_mode {
-                            CalibMode::Holder => self.run_calib_holder(&run, start_from_step),
+                            CalibMode::Holder => {
+                                self.run_calib_holder(&run, start_from_step, holder_number)
+                            }
                             CalibMode::SampleHolder => {
                                 self.run_calib_sample_holder(&run, start_from_step)
                             }
@@ -723,6 +771,7 @@ impl<'a> Sequencer<'a> {
         &mut self,
         w: &RunWaypoints,
         start: i32,
+        holder: i32,
     ) -> Result<Outcome, SequencerError> {
         log::info(">>> HOLDER CALIBRATION MODE: Steps 0-5, wait, 20-23 <<<");
         self.hand(0, "open_hand", true, start)?;
@@ -732,7 +781,10 @@ impl<'a> Sequencer<'a> {
         self.hand(4, "close_gripper", false, start)?;
         self.cartesian(5, "holder_above_return", &w.above, start)?;
 
-        self.calibration_hold("HOLDER CALIBRATION: Holding at above position");
+        self.calibration_hold(
+            "HOLDER CALIBRATION: Holding at above position",
+            Seat::Holder(holder),
+        );
 
         log::info(">>> Returning sample to holder (steps 20-23) <<<");
         self.cartesian(20, "holder_on_position_final", &w.on_pos, start)?;
@@ -760,7 +812,10 @@ impl<'a> Sequencer<'a> {
         self.arm(7, "sample_holder_standby", &w.sh_standby, start)?;
         self.cartesian(8, "sample_holder_above", &w.sh_above, start)?;
 
-        self.calibration_hold("SAMPLE HOLDER CALIBRATION: Holding at sample holder above");
+        self.calibration_hold(
+            "SAMPLE HOLDER CALIBRATION: Holding at sample holder above",
+            Seat::Stage,
+        );
 
         log::info(">>> Returning sample to holder (steps 16-23) <<<");
         self.cartesian(16, "sample_holder_above_2nd_return", &w.sh_above, start)?;
@@ -837,9 +892,9 @@ impl<'a> Sequencer<'a> {
     /// Two triggers, like hand-eye: the first selects the mode and opens
     /// a jog hold, the second commits from wherever the arm was jogged
     /// to. The hold is where the operator lowers the gripped puck into
-    /// the seat; the idle wait it was entered from cannot be that hold,
-    /// because it services no jog (jogging there would move the taught
-    /// pose the sequence starts from).
+    /// the seat, and it is separate from the idle wait — which services
+    /// jogs as well — because the idle trigger is what selects the mode,
+    /// so probing on it would probe before the mode was known.
     ///
     /// `CurrentStep` is untouched, and the arm is left where the probe
     /// started rather than lifted clear: this
@@ -855,7 +910,11 @@ impl<'a> Sequencer<'a> {
         log::info("  The arm will push up to the configured abort force. If the puck is");
         log::info("  not in the seat, or the fingers are empty, stop here.");
         log::info("========================================");
-        self.wait_for_trigger(true);
+        // No apply target: this mode is entered mid-run with the puck
+        // already in the fingers, from wherever the operator carried it,
+        // so which seat the arm is over is not something the daemon
+        // knows here.
+        self.wait_for_trigger(None);
         let soft = self.seat_probe_here(self.config.probe.bore.seat_probe())?;
         log::info(
             "Nothing was written. The arm is back at the pose the probe \
@@ -1821,12 +1880,13 @@ impl<'a> Sequencer<'a> {
     /// Jog-enabled hold so the operator can bring the tag into view before
     /// anything moves on its own. Returns on the next trigger.
     ///
-    /// The idle wait this mode was entered from runs with jog disabled —
-    /// the arm sits at a taught standby pose there and jogging it would
-    /// move the sequence's own start point. So the aiming happens here,
-    /// after the mode is known, exactly as the other two calibration
-    /// modes hold for jogging mid-sequence. Two triggers total: the first
-    /// selects the mode, the second commits to the capture.
+    /// The aiming happens here and not in the idle wait, which services
+    /// jogs too: the capture has to start from a pose the operator has
+    /// watched the detector solve the tag from, and the idle wait cannot
+    /// be that — it is where every mode is selected, so committing on
+    /// its trigger would commit before the mode was known. Two triggers
+    /// total: the first selects the mode, the second commits to the
+    /// capture.
     ///
     /// The live detection readout is the point of doing this with the
     /// detector already running: "the tag is on screen" and "the detector
@@ -1838,6 +1898,7 @@ impl<'a> Sequencer<'a> {
         log::info("  Use JogX/Y/Z + JogStep to move the TCP");
         log::info("  Set Trigger=1 to start the capture from where the arm is");
         log::info("========================================");
+        self.jog_hold(None);
         let mut next_probe = std::time::Instant::now();
         loop {
             if self.epics.read_trigger() > 0 {
@@ -1846,7 +1907,7 @@ impl<'a> Sequencer<'a> {
                 }
                 return;
             }
-            self.process_jog();
+            self.service_hold();
             if std::time::Instant::now() >= next_probe {
                 next_probe = std::time::Instant::now() + HANDEYE_AIM_PROBE;
                 match detector.detect() {
@@ -2101,16 +2162,29 @@ impl<'a> Sequencer<'a> {
         Ok(Some(path))
     }
 
-    fn calibration_hold(&mut self, banner: &str) {
+    /// The jog hold both offset-calibration modes end their outbound
+    /// half in. `seat` is the one the trims land on when the operator
+    /// presses `Robot:Jog:Apply` — the well the puck came out of for
+    /// holder calibration, the stage bore for the other.
+    ///
+    /// The hold is above the seat rather than in it, and that is what
+    /// makes the apply exact rather than approximate: above is the seat
+    /// translated along the tool's own y, so the tool frame the jog adds
+    /// along is the seat's frame, not a rotated one.
+    fn calibration_hold(&mut self, banner: &str, seat: Seat) {
         log::info("========================================");
         log::info(banner);
         log::info("  Use JogX/Y/Z PVs to adjust TCP position");
+        log::info(&format!(
+            "  Set Jog:Apply=1 to write the jog total into {}'s trims",
+            seat.label()
+        ));
         log::info("  Set Trigger=1 to return sample");
         log::info("========================================");
         // The hold's StartStep read is discarded: the return phase keeps
         // the original trigger's start_from_step for its skip logic, as
         // the C++ did.
-        let _ = self.wait_for_trigger(true);
+        let _ = self.wait_for_trigger(Some(seat));
     }
 
     // ---- vision correction ---------------------------------------------
@@ -2471,14 +2545,20 @@ impl<'a> Sequencer<'a> {
     // ---- PV wait loops -------------------------------------------------
 
     /// Blocks until `Trigger` goes non-zero, resets it, and returns the
-    /// `StartStep` value. The idle loop services gripper commands (and
-    /// jogs, during calibration holds) exactly like the C++ idle
-    /// callbacks. RTDE output is paused for the duration — the wait is
-    /// unbounded and nobody reads the stream.
-    fn wait_for_trigger(&mut self, allow_jog: bool) -> i32 {
+    /// `StartStep` value. The loop services gripper commands and jogs
+    /// exactly like the C++ idle callbacks. RTDE output is paused for
+    /// the duration — the wait is unbounded and nobody reads the stream.
+    ///
+    /// `apply_to` is the seat this wait stands at, and `None` at the
+    /// idle wait: the arm is at the taught standby there, which no
+    /// seat's trims move. Jogging from it is still serviced and still
+    /// safe — every run opens by planning back to that same standby, so
+    /// a jog at idle is undone by the next trigger.
+    fn wait_for_trigger(&mut self, apply_to: Option<Seat>) -> i32 {
         log::info("========================================");
         log::info("Waiting for EPICS trigger...");
         log::info("========================================");
+        self.jog_hold(apply_to);
         loop {
             let value = self.epics.read_trigger();
             if value > 0 {
@@ -2495,9 +2575,7 @@ impl<'a> Sequencer<'a> {
                 log::warn("Error reading trigger PV, retrying...");
             }
             self.poll_gripper_cmd();
-            if allow_jog {
-                self.process_jog();
-            }
+            self.service_hold();
             self.gripper.update_rbv(&self.epics);
             std::thread::sleep(POLL);
         }
@@ -2520,6 +2598,10 @@ impl<'a> Sequencer<'a> {
         log::info(&format!(
             "PAUSED at step {current_step} - change PauseStep to resume, or Wait=2 to stop here"
         ));
+        // No seat: the pause lands wherever `PauseStep` names, which is
+        // as often a standby or a lift as a seat. Jogging works, an
+        // apply has nowhere to go.
+        self.jog_hold(None);
         loop {
             // Only the literal 2 reads as Skip; 1, anything else, and a
             // failed read all answer Continue, so a dropped CA read
@@ -2536,6 +2618,7 @@ impl<'a> Sequencer<'a> {
                 ));
                 return Ok(());
             }
+            self.service_hold();
             std::thread::sleep(POLL);
         }
     }
@@ -2545,6 +2628,9 @@ impl<'a> Sequencer<'a> {
         log::info("Waiting for measurement to complete...");
         log::info("  Wait PV: 0=keep waiting, 1=continue, 2=skip remaining");
         log::info("========================================");
+        // The arm stands at the stage standby through this wait, not at
+        // a seat, so jogging is serviced and an apply is refused.
+        self.jog_hold(None);
         loop {
             match self.epics.read_wait() {
                 WaitStatus::Continue => {
@@ -2555,7 +2641,10 @@ impl<'a> Sequencer<'a> {
                     log::info("Skip requested, aborting remaining steps...");
                     return WaitStatus::Skip;
                 }
-                WaitStatus::Waiting => std::thread::sleep(POLL),
+                WaitStatus::Waiting => {
+                    self.service_hold();
+                    std::thread::sleep(POLL);
+                }
             }
         }
     }
@@ -2592,25 +2681,120 @@ impl<'a> Sequencer<'a> {
         }
     }
 
-    /// Services one jog request during a calibration hold. Jog failure is
-    /// logged and swallowed (the hold continues), as in the C++.
+    /// What the daemon services while it is standing still: a jog, and
+    /// the apply that commits the jogs so far.
+    ///
+    /// Every wait loop calls this, so "does this hold service jogs" is
+    /// no longer a question each loop answers for itself. The states the
+    /// daemon can serve a jog from are exactly the ones where it is not
+    /// already moving, and an operator has to be able to move the arm in
+    /// whichever of them they find it in.
+    fn service_hold(&mut self) {
+        self.process_jog();
+        self.process_jog_apply();
+    }
+
+    /// Points the accumulator at the seat this wait stands at and drops
+    /// any apply request that arrived while the arm was moving — a press
+    /// made mid-trajectory is not a request about the pose the arm ends
+    /// at, and latching it would write the next hold's target.
+    fn jog_hold(&mut self, seat: Option<Seat>) {
+        self.jog.seat = seat;
+        let _ = self.epics.take_jog_apply();
+        self.publish_jog();
+    }
+
+    /// Clears the accumulator. Called at every run start: the first
+    /// steps move to taught poses, which undoes whatever a jog added, so
+    /// carrying a total across one would be a lie.
+    fn jog_zero(&mut self) {
+        self.jog.mm = [0.0; 3];
+        self.publish_jog();
+    }
+
+    fn publish_jog(&self) {
+        let target = self.jog.seat.map(Seat::label).unwrap_or_default();
+        self.epics.publish_jog_total(self.jog.mm, &target);
+    }
+
+    /// Services one jog request. Jog failure is logged and swallowed
+    /// (the wait continues), as in the C++.
+    ///
+    /// The total only grows on success. A jog that failed may still have
+    /// moved the arm part way, but by how far is exactly what the error
+    /// does not say, and an apply must not write a number nobody
+    /// measured.
     fn process_jog(&mut self) {
         let (jog_x, jog_y, jog_z) = self.epics.read_jog_request();
         if jog_x == 0 && jog_y == 0 && jog_z == 0 {
             return;
         }
         let step_mm = self.epics.read_jog_step_mm();
-        let result = self.motion.jog(
+        let d = [
             f64::from(jog_x) * step_mm,
             f64::from(jog_y) * step_mm,
             f64::from(jog_z) * step_mm,
-            self.config.sequence.jog_velocity_scale,
-        );
+        ];
+        let result = self
+            .motion
+            .jog(d[0], d[1], d[2], self.config.sequence.jog_velocity_scale);
         match result {
-            Ok(()) => log::info("TCP Jog completed successfully"),
+            Ok(()) => {
+                for (total, step) in self.jog.mm.iter_mut().zip(d) {
+                    *total += step;
+                }
+                let [x, y, z] = self.jog.mm;
+                log::info(&format!(
+                    "TCP Jog completed successfully; jogged {x:+.3}, {y:+.3}, {z:+.3} mm \
+                     in tool x, y, z since the run started"
+                ));
+                self.publish_jog();
+            }
             Err(e) => log::error(&format!("TCP Jog failed: {e}")),
         }
         // Back to the hold loop's no-reader state.
+    }
+
+    /// Services a pending `Robot:Jog:Apply`: adds the accumulated jog to
+    /// the three trim slots of the seat this wait stands at, and zeroes
+    /// the accumulator so a second press cannot write the same
+    /// millimetres twice.
+    ///
+    /// The run's already-computed waypoints are deliberately left alone.
+    /// The arm is standing where the jog put it and the return steps
+    /// take the sample back to the seat they picked it from; the trim
+    /// takes effect at the next trigger, which reloads the file — the
+    /// same contract as an operator editing the table in the GUI.
+    fn process_jog_apply(&mut self) {
+        if !self.epics.take_jog_apply() {
+            return;
+        }
+        let Some(seat) = self.jog.seat else {
+            log::warn(
+                "Jog Apply ignored: the arm is not standing at a seat here. The trims move \
+                 a seat's on_position, so apply from a calibration hold.",
+            );
+            return;
+        };
+        let deltas = jog_apply_deltas(self.jog.mm);
+        if deltas.iter().all(Option::is_none) {
+            log::warn("Jog Apply ignored: nothing has been jogged since the last apply");
+            return;
+        }
+        match seat.persist(&self.config.sequence.waypoints_yaml, deltas) {
+            Ok(lines) => {
+                for line in lines {
+                    log::info(&format!("  jog apply: {line}"));
+                }
+                log::info(&format!(
+                    "Jog Apply: {} trims updated from the jog total; \
+                     the next trigger reloads them",
+                    seat.label()
+                ));
+                self.jog_zero();
+            }
+            Err(e) => log::error(&format!("Jog Apply failed, nothing written: {e}")),
+        }
     }
 
     // ---- waypoint computation ------------------------------------------
@@ -2838,6 +3022,29 @@ mod tests {
         assert_eq!(
             NULL_AXES[1], "tool y (depth)",
             "the disabled slot is the one the doc argues about"
+        );
+    }
+
+    /// A jog total is a trim in the units the file wants and nothing
+    /// else: mm to metres, one slot per axis that moved. The boundary
+    /// worth pinning is the untouched axis — it has to arrive as `None`
+    /// so `persist_trims` leaves that line alone, not as `Some(0.0)`
+    /// which rewrites it.
+    #[test]
+    fn a_jog_total_becomes_the_trims_of_the_axes_that_moved() {
+        assert_eq!(
+            jog_apply_deltas([0.3, 0.0, -0.25]),
+            [Some(0.0003), None, Some(-0.00025)]
+        );
+        assert_eq!(
+            jog_apply_deltas([0.0; 3]),
+            [None; 3],
+            "an untouched arm writes nothing at all"
+        );
+        assert_eq!(
+            jog_apply_deltas([JOG_APPLY_MIN_MM / 2.0; 3]),
+            [None; 3],
+            "half of the smallest move is not a move"
         );
     }
 
