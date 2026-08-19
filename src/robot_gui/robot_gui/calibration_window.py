@@ -6,6 +6,10 @@ import yaml
 from silx.gui import qt
 from silx.gui.widgets.WaitingPushButton import WaitingPushButton
 
+#: Seats on the rack. Every holder_multi_* list is this long, holder N at
+#: index N-1 -- holder 1 included, so trimming it moves it alone.
+HOLDERS = 10
+
 
 class CoordinateView2D(qt.QWidget):
     """2D visualization of TCP coordinate frame (End-Effector Local Frame).
@@ -429,7 +433,9 @@ class OffsetTableWidget(qt.QWidget):
         """)
 
         # Rows: Sample Holder, Holder 1, Holder 2-10 (multi offsets)
-        row_labels = ["Sample Holder", "Holder 1 (base)"] + [f"Holder {i} (add)" for i in range(2, 11)]
+        # "Rack" is the rack-wide base, not a seat: it used to be the
+        # Holder 1 row, so trimming holder 1 moved all ten holders.
+        row_labels = ["Sample Holder", "Rack (base)"] + [f"Holder {i}" for i in range(1, 11)]
         self.table.setRowCount(len(row_labels))
 
         for row, label in enumerate(row_labels):
@@ -496,23 +502,23 @@ class OffsetTableWidget(qt.QWidget):
         self._set_cell_value(0, 2, params.get('sample_holder_on_position_y_offset', 0) * 1000)
         self._set_cell_value(0, 3, params.get('sample_holder_on_position_z_offset', 0) * 1000)
 
-        # Holder 1 (row 1)
-        self._set_cell_value(1, 1, params.get('holder1_on_position_x_offset', 0) * 1000)
-        self._set_cell_value(1, 2, params.get('holder1_on_position_y_offset', 0) * 1000)
-        self._set_cell_value(1, 3, params.get('holder1_on_position_z_offset', 0) * 1000)
+        # Rack base (row 1)
+        self._set_cell_value(1, 1, params.get('holder_rack_x_offset', 0) * 1000)
+        self._set_cell_value(1, 2, params.get('holder_rack_y_offset', 0) * 1000)
+        self._set_cell_value(1, 3, params.get('holder_rack_z_offset', 0) * 1000)
 
-        # Tilt: bases on the Holder 1 row, in degrees (no mm scaling)
+        # Tilt: bases on the Rack row, in degrees (no mm scaling)
         self._set_cell_value(1, 4, params.get('holder_on_position_tilt_x_deg', 0))
         self._set_cell_value(1, 5, params.get('holder_on_position_tilt_z_deg', 0))
 
-        # Holder 2-10 (rows 2-10)
-        x_offsets = params.get('holder_multi_x_offsets', [0] * 9)
-        y_offsets = params.get('holder_multi_y_offsets', [0] * 9)
-        z_offsets = params.get('holder_multi_z_offsets', [0] * 9)
-        tilts = params.get('holder_multi_tilt_x_deg', [0] * 9)
-        tilts_z = params.get('holder_multi_tilt_z_deg', [0] * 9)
+        # Holder 1-10 (rows 2-11), holder N at index N-1
+        x_offsets = params.get('holder_multi_x_offsets', [0] * HOLDERS)
+        y_offsets = params.get('holder_multi_y_offsets', [0] * HOLDERS)
+        z_offsets = params.get('holder_multi_z_offsets', [0] * HOLDERS)
+        tilts = params.get('holder_multi_tilt_x_deg', [0] * HOLDERS)
+        tilts_z = params.get('holder_multi_tilt_z_deg', [0] * HOLDERS)
 
-        for i in range(9):
+        for i in range(HOLDERS):
             row = i + 2
             if i < len(x_offsets):
                 self._set_cell_value(row, 1, x_offsets[i] * 1000)
@@ -575,9 +581,9 @@ class OffsetTableWidget(qt.QWidget):
             ('sample_holder_on_position_x_offset', 0, 1, 1e-3),
             ('sample_holder_on_position_y_offset', 0, 2, 1e-3),
             ('sample_holder_on_position_z_offset', 0, 3, 1e-3),
-            ('holder1_on_position_x_offset', 1, 1, 1e-3),
-            ('holder1_on_position_y_offset', 1, 2, 1e-3),
-            ('holder1_on_position_z_offset', 1, 3, 1e-3),
+            ('holder_rack_x_offset', 1, 1, 1e-3),
+            ('holder_rack_y_offset', 1, 2, 1e-3),
+            ('holder_rack_z_offset', 1, 3, 1e-3),
             # Tilt bases are degrees, not mm: no scaling.
             ('holder_on_position_tilt_x_deg', 1, 4, 1.0),
             ('holder_on_position_tilt_z_deg', 1, 5, 1.0),
@@ -593,7 +599,7 @@ class OffsetTableWidget(qt.QWidget):
             ('holder_multi_tilt_x_deg', 4, 1.0),
             ('holder_multi_tilt_z_deg', 5, 1.0),
         ]
-        for i in range(9):
+        for i in range(HOLDERS):
             row = i + 2
             for key, col, scale in list_fields:
                 if self._cell_edited(row, col):
@@ -615,8 +621,8 @@ class OffsetTableWidget(qt.QWidget):
             if kind == 'scalar':
                 params[key] = value
             else:
-                lst = list(params.get(key, [0.0] * 9))
-                while len(lst) < 9:
+                lst = list(params.get(key, [0.0] * HOLDERS))
+                while len(lst) < HOLDERS:
                     lst.append(0.0)
                 lst[index] = value
                 params[key] = lst
@@ -1344,18 +1350,21 @@ class CalibrationWindow(qt.QDialog):
     def _get_holder_offset_from_yaml(self, holder_num=1):
         """Get holder offset from loaded YAML (in mm)."""
         params = self.yaml_editor._params
-        if holder_num == 1:
-            x = params.get('holder1_on_position_x_offset', 0) * 1000
-            y = params.get('holder1_on_position_y_offset', 0) * 1000
-            z = params.get('holder1_on_position_z_offset', 0) * 1000
-        else:
-            # Holder 2~10: base from holder1 + multi offsets
-            x_offsets = params.get('holder_multi_x_offsets', [0] * 9)
-            z_offsets = params.get('holder_multi_z_offsets', [0] * 9)
-            idx = holder_num - 2  # holder 2 -> index 0
-            x = x_offsets[idx] * 1000 if idx < len(x_offsets) else 0
-            y = params.get('holder1_on_position_y_offset', 0) * 1000  # Y from holder1
-            z = z_offsets[idx] * 1000 if idx < len(z_offsets) else 0
+        # The rack base plus this holder's own trim; holder 1 is a seat
+        # like the other nine and has its own entry at index 0.
+        x_offsets = params.get('holder_multi_x_offsets', [0] * HOLDERS)
+        y_offsets = params.get('holder_multi_y_offsets', [0] * HOLDERS)
+        z_offsets = params.get('holder_multi_z_offsets', [0] * HOLDERS)
+        idx = holder_num - 1
+        x = params.get('holder_rack_x_offset', 0) * 1000
+        y = params.get('holder_rack_y_offset', 0) * 1000
+        z = params.get('holder_rack_z_offset', 0) * 1000
+        if 0 <= idx < len(x_offsets):
+            x += x_offsets[idx] * 1000
+        if 0 <= idx < len(y_offsets):
+            y += y_offsets[idx] * 1000
+        if 0 <= idx < len(z_offsets):
+            z += z_offsets[idx] * 1000
         return (x, y, z)
 
     def _get_sample_holder_offset_from_yaml(self):

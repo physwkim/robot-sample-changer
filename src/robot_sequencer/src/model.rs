@@ -474,11 +474,7 @@ mod tests {
         w: &WaypointData,
     ) -> Vec<(String, JointMap, JointMap, JointMap)> {
         let taught = |v: &[f64]| -> JointMap { WaypointData::arm_joints(v).into_iter().collect() };
-        let ho = [
-            w.holder1_on_x_offset,
-            w.holder1_on_y_offset,
-            w.holder1_on_z_offset,
-        ];
+        let ho = [w.rack_x_offset, w.rack_y_offset, w.rack_z_offset];
         let sho = [
             w.sample_holder_on_x_offset,
             w.sample_holder_on_y_offset,
@@ -515,8 +511,8 @@ mod tests {
         for holder in [1, 3, 10] {
             let mut y = f64::from(holder - 1) * config.sequence.holder_offset;
             let (mut x, mut z) = (0.0, 0.0);
-            if (2..=10).contains(&holder) {
-                let i = (holder - 2) as usize;
+            if (1..=10).contains(&holder) {
+                let i = (holder - 1) as usize;
                 x = w.holder_multi_x_offsets.get(i).copied().unwrap_or(0.0);
                 y += w.holder_multi_y_offsets.get(i).copied().unwrap_or(0.0);
                 z = w.holder_multi_z_offsets.get(i).copied().unwrap_or(0.0);

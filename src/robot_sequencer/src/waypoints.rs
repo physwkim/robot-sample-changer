@@ -25,6 +25,12 @@ pub const WAYPOINT_JOINT_ORDER: [&str; 6] = [
     "shoulder_lift_joint",
 ];
 
+/// Seats on the rack. Every per-holder list is exactly this long and
+/// holder N lives at index N-1 — holder 1 included, which is the whole
+/// point: it is a seat like the other nine, not the rack's origin.
+pub const HOLDERS: usize = 10;
+const HOLDERS_I32: i32 = HOLDERS as i32;
+
 #[derive(Debug, Clone)]
 pub struct WaypointData {
     pub holder1_standby: Vec<f64>,
@@ -59,26 +65,33 @@ pub struct WaypointData {
     /// seat lean; spin about the puck's own axis (tool y) is not a
     /// lean and stays with [`Self::wrist3_rotation_offset`].
     pub holder_on_tilt_z_deg: f64,
-    pub holder1_on_x_offset: f64,
-    pub holder1_on_y_offset: f64,
-    pub holder1_on_z_offset: f64,
+    /// The rack's own base correction, m, applied to BOTH holder poses
+    /// before the per-holder step and before the rack pitch/roll.
+    ///
+    /// This is rack geometry, not holder 1's seat: holder 1 has its own
+    /// entry in the multi lists like every other holder. The two used to
+    /// be the same number, which meant trimming holder 1 walked all ten
+    /// seats sideways.
+    pub rack_x_offset: f64,
+    pub rack_y_offset: f64,
+    pub rack_z_offset: f64,
     pub sample_holder_on_x_offset: f64,
     pub sample_holder_on_y_offset: f64,
     pub sample_holder_on_z_offset: f64,
     pub holder_multi_x_offsets: Vec<f64>,
     /// Per-holder insertion-depth trim, tool-frame y (base −z), meters,
-    /// holder N at index N-2: positive is deeper. The rail step itself is
+    /// holder N at index N-1: positive is deeper. The rail step itself is
     /// exact 30 mm; this carries each seat's own depth error, which the
     /// x/z trims cannot reach.
     pub holder_multi_y_offsets: Vec<f64>,
     pub holder_multi_z_offsets: Vec<f64>,
     /// Per-holder trim added to [`Self::holder_on_tilt_x_deg`], deg,
-    /// holder N at index N-2 like the multi offsets. Each holder's seat
+    /// holder N at index N-1 like the multi offsets. Each holder's seat
     /// leans by its own manufacturing error; the shared angle carries
     /// what the puck geometry needs and this carries the rest.
     pub holder_multi_tilt_x_deg: Vec<f64>,
     /// Per-holder trim added to [`Self::holder_on_tilt_z_deg`], deg,
-    /// holder N at index N-2, same shape as the x list.
+    /// holder N at index N-1, same shape as the x list.
     pub holder_multi_tilt_z_deg: Vec<f64>,
     pub wrist3_rotation_offset: f64,
 }
@@ -89,9 +102,9 @@ impl WaypointData {
     /// and is applied to the base waypoints; this is only what that
     /// holder's seat adds on top.
     pub fn holder_tilt_x_trim_deg(&self, holder: i32) -> f64 {
-        if (2..=10).contains(&holder) {
+        if (1..=HOLDERS_I32).contains(&holder) {
             self.holder_multi_tilt_x_deg
-                .get((holder - 2) as usize)
+                .get((holder - 1) as usize)
                 .copied()
                 .unwrap_or(0.0)
         } else {
@@ -101,9 +114,9 @@ impl WaypointData {
 
     /// The tool-z twin of [`Self::holder_tilt_x_trim_deg`].
     pub fn holder_tilt_z_trim_deg(&self, holder: i32) -> f64 {
-        if (2..=10).contains(&holder) {
+        if (1..=HOLDERS_I32).contains(&holder) {
             self.holder_multi_tilt_z_deg
-                .get((holder - 2) as usize)
+                .get((holder - 1) as usize)
                 .copied()
                 .unwrap_or(0.0)
         } else {
@@ -116,44 +129,6 @@ impl WaypointData {
 /// enough that the file stays readable.
 fn round7(v: f64) -> f64 {
     (v * 1e7).round() / 1e7
-}
-
-/// Replaces the value of a top-level scalar `key:` line, preserving the
-/// line's indentation and everything else in the file. Returns the text
-/// with `(old, new)` values, `new = round7(old + delta)`.
-fn edit_scalar_line(
-    text: &str,
-    key: &str,
-    delta: f64,
-) -> Result<(String, f64, f64), SequencerError> {
-    let prefix = format!("{key}:");
-    let mut hit = None;
-    let mut lines: Vec<String> = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix(&prefix) {
-            if hit.is_some() {
-                return Err(SequencerError(format!(
-                    "waypoints: '{key}' appears more than once; refusing to edit"
-                )));
-            }
-            let old: f64 = rest.trim().parse().map_err(|e| {
-                SequencerError(format!("waypoints: cannot parse '{key}' value: {e}"))
-            })?;
-            let new = round7(old + delta);
-            let indent = &line[..line.len() - trimmed.len()];
-            lines.push(format!("{indent}{key}: {new:?}"));
-            hit = Some((old, new));
-            continue;
-        }
-        lines.push(line.to_string());
-    }
-    let (old, new) = hit.ok_or_else(|| {
-        SequencerError(format!(
-            "waypoints: key '{key}' not found; refusing to edit"
-        ))
-    })?;
-    Ok((lines.join("\n") + "\n", old, new))
 }
 
 /// Replaces one entry of a top-level flow-list `key: [..]`, consuming a
@@ -244,7 +219,7 @@ pub fn persist_holder_trims(
     dy_m: Option<f64>,
     dz_m: Option<f64>,
 ) -> Result<Vec<String>, SequencerError> {
-    if !(1..=10).contains(&holder) {
+    if !(1..=HOLDERS_I32).contains(&holder) {
         return Err(SequencerError(format!(
             "waypoints: holder {holder} has no trim slots"
         )));
@@ -252,61 +227,27 @@ pub fn persist_holder_trims(
     let mut text = std::fs::read_to_string(path)
         .map_err(|e| SequencerError(format!("cannot read waypoints {}: {e}", path.display())))?;
     let mut report = Vec::new();
-    // (delta, scalar key for holder 1, list key for holders 2-10,
-    //  read-back accessor)
+    // (axis, delta, list key, read-back accessor). One shape for all ten
+    // holders: holder 1 used to be written to a scalar that every other
+    // holder also read, so mapping it moved the whole rack.
     type ReadBack = fn(&WaypointData, usize) -> Option<f64>;
-    let slots: [(&str, Option<f64>, &str, &str, ReadBack); 3] = [
-        (
-            "x",
-            dx_m,
-            "holder1_on_position_x_offset",
-            "holder_multi_x_offsets",
-            |w, i| {
-                if i == usize::MAX {
-                    Some(w.holder1_on_x_offset)
-                } else {
-                    w.holder_multi_x_offsets.get(i).copied()
-                }
-            },
-        ),
-        (
-            "y",
-            dy_m,
-            "holder1_on_position_y_offset",
-            "holder_multi_y_offsets",
-            |w, i| {
-                if i == usize::MAX {
-                    Some(w.holder1_on_y_offset)
-                } else {
-                    w.holder_multi_y_offsets.get(i).copied()
-                }
-            },
-        ),
-        (
-            "z",
-            dz_m,
-            "holder1_on_position_z_offset",
-            "holder_multi_z_offsets",
-            |w, i| {
-                if i == usize::MAX {
-                    Some(w.holder1_on_z_offset)
-                } else {
-                    w.holder_multi_z_offsets.get(i).copied()
-                }
-            },
-        ),
+    let slots: [(&str, Option<f64>, &str, ReadBack); 3] = [
+        ("x", dx_m, "holder_multi_x_offsets", |w, i| {
+            w.holder_multi_x_offsets.get(i).copied()
+        }),
+        ("y", dy_m, "holder_multi_y_offsets", |w, i| {
+            w.holder_multi_y_offsets.get(i).copied()
+        }),
+        ("z", dz_m, "holder_multi_z_offsets", |w, i| {
+            w.holder_multi_z_offsets.get(i).copied()
+        }),
     ];
     let mut checks: Vec<(String, usize, f64, ReadBack)> = Vec::new();
-    for (axis, delta, scalar_key, list_key, read_back) in slots {
+    for (axis, delta, list_key, read_back) in slots {
         let Some(delta) = delta else { continue };
-        let (new_text, old, new, slot_name, idx) = if holder == 1 {
-            let (t, old, new) = edit_scalar_line(&text, scalar_key, delta)?;
-            (t, old, new, scalar_key.to_string(), usize::MAX)
-        } else {
-            let idx = (holder - 2) as usize;
-            let (t, old, new) = edit_list_entry(&text, list_key, idx, delta)?;
-            (t, old, new, format!("{list_key}[{idx}]"), idx)
-        };
+        let idx = (holder - 1) as usize;
+        let (new_text, old, new) = edit_list_entry(&text, list_key, idx, delta)?;
+        let slot_name = format!("{list_key}[{idx}]");
         text = new_text;
         report.push(format!(
             "holder {holder} {axis} trim ({slot_name}): {old:?} -> {new:?} ({:+.3} mm)",
@@ -355,11 +296,33 @@ fn vec_at(params: &Value, key: &str) -> Result<Vec<f64>, SequencerError> {
         .collect()
 }
 
-fn vec_at_or(params: &Value, key: &str, default_len: usize) -> Vec<f64> {
-    match params.get(key).and_then(Value::as_sequence) {
-        Some(list) => list.iter().filter_map(Value::as_f64).collect(),
-        None => vec![0.0; default_len],
+/// One per-holder list, holder N at index N-1.
+///
+/// Length is checked rather than padded. These lists used to run from
+/// holder 2 and be read with `get(N-2).unwrap_or(0.0)`, so a file still
+/// written that way would now hand holder 1 the trim taught for holder 2
+/// and every seat after it the one belonging to its neighbour — nine
+/// wrong poses driven into a rack, with nothing said. Absent is fine and
+/// means untrimmed; present and short is a file from before the move.
+fn seats_at(params: &Value, key: &str) -> Result<Vec<f64>, SequencerError> {
+    let Some(list) = params.get(key).and_then(Value::as_sequence) else {
+        return Ok(vec![0.0; HOLDERS]);
+    };
+    if list.len() != HOLDERS {
+        return Err(SequencerError(format!(
+            "waypoints: '{key}' has {} entries, expected {HOLDERS} (holder N at index N-1). \
+             A {} entry list is from before holder 1 had a seat of its own; give it a \
+             leading entry for holder 1 and move the rack-wide part to holder_rack_*_offset",
+            list.len(),
+            HOLDERS - 1
+        )));
     }
+    list.iter()
+        .map(|v| {
+            v.as_f64()
+                .ok_or_else(|| SequencerError(format!("waypoints: non-number in '{key}'")))
+        })
+        .collect()
 }
 
 impl WaypointData {
@@ -376,6 +339,21 @@ impl WaypointData {
             .or_else(|| root.get("ros__parameters"))
             .unwrap_or(&root);
 
+        // The rack base used to be spelled holder1_on_position_*_offset
+        // and doubled as holder 1's own trim. Reading a file that still
+        // spells it that way would silently zero the rack base — every
+        // seat off by the same tenths of a millimetre — so say so.
+        for axis in ["x", "y", "z"] {
+            let old_key = format!("holder1_on_position_{axis}_offset");
+            if params.get(old_key.as_str()).is_some() {
+                return Err(SequencerError(format!(
+                    "waypoints: '{old_key}' is the rack base under its old name, which also \
+                     served as holder 1's own trim; rename it to 'holder_rack_{axis}_offset' \
+                     and give holder 1 its own leading entry in the holder_multi_* lists"
+                )));
+            }
+        }
+
         let data = Self {
             holder1_standby: vec_at(params, "holder1_standby")?,
             holder1_on_position: vec_at(params, "holder1_on_position")?,
@@ -386,17 +364,17 @@ impl WaypointData {
             holder_on_lift: f64_at(params, "holder_on_position_lift", 0.0),
             holder_on_tilt_x_deg: f64_at(params, "holder_on_position_tilt_x_deg", 0.0),
             holder_on_tilt_z_deg: f64_at(params, "holder_on_position_tilt_z_deg", 0.0),
-            holder1_on_x_offset: f64_at(params, "holder1_on_position_x_offset", 0.0),
-            holder1_on_y_offset: f64_at(params, "holder1_on_position_y_offset", 0.0),
-            holder1_on_z_offset: f64_at(params, "holder1_on_position_z_offset", 0.0),
+            rack_x_offset: f64_at(params, "holder_rack_x_offset", 0.0),
+            rack_y_offset: f64_at(params, "holder_rack_y_offset", 0.0),
+            rack_z_offset: f64_at(params, "holder_rack_z_offset", 0.0),
             sample_holder_on_x_offset: f64_at(params, "sample_holder_on_position_x_offset", 0.0),
             sample_holder_on_y_offset: f64_at(params, "sample_holder_on_position_y_offset", 0.0),
             sample_holder_on_z_offset: f64_at(params, "sample_holder_on_position_z_offset", 0.0),
-            holder_multi_x_offsets: vec_at_or(params, "holder_multi_x_offsets", 9),
-            holder_multi_y_offsets: vec_at_or(params, "holder_multi_y_offsets", 9),
-            holder_multi_z_offsets: vec_at_or(params, "holder_multi_z_offsets", 9),
-            holder_multi_tilt_x_deg: vec_at_or(params, "holder_multi_tilt_x_deg", 9),
-            holder_multi_tilt_z_deg: vec_at_or(params, "holder_multi_tilt_z_deg", 9),
+            holder_multi_x_offsets: seats_at(params, "holder_multi_x_offsets")?,
+            holder_multi_y_offsets: seats_at(params, "holder_multi_y_offsets")?,
+            holder_multi_z_offsets: seats_at(params, "holder_multi_z_offsets")?,
+            holder_multi_tilt_x_deg: seats_at(params, "holder_multi_tilt_x_deg")?,
+            holder_multi_tilt_z_deg: seats_at(params, "holder_multi_tilt_z_deg")?,
             wrist3_rotation_offset: f64_at(params, "wrist3_rotation_offset", 0.0),
         };
 
@@ -441,13 +419,13 @@ mod tests {
         assert_eq!(data.holder1_standby.len(), 7);
         assert_eq!(data.above_y_offset, -0.005);
         assert_eq!(data.retreat_z_offset, -0.05);
-        assert_eq!(data.holder1_on_y_offset, 0.0005);
+        assert_eq!(data.rack_y_offset, 0.0005);
         assert_eq!(data.holder_on_lift, 0.00015);
         assert_eq!(data.holder_on_tilt_x_deg, 0.3);
-        assert_eq!(data.holder_multi_x_offsets.len(), 9);
-        assert_eq!(data.holder_multi_tilt_x_deg.len(), 9);
+        assert_eq!(data.holder_multi_x_offsets.len(), HOLDERS);
+        assert_eq!(data.holder_multi_tilt_x_deg.len(), HOLDERS);
         assert_eq!(data.holder_on_tilt_z_deg, 0.0);
-        assert_eq!(data.holder_multi_tilt_z_deg.len(), 9);
+        assert_eq!(data.holder_multi_tilt_z_deg.len(), HOLDERS);
         assert_eq!(data.holder_tilt_x_trim_deg(1), 0.0);
         assert_eq!(data.holder_tilt_z_trim_deg(2), 0.0);
         assert_eq!(data.wrist3_rotation_offset, 0.0);
@@ -466,14 +444,27 @@ mod tests {
         dst
     }
 
+    /// Holder 1 is a seat like the other nine: its trim lands in the
+    /// list at index 0 and the rack base it used to share does not move.
+    /// That sharing is what made a holder-1 trim walk all ten seats.
     #[test]
-    fn persist_edits_holder1_scalars_in_place() {
+    fn persist_edits_holder1_without_moving_the_rack() {
         let path = temp_copy("h1");
+        let before = WaypointData::load(&path).expect("load");
         let report = persist_holder_trims(&path, 1, Some(0.0001), None, None).expect("persist");
         assert_eq!(report.len(), 1, "{report:?}");
         let data = WaypointData::load(&path).expect("reload");
-        assert_eq!(data.holder1_on_x_offset, 0.0001);
-        assert_eq!(data.holder1_on_z_offset, -0.0003);
+        assert_eq!(
+            data.holder_multi_x_offsets[0],
+            round7(before.holder_multi_x_offsets[0] + 0.0001)
+        );
+        assert_eq!(data.rack_x_offset, before.rack_x_offset, "rack base held");
+        assert_eq!(data.rack_y_offset, before.rack_y_offset, "rack base held");
+        assert_eq!(data.rack_z_offset, before.rack_z_offset, "rack base held");
+        assert_eq!(
+            data.holder_multi_x_offsets[1], before.holder_multi_x_offsets[1],
+            "holder 2 untouched"
+        );
         let text = std::fs::read_to_string(&path).expect("read");
         assert!(text.contains("# Insertion-depth trim"), "comments survive");
         assert!(text.contains("holder_on_position_tilt_x_deg: 0.3"));
@@ -483,18 +474,34 @@ mod tests {
     #[test]
     fn persist_edits_a_wrapped_multi_list_entry() {
         let path = temp_copy("multi");
-        // holder 4 -> index 2; both slots at once. The z list wraps two
+        // holder 4 -> index 3; both slots at once. The z list wraps two
         // lines in the production file, which is the case this exercises.
+        let before = WaypointData::load(&path).expect("load");
         let report =
             persist_holder_trims(&path, 4, Some(-0.0005), None, Some(0.0002)).expect("persist");
         assert_eq!(report.len(), 2, "{report:?}");
         let data = WaypointData::load(&path).expect("reload");
-        assert_eq!(data.holder_multi_x_offsets[2], 0.001);
-        assert_eq!(data.holder_multi_z_offsets[2], 0.0002);
-        // neighbours untouched
-        assert_eq!(data.holder_multi_x_offsets[1], 0.0005);
-        assert_eq!(data.holder_multi_z_offsets[3], 0.0002);
-        assert_eq!(data.holder_multi_z_offsets[8], 0.00045);
+        assert_eq!(
+            data.holder_multi_x_offsets[3],
+            round7(before.holder_multi_x_offsets[3] - 0.0005)
+        );
+        assert_eq!(
+            data.holder_multi_z_offsets[3],
+            round7(before.holder_multi_z_offsets[3] + 0.0002)
+        );
+        // neighbours untouched, including the far end of the wrapped list
+        assert_eq!(
+            data.holder_multi_x_offsets[2],
+            before.holder_multi_x_offsets[2]
+        );
+        assert_eq!(
+            data.holder_multi_z_offsets[4],
+            before.holder_multi_z_offsets[4]
+        );
+        assert_eq!(
+            data.holder_multi_z_offsets[9],
+            before.holder_multi_z_offsets[9]
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -510,22 +517,22 @@ mod tests {
             persist_holder_trims(&path, 7, Some(0.0001), Some(-0.00002), None).expect("persist");
         assert_eq!(report.len(), 2, "{report:?}");
         let after = WaypointData::load(&path).expect("reload");
-        // Holder 7 -> index 5.
+        // Holder 7 -> index 6.
         assert_eq!(
-            after.holder_multi_y_offsets[5],
-            round7(before.holder_multi_y_offsets[5] - 0.00002)
+            after.holder_multi_y_offsets[6],
+            round7(before.holder_multi_y_offsets[6] - 0.00002)
         );
         assert_eq!(
-            after.holder_multi_x_offsets[5],
-            round7(before.holder_multi_x_offsets[5] + 0.0001)
+            after.holder_multi_x_offsets[6],
+            round7(before.holder_multi_x_offsets[6] + 0.0001)
         );
         // The axis that was not measured leaves its slot alone.
         assert_eq!(
-            after.holder_multi_z_offsets[5],
-            before.holder_multi_z_offsets[5]
+            after.holder_multi_z_offsets[6],
+            before.holder_multi_z_offsets[6]
         );
         assert_eq!(
-            after.holder_multi_y_offsets[4], before.holder_multi_y_offsets[4],
+            after.holder_multi_y_offsets[5], before.holder_multi_y_offsets[5],
             "neighbour untouched"
         );
         std::fs::remove_file(&path).ok();

@@ -2161,11 +2161,7 @@ impl<'a> Sequencer<'a> {
     fn compute_base_waypoints(&self, w: &WaypointData) -> Result<BaseWaypoints, SequencerError> {
         let taught =
             |values: &[f64]| -> JointMap { WaypointData::arm_joints(values).into_iter().collect() };
-        let holder_offsets = [
-            w.holder1_on_x_offset,
-            w.holder1_on_y_offset,
-            w.holder1_on_z_offset,
-        ];
+        let rack_offsets = [w.rack_x_offset, w.rack_y_offset, w.rack_z_offset];
         let sh_offsets = [
             w.sample_holder_on_x_offset,
             w.sample_holder_on_y_offset,
@@ -2174,13 +2170,13 @@ impl<'a> Sequencer<'a> {
 
         let holder_standby = self.model.apply_cartesian_offset(
             &taught(&w.holder1_standby),
-            holder_offsets,
+            rack_offsets,
             false,
             "holder1_standby",
         )?;
         let holder_on = self.model.apply_cartesian_offset(
             &taught(&w.holder1_on_position),
-            holder_offsets,
+            rack_offsets,
             false,
             "holder1_on_position",
         )?;
@@ -2251,8 +2247,8 @@ impl<'a> Sequencer<'a> {
         let mut y_offset = f64::from(holder_number - 1) * self.config.sequence.holder_offset;
         let mut x_offset = 0.0;
         let mut z_offset = 0.0;
-        if (2..=10).contains(&holder_number) {
-            let idx = (holder_number - 2) as usize;
+        if (1..=10).contains(&holder_number) {
+            let idx = (holder_number - 1) as usize;
             if let Some(x) = w.holder_multi_x_offsets.get(idx) {
                 x_offset = *x;
             }

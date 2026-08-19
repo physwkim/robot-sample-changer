@@ -209,6 +209,7 @@ mod tests {
     #[test]
     fn edits_scalar_and_wrapped_list_preserving_comments() {
         let path = temp_copy("mix");
+        let before = vec_at(&load(&path).expect("load"), "holder_multi_z_offsets", 10);
         apply_edits(
             &path,
             &[
@@ -219,9 +220,12 @@ mod tests {
         .expect("apply");
         let params = load(&path).expect("reload");
         assert_eq!(f64_at(&params, "holder_on_position_tilt_z_deg"), 0.1);
-        let z = vec_at(&params, "holder_multi_z_offsets", 9);
+        let z = vec_at(&params, "holder_multi_z_offsets", 10);
         assert_eq!(z[3], 0.00025);
-        assert_eq!(z[4], 0.00025);
+        // Read against what the file held, not a constant: these are live
+        // trims an operator edits, so an absolute expectation here is a
+        // fixture that goes stale rather than a property of the writer.
+        assert_eq!(z[4], before[4], "neighbour untouched");
         let text = std::fs::read_to_string(&path).expect("read");
         assert!(text.contains("# Insertion-depth trim"));
         std::fs::remove_file(&path).ok();

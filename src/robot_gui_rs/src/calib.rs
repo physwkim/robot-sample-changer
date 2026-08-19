@@ -10,23 +10,25 @@ use crate::pvs::robot;
 use crate::yamledit::{self, Slot};
 
 const COLS: usize = 5; // X mm, Y mm, Z mm, Tilt X deg, Tilt Z deg
-const ROWS: usize = 11; // stage + holders 1-10
+const ROWS: usize = 12; // stage + the rack base + holders 1-10
 
 /// Display-unit cell values (mm for 0-2, deg for 3-4); `None` = the
 /// parameter does not exist for that row (stage tilt).
 type Cells = [[Option<f64>; COLS]; ROWS];
 
 fn slot_for(row: usize, col: usize) -> Option<Slot> {
-    // Row 0 = stage (sample holder), row 1 = holder 1 + the shared tilt
-    // bases, rows 2-10 = holder N at list index N-2.
+    // Row 0 = stage (sample holder), row 1 = the rack's own base and
+    // lean, rows 2-11 = holder N at list index N-1. Holder 1 used to BE
+    // row 1, sharing its cells with the rack base, so trimming it moved
+    // every other seat by the same amount.
     match (row, col) {
         (0, 0) => Some(Slot::Scalar("sample_holder_on_position_x_offset")),
         (0, 1) => Some(Slot::Scalar("sample_holder_on_position_y_offset")),
         (0, 2) => Some(Slot::Scalar("sample_holder_on_position_z_offset")),
         (0, _) => None,
-        (1, 0) => Some(Slot::Scalar("holder1_on_position_x_offset")),
-        (1, 1) => Some(Slot::Scalar("holder1_on_position_y_offset")),
-        (1, 2) => Some(Slot::Scalar("holder1_on_position_z_offset")),
+        (1, 0) => Some(Slot::Scalar("holder_rack_x_offset")),
+        (1, 1) => Some(Slot::Scalar("holder_rack_y_offset")),
+        (1, 2) => Some(Slot::Scalar("holder_rack_z_offset")),
         (1, 3) => Some(Slot::Scalar("holder_on_position_tilt_x_deg")),
         (1, 4) => Some(Slot::Scalar("holder_on_position_tilt_z_deg")),
         (r, 0) => Some(Slot::List("holder_multi_x_offsets", r - 2)),
@@ -41,7 +43,8 @@ fn slot_for(row: usize, col: usize) -> Option<Slot> {
 fn row_name(row: usize) -> String {
     match row {
         0 => "Stage".to_string(),
-        n => format!("Holder {n}"),
+        1 => "Rack".to_string(),
+        n => format!("Holder {}", n - 1),
     }
 }
 
@@ -57,17 +60,17 @@ fn load_cells(path: &std::path::Path) -> Result<Cells, String> {
     cells[0][0] = Some(scalar("sample_holder_on_position_x_offset") * 1000.0);
     cells[0][1] = Some(scalar("sample_holder_on_position_y_offset") * 1000.0);
     cells[0][2] = Some(scalar("sample_holder_on_position_z_offset") * 1000.0);
-    cells[1][0] = Some(scalar("holder1_on_position_x_offset") * 1000.0);
-    cells[1][1] = Some(scalar("holder1_on_position_y_offset") * 1000.0);
-    cells[1][2] = Some(scalar("holder1_on_position_z_offset") * 1000.0);
+    cells[1][0] = Some(scalar("holder_rack_x_offset") * 1000.0);
+    cells[1][1] = Some(scalar("holder_rack_y_offset") * 1000.0);
+    cells[1][2] = Some(scalar("holder_rack_z_offset") * 1000.0);
     cells[1][3] = Some(scalar("holder_on_position_tilt_x_deg"));
     cells[1][4] = Some(scalar("holder_on_position_tilt_z_deg"));
     let lists = [
-        yamledit::vec_at(&p, "holder_multi_x_offsets", 9),
-        yamledit::vec_at(&p, "holder_multi_y_offsets", 9),
-        yamledit::vec_at(&p, "holder_multi_z_offsets", 9),
-        yamledit::vec_at(&p, "holder_multi_tilt_x_deg", 9),
-        yamledit::vec_at(&p, "holder_multi_tilt_z_deg", 9),
+        yamledit::vec_at(&p, "holder_multi_x_offsets", ROWS - 2),
+        yamledit::vec_at(&p, "holder_multi_y_offsets", ROWS - 2),
+        yamledit::vec_at(&p, "holder_multi_z_offsets", ROWS - 2),
+        yamledit::vec_at(&p, "holder_multi_tilt_x_deg", ROWS - 2),
+        yamledit::vec_at(&p, "holder_multi_tilt_z_deg", ROWS - 2),
     ];
     for row in 2..ROWS {
         for (col, list) in lists.iter().enumerate() {

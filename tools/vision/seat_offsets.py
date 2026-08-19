@@ -1,10 +1,11 @@
 """How far each holder's seat sits from its neighbours', in the tool frame.
 
-`sequence.rs:1389` places holder N by stepping `holder_offset` along the tool
-y axis and then adding `holder_multi_x_offsets[N-2]` / `holder_multi_z_offsets`
-— a table hand-taught one holder at a time. Holder 1 carries no entry, so it is
-the master the others are corrected towards, and what this measures is the
-residual still left after the table has been applied.
+`compute_run_waypoints` places holder N by stepping `holder_offset` along the
+tool y axis and then adding `holder_multi_x_offsets[N-1]` /
+`holder_multi_z_offsets` — a table hand-taught one holder at a time. Holder 1
+has its own entry like every other seat, and the rack-wide part lives in
+`holder_rack_*_offset`; what this measures is the residual still left after
+the table has been applied.
 
 **Only like against like.** A rack stop differs from another rack stop in two
 ways that have nothing to do with where the seat is: whether the seat holds a

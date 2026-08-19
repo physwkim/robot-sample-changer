@@ -10,27 +10,32 @@
       -1.6875322500811976, -2.418257852593893, -1.8540196418762207, -1.9946166477599085]
     above_y_offset: -0.005
     retreat_z_offset: -0.05
-    holder1_on_position_x_offset: 0.0
-    holder1_on_position_y_offset: 0.0005
+    # The rack's own base correction, m: applied to every holder pose
+    # before the per-holder step. NOT holder 1's trim -- holder 1 has
+    # its own entry at index 0 of the holder_multi_* lists below.
+    holder_rack_x_offset: 0.0
+    holder_rack_y_offset: 0.0005
     holder_on_position_lift: 0.00015
     holder_on_position_tilt_x_deg: 0.3
     # The other lean axis, about tool z (base +y), deg. Spin about the
     # puck's own axis is wrist3_rotation_offset, not a tilt.
     holder_on_position_tilt_z_deg: 0.0
-    holder1_on_position_z_offset: -0.0003
+    holder_rack_z_offset: -0.0003
     sample_holder_on_position_x_offset: -0.002785
     sample_holder_on_position_y_offset: -0.0005
     sample_holder_on_position_z_offset: 0.000171
-    holder_multi_x_offsets: [0.0003, 0.0005, 0.0015, 0.0015, 0.003, 0.003, 0.003,
-      0.003, 0.003]
-    # Insertion-depth trim, tool y (base -z), m, holder N at index N-2;
+    # Per-holder trims, holder N at index N-1 -- holder 1 included, so
+    # trimming it moves it and nothing else.
+    holder_multi_x_offsets: [0.0, 0.0003, 0.0005, 0.001, 0.001, 0.001, 0.001, 0.0015, 0.0015,
+      0.0015]
+    # Insertion-depth trim, tool y (base -z), m, holder N at index N-1;
     # positive is deeper.
-    holder_multi_y_offsets: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    holder_multi_z_offsets: [0.0, 0.0, 0.0, 0.0002, 0.00025, 0.0004, 0.00045, 0.00045,
-      0.00045]
+    holder_multi_y_offsets: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    holder_multi_z_offsets: [0.0, 0.0, 0.0, 0.0, 0.0002, -0.0002, -0.0004, -0.00075, -0.00125,
+      -0.00125]
     # Per-holder trim on holder_on_position_tilt_x_deg, deg, holder N at
-    # index N-2. Reloaded every trigger, like everything here.
-    holder_multi_tilt_x_deg: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # index N-1. Reloaded every trigger, like everything here.
+    holder_multi_tilt_x_deg: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     # Per-holder trim on holder_on_position_tilt_z_deg, deg, same shape.
-    holder_multi_tilt_z_deg: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    holder_multi_tilt_z_deg: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     wrist3_rotation_offset: 0.0
