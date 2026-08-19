@@ -38,10 +38,23 @@ cd ~/epics-rs-iocs && cargo build --release -p ur-robot-ioc
 
 ## 실행
 
-### 1. EPICS IOC (필수, 보통 systemd 자동)
+### 1. EPICS IOC (필수, 현재는 수동 기동)
 
 `robot_ioc`(Rust)가 `db/robot.db` PV를 CA로 서빙 (autosave 포함,
-procServ 콘솔 20001). 수동: `~/ws/src/epics_rs_robot/target/release/robot_ioc`
+procServ 콘솔 20001).
+
+```bash
+ROBOT_DB=~/work/robot-sample-changer/db \
+  ~/ws/src/epics_rs_robot/target/release/robot_ioc
+```
+
+`ROBOT_DB`는 반드시 이 저장소의 `db/`입니다 — 바이너리의 컴파일 기본값
+`~/ws/db`는 CalibMode 3-7 라벨도 `Robot:MapSource`도 없는 구 사본이라
+그립 널과 홀더 간 이동이 쓰는 PV가 사라집니다.
+
+**부팅 자동 기동은 꺼져 있습니다.** 시스템 유닛 `robot-ioc.service`는
+`disabled`이고, 설치본은 아직 `ROBOT_DB=~/ws/db`를 들고 있습니다. 켜려면
+이 저장소의 사본을 먼저 설치하세요 — `src/epics_rs_robot/deploy/README.md`.
 
 ### 2. robot-sequencer 데몬
 
@@ -108,7 +121,11 @@ z→깊이(y) 트림).
 
 `3_Camera_Viewer.desktop` → `launch_camera_viewer.sh` = 같은 바이너리
 `--camera`(Camera 탭으로 시작). D405 IOC가 없으면 `run-d405-ioc.sh`로
-자동 기동(procServ 콘솔 20003, systemd 유닛 없음).
+자동 기동(procServ 콘솔 20003). 유저 유닛 `d405-ioc.service`도 있지만
+`disabled`이라 부팅 시에는 뜨지 않습니다 — `systemctl --user start d405-ioc`.
+**스트리밍 중에 강제 종료하지 마세요**: RealSense 펌웨어가 걸린 채 남아
+USB 재연결까지 필요했던 적이 있습니다. 유닛의 `ExecStop`이 `Acquire 0`을
+먼저 씁니다.
 
 구 Python GUI(silx/PyQt6/pyepics, conda env `robot_gui`)도 그대로 실행
 가능: `cd ~/ws/src && python -m robot_gui.main`. 오프셋 저장은 RsDM

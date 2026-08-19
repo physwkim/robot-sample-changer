@@ -18,9 +18,13 @@ cd ~/ws/src/epics_rs_robot && cargo build --release -p robot_ioc
 pkill -x robot_ioc
 ```
 
-유닛 설치 → 부팅 자동시작 등록 → 지금 시작:
+유닛 설치 → 부팅 자동시작 등록 → 지금 시작. **이 저장소의 사본을 설치하세요** —
+`~/ws/src/epics_rs_robot/deploy/`에 남아 있는 구 트리 사본은 `ROBOT_DB`가
+`~/ws/db`를 가리키고, 그 db에는 CalibMode 3-7 라벨도 `Robot:MapSource`도
+없습니다(그립 널·홀더 간 이동이 쓰는 PV):
 ```bash
-sudo cp ~/ws/src/epics_rs_robot/deploy/robot-ioc.service /etc/systemd/system/
+sudo install -m 644 ~/work/robot-sample-changer/src/epics_rs_robot/deploy/robot-ioc.service \
+     /etc/systemd/system/robot-ioc.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now robot-ioc.service
 ```
