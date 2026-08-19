@@ -696,10 +696,14 @@ impl Default for WellConfig {
                 // where the cross-section has room for this step, not
                 // shrunk below the floor the arm moves at.
                 step_mm: 0.05,
-                // Ten times the largest play measured at a seat; the
-                // mouth of a well is wider, so finding nothing here is
-                // the answer "the lift cleared it".
-                travel_mm: 0.5,
+                // The bore's travel, not ten times a seat's play. The
+                // bracket is run at the top of `heights_mm`, where the
+                // point is to measure with no tension on the seat — and
+                // that is exactly where the walls are further out than
+                // the seat's own clearance. At h7, 0.5 mm found nothing
+                // either way from +2 mm (2026-08-19), which is a scan
+                // too narrow rather than an absent wall.
+                travel_mm: 3.0,
                 // The bore's threshold: it is set by what the arm can
                 // tell from its own standing scatter, which does not
                 // change with the seat.

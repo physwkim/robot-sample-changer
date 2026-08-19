@@ -156,9 +156,11 @@ struct Seat {
     /// Lateral bracket centre along base x, which trims tool x.
     ///
     /// Measured at the topmost height the probe was asked for, not at
-    /// the seat: at the seat a taught residual larger than the well's
-    /// clearance starts the bracket already pressed against a wall, and
-    /// what it then reports is the arm bending, not the well.
+    /// the seat. A seated puck is under tension — the taught residual
+    /// preloads it against a wall, and what a bracket reports there is
+    /// the holder flexing and the arm being pulled, not where the seat
+    /// is. The centre is only the centre for both the way down and the
+    /// way up if it was measured with that tension gone.
     centre_x_mm: Option<f64>,
     /// Lateral bracket centre along base y, which trims tool z. Same
     /// height as `centre_x_mm`.

@@ -372,9 +372,12 @@ probe:
                           # all (commanded 0.010, travelled -0.004 at h7). The
                           # clearance is what has to grow, so the probe steps back
                           # off the seat instead: see heights_mm below
-      travel_mm: 0.5      # 10x the largest play measured at a seat. The mouth of
-                          # a well is wider than that, so a direction that finds
-                          # nothing here is the answer "the lift cleared it"
+      travel_mm: 3.0      # the bore's travel, not 10x a seat's play: the bracket
+                          # runs at the top of heights_mm precisely so the seat
+                          # is under no tension, and that is where the walls sit
+                          # further out than the seat's own clearance. 0.5 found
+                          # nothing either way from +2 mm at h7 (2026-08-19) --
+                          # a scan too narrow, not an absent wall
       threshold_n: 0.5    # set by the arm's standing scatter, which does not
                           # change with the seat
       abort_n: 12.0       # clamped probing has no finger play to absorb the seat's
