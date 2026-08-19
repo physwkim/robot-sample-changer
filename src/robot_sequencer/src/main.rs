@@ -102,10 +102,14 @@ fn run() -> Result<(), SequencerError> {
         "      steps into contact at {:.2}/{:.2} N, measures, writes nothing)",
         config.probe.bore.lateral.threshold_n, config.probe.bore.depth.threshold_n
     ));
-    log::info("    6=Grip null (pick and reseat this holder's own puck, writing the trims");
+    log::info("    6=Grip null (pick and reseat a puck at this holder, writing the trims");
     log::info(&format!(
-        "      the close wrench asks for, until it settles under {} N or {} tries)",
+        "      the close wrench asks for, until it settles under {} N or {} tries;",
         config.grip_null.settled_n, config.grip_null.max_iterations
+    ));
+    log::info(&format!(
+        "      {} fetches the puck from another holder first, 0 uses this one's)",
+        config.epics.map_source_pv
     ));
     log::info("    7=Holder transfer (carry the puck straight to the target seat;");
     log::info(&format!(

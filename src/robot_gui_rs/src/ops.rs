@@ -15,7 +15,7 @@ use crate::pvs::{MODE_NAMES, robot, step_name};
 enum Action {
     Mount(i64),
     Return(i64),
-    GripNull(i64),
+    GripNull { target: i64, source: i64 },
     Transfer { target: i64, source: i64 },
     Advanced { mode: i64, start: i64 },
     Recover,
@@ -26,8 +26,13 @@ impl Action {
         match self {
             Action::Mount(h) => format!("Mount holder {h} on the stage"),
             Action::Return(h) => format!("Return the sample to holder {h}"),
-            Action::GripNull(h) => {
-                format!("Null the grip wrench at holder {h} and write its trims")
+            Action::GripNull { target, source } => {
+                let from = if *source == 0 || source == target {
+                    String::new()
+                } else {
+                    format!(" (fetching holder {source}'s puck first)")
+                };
+                format!("Null the grip wrench at holder {target} and write its trims{from}")
             }
             Action::Transfer { target, source } => {
                 format!("Move the puck from holder {source} to holder {target}")
@@ -57,6 +62,7 @@ pub struct OpsPanel {
 
     holder_sel: i64,
     null_holder: i64,
+    null_source: i64,
     xfer_target: i64,
     xfer_src: i64,
     adv_mode: usize,
@@ -88,6 +94,7 @@ impl OpsPanel {
             gripper_rbv: RsdmLabel::new(engine, &robot("Gripper_RBV"))?,
             holder_sel: 1,
             null_holder: 1,
+            null_source: 0,
             xfer_target: 6,
             xfer_src: 7,
             adv_mode: 0,
@@ -129,8 +136,11 @@ impl OpsPanel {
                     "Going to the stage — press Continue at the wait to retrieve to holder {h}"
                 );
             }
-            Action::GripNull(h) => {
-                put(&self.holder, h);
+            Action::GripNull { target, source } => {
+                put(&self.holder, target);
+                // 0 means the puck already seated in the target; anything
+                // else is fetched first, on the same trigger.
+                put(&self.map_source, if source == target { 0 } else { source });
                 put(&self.calib_mode, 6);
                 // Grip null refuses mid-sequence resumes.
                 put(&self.start_step, 0);
@@ -138,10 +148,18 @@ impl OpsPanel {
                 self.pause_step_input = 0;
                 put(&self.wait, 0);
                 put(&self.trigger, 1);
-                self.note = format!(
-                    "Nulling holder {h} — it picks and reseats its own puck once per \
-                     iteration and writes the trims to taught_waypoints.yaml"
-                );
+                self.note = if source == 0 || source == target {
+                    format!(
+                        "Nulling holder {target} — it picks and reseats that holder's own \
+                         puck once per iteration and writes the trims to \
+                         taught_waypoints.yaml"
+                    )
+                } else {
+                    format!(
+                        "Fetching holder {source}'s puck into holder {target}, then nulling \
+                         there — the puck is left in holder {target}"
+                    )
+                };
             }
             Action::Transfer { target, source } => {
                 put(&self.holder, target);
@@ -342,10 +360,20 @@ impl OpsPanel {
                     ui.horizontal(|ui| {
                         ui.label("Holder:");
                         ui.add(egui::DragValue::new(&mut self.null_holder).range(1..=10));
+                        ui.label("Puck from:");
+                        ui.add(egui::DragValue::new(&mut self.null_source).range(0..=10));
                     });
-                    ui.label("(the holder must have a puck in it)");
+                    let own = self.null_source == 0 || self.null_source == self.null_holder;
+                    ui.label(if own {
+                        "(0 = the puck already in that holder)"
+                    } else {
+                        "(fetched first; the target seat must be empty)"
+                    });
                     if ui.button("Null grip").clicked() {
-                        self.request(Action::GripNull(self.null_holder));
+                        self.request(Action::GripNull {
+                            target: self.null_holder,
+                            source: self.null_source,
+                        });
                     }
                 });
             });

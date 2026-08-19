@@ -53,7 +53,7 @@ record(longout, "Robot:Holder")
 }
 record(longout, "Robot:MapSource")
 {
-    field(DESC, "Transfer source holder")
+    field(DESC, "Null/transfer source holder")
     field(DRVL, "0")
     field(DRVH, "10")
     field(VAL,  "0")

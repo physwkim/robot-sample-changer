@@ -880,6 +880,14 @@ impl<'a> Sequencer<'a> {
     /// which is why they are recorded here as measured rather than
     /// derived.
     ///
+    /// `MapSource` may name another holder to fetch the puck from, so a
+    /// rack with one puck in it can be walked holder by holder on one
+    /// trigger each; 0, or the target itself, uses the puck already
+    /// seated there. The puck is left in the target when the loop ends,
+    /// which is where the next fetch expects to find it. **A named
+    /// source does not check that the target seat is empty** — the same
+    /// caveat mode 7 carries, for the same reason.
+    ///
     /// Always runs from the top: a resume would grip air, or release
     /// into a seat that is not empty, so a non-zero `StartStep` is
     /// refused rather than honored.
@@ -895,6 +903,27 @@ impl<'a> Sequencer<'a> {
             )));
         }
         let g = self.config.grip_null.clone();
+        // `MapSource` names where the puck comes from, 0 or the target
+        // itself meaning "the one already seated here". A rack being
+        // calibrated with one puck wants the fetch and the null on one
+        // trigger, and the carry is mode 7's, unchanged.
+        let source = self.epics.read_map_source();
+        let fetched = source != 0 && source != holder;
+        if fetched {
+            if !(1..=10).contains(&source) {
+                return Err(SequencerError(format!(
+                    "grip null: MapSource is {source}; it must name a holder \
+                     1-10, or 0 for the puck already in holder {holder}"
+                )));
+            }
+            log::info(&format!(
+                ">>> GRIP NULL MODE: fetching holder {source}'s puck into holder \
+                 {holder} first <<<"
+            ));
+            let wd = WaypointData::load(&self.config.sequence.waypoints_yaml)?;
+            let base = self.compute_base_waypoints(&wd)?;
+            self.carry_puck(&wd, &base, source, holder)?;
+        }
         log::info(&format!(
             ">>> GRIP NULL MODE: holder {holder}, up to {} iterations <<<",
             g.max_iterations
@@ -1106,6 +1135,24 @@ impl<'a> Sequencer<'a> {
         log::info(&format!(
             ">>> HOLDER TRANSFER MODE: holder {source} -> holder {target} <<<"
         ));
+        self.carry_puck(wd, base, source, target)?;
+        Ok(Outcome::Ran)
+    }
+
+    /// Pick at `source`, place at `target`, no stage leg and nothing
+    /// measured.
+    ///
+    /// Shared so that [`Sequencer::run_holder_transfer`] and a grip null
+    /// given a source holder move a puck the same way. They differ in
+    /// what happens afterwards, not in the carry, and two copies of a
+    /// route through an open rack is one copy too many.
+    fn carry_puck(
+        &mut self,
+        wd: &WaypointData,
+        base: &BaseWaypoints,
+        source: i32,
+        target: i32,
+    ) -> Result<(), SequencerError> {
         let w_s = self.compute_run_waypoints(wd, base, source)?;
         let w_t = self.compute_run_waypoints(wd, base, target)?;
 
@@ -1123,7 +1170,7 @@ impl<'a> Sequencer<'a> {
         self.hand(21, "open_gripper_final", true, 0)?;
         self.cartesian(22, "holder_above_final_return", &w_t.above, 0)?;
         self.cartesian(23, "holder_standby_final", &w_t.standby, 0)?;
-        Ok(Outcome::Ran)
+        Ok(())
     }
 
     /// Probes at every configured height and always brings the arm back
