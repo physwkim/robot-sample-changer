@@ -382,17 +382,19 @@ probe:
                           # the bore's 5.0: h7 base x+ read 8.12 N total with only
                           # 1.17 N along the axis. Below lift_abort_n (15) and well
                           # below the 23 N of a rubbing insert
-      overtravel_steps: 5 # five 0.01 mm steps is a third of the bore's push and
-                          # gives the slope five rising samples -- both wells that
-                          # bracketed cleanly reported "at the trip point, no slope
-                          # to fit" with three
+      overtravel_steps: 5 # a well wall is rigid and the run stops at half of
+                          # abort_n anyway, so more steps buy rising samples on a
+                          # wall that gives and cost nothing on one that does not.
+                          # Three left every clean well bracket reporting "at the
+                          # trip point, no slope to fit"
     depth:                # downward, toward the well floor
-      step_mm: 0.02       # the taught pose hovers holder_on_position_lift
-                          # (0.15 mm) above the floor, so the bore's 0.10 puts
-                          # the whole descent inside one or two samples -- h7
-                          # reported "too few rising samples to fit a floor"
-                          # (2026-08-19), the depth axis failing exactly the way
-                          # the lateral one did
+      step_mm: 0.05       # the smallest step this arm executes. Three of them
+                          # reach the holder_on_position_lift (0.15 mm) hover,
+                          # which is all the resolution the hover has room for:
+                          # 0.02 was tried to buy more and the arm did not take
+                          # it (h7 commanded 0.020 mm, moved -0.002 mm against
+                          # 0.32 N, 2026-08-19) -- the depth axis failing
+                          # exactly the way the lateral one had
       travel_mm: 0.6      # 4x the hover, so "no floor within" means the seat is
                           # not where the pose believes rather than the probe
                           # stopped short
@@ -401,9 +403,10 @@ probe:
                           # would be three steps deep, most of the hover
       abort_n: 8.0        # a push onto a floor: bounded by what the arm may do
                           # to a sample, which does not change with the seat
-      overtravel_steps: 4 # four rising samples for the fit at a fifth of the
-                          # bore's step -- still a shorter push in than the
-                          # bore's two, and the half-abort bound stops it sooner
+      overtravel_steps: 4 # four rising samples for the fit, against the bore's
+                          # two: the descent that reaches this floor is three
+                          # steps long and has none of its own to spare. The
+                          # half-abort bound stops it sooner on a stiff floor
     heights_mm: [2.0]     # where the laterals are measured, mm above the taught
                           # seat. At the seat a taught residual larger than the
                           # play starts the bracket already pressed into a wall,

@@ -100,25 +100,41 @@ const OVERTRAVEL_LOAD_FRACTION: f64 = 0.5;
 /// step in decimal is not one step short in binary.
 const STEP_COUNT_EPSILON: f64 = 1e-9;
 
-/// The smallest linear command worth sending to the arm.
+/// A distance small enough that the move is already where it was going.
 ///
 /// Repositioning distances accrue floating-point residue — the sideways
 /// corrections of a climb land in `from_trigger` through base-axis unit
 /// vectors whose off-axis components are ~0.004, so a fully spent 3 mm
 /// allowance leaves at most ~0.012 mm in the axis that was never
 /// corrected. A zero-check passes that residue on to the servo, which
-/// cannot execute it: on this rig a 0.008 mm command travelled -0.004 mm
-/// and tripped the step-taken guard (doc §16.4), while 0.05 mm executes.
-/// Below this floor a move is already where it was going.
-pub const MIN_EXECUTABLE_MM: f64 = 0.02;
-/// The floor must sit between the two populations that reach
-/// [`Motion::probe_reposition`]: cross-term residue (at most the full
-/// 3 mm sideways allowance times the ~0.004 off-axis component of a
-/// holder base axis) below, one 0.05 mm centring step — nearly parallel
-/// to its axis — above. If this fails to compile, the floor either
-/// stops forgiving residue (the return leg dies on "commanded
-/// 0.000 mm") or starts swallowing genuine steps.
-const _: () = assert!(3.0 * 0.004 < MIN_EXECUTABLE_MM && 0.05 * 0.99 > MIN_EXECUTABLE_MM);
+/// cannot execute it, and the return leg dies on "commanded 0.000 mm".
+///
+/// This is NOT [`MIN_EXECUTABLE_MM`], and the two were one constant
+/// until the difference cost two hardware runs: forgiving residue wants
+/// the smallest number that clears the cross-terms, while sizing a
+/// probe step wants the largest number the arm is measured to refuse.
+/// A single constant has to be one or the other, and as the residue
+/// floor it silently certified 0.02 mm steps that the arm does not take.
+pub const NEGLIGIBLE_MM: f64 = 0.02;
+/// The residue floor must sit above the cross-terms that reach
+/// [`Motion::probe_reposition`] (at most the full 3 mm sideways
+/// allowance times the ~0.004 off-axis component of a holder base axis)
+/// and at or below the smallest step anything may command. If this
+/// fails to compile, the floor either stops forgiving residue or starts
+/// swallowing genuine steps.
+const _: () = assert!(3.0 * 0.004 < NEGLIGIBLE_MM && NEGLIGIBLE_MM <= MIN_EXECUTABLE_MM);
+
+/// The smallest step this arm executes, mm.
+///
+/// Measured, not interpolated. At holder 7 on 2026-08-19 all four
+/// lateral probes commanded 0.050 mm and travelled 0.045-0.057 mm,
+/// while in the same run the depth probe commanded 0.020 mm and moved
+/// -0.002 mm against 0.32 N; 0.010 mm moved -0.004 mm and 0.008 mm
+/// moved -0.004 mm (doc §16.4) in earlier runs. Everything between
+/// 0.008 and 0.05 that has been tried has failed, so the floor is the
+/// smallest command with evidence behind it rather than the smallest
+/// one nothing has disproved.
+pub const MIN_EXECUTABLE_MM: f64 = 0.05;
 
 /// How many whole steps fit in `travel_mm`.
 ///
@@ -976,11 +992,11 @@ impl Motion<'_> {
         limits: ProbeLimits,
         label: &str,
     ) -> Result<(), SequencerError> {
-        if mm.abs() < MIN_EXECUTABLE_MM {
+        if mm.abs() < NEGLIGIBLE_MM {
             if mm != 0.0 {
                 log::info(&format!(
-                    "{label}: {mm:+.4} mm is below the {MIN_EXECUTABLE_MM} mm \
-                     execution floor — already there"
+                    "{label}: {mm:+.4} mm is below the {NEGLIGIBLE_MM} mm \
+                     residue floor — already there"
                 ));
             }
             return Ok(());
@@ -1194,7 +1210,7 @@ impl Motion<'_> {
         centring: Centring,
         label: &str,
     ) -> Result<Climbed, SequencerError> {
-        if mm.abs() < MIN_EXECUTABLE_MM {
+        if mm.abs() < NEGLIGIBLE_MM {
             return Ok(Climbed {
                 offset: Vector3::zeros(),
                 load: Vector3::zeros(),

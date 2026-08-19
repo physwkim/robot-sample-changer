@@ -23,7 +23,7 @@ use crate::handeye;
 use crate::log;
 use crate::model::{JointMap, Model};
 use crate::motion::{
-    Bracket, Centring, MIN_EXECUTABLE_MM, Motion, ProbeLimits, Probed, TiltLimits, Tilted,
+    Bracket, Centring, Motion, NEGLIGIBLE_MM, ProbeLimits, Probed, TiltLimits, Tilted,
 };
 use crate::waypoints::{WaypointData, persist_holder_trims};
 
@@ -1136,7 +1136,7 @@ impl<'a> Sequencer<'a> {
             from_trigger.z = height;
             levels.push(Level {
                 height_mm: height,
-                load: (climb.abs() >= MIN_EXECUTABLE_MM).then_some(climbed.load),
+                load: (climb.abs() >= NEGLIGIBLE_MM).then_some(climbed.load),
                 brackets: Vec::new(),
                 floor: None,
                 tilts: Vec::new(),

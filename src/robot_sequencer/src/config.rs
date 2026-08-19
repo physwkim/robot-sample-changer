@@ -699,17 +699,21 @@ impl Default for WellConfig {
                 // the along-axis force was 1.17 N. Below `lift_abort_n`,
                 // and below the 23 N of a rubbing insert.
                 abort_n: 12.0,
-                // Five, not the bore's three: the step is a fifth of the
-                // bore's, so five of them is a shorter push into the wall
-                // and still gives the slope enough rising samples to fit
-                // — both wells that bracketed cleanly reported "at the
-                // trip point, no slope to fit" with three.
+                // Five, not the bore's three: a well wall is rigid and
+                // the run stops at half of `abort_n` anyway, so asking
+                // for more steps buys rising samples for the fit on a
+                // wall that gives, and costs nothing on one that does
+                // not. Three left every clean well bracket reporting
+                // "at the trip point, no slope to fit".
                 overtravel_steps: 5,
             },
             depth: ProbeAxisConfig {
-                // Seven steps to the 0.15 mm the taught pose hovers by,
-                // against the bore's one and a half.
-                step_mm: 0.02,
+                // The smallest step this arm executes. Three of them
+                // reach the 0.15 mm the taught pose hovers by, which is
+                // as much resolution as the hover has room for: 0.02 mm
+                // was tried to buy more and the arm simply did not take
+                // it (commanded 0.020, moved -0.002 at h7, 2026-08-19).
+                step_mm: 0.05,
                 // Four times the hover, so "no floor within" says the seat
                 // is not where the pose believes rather than that the
                 // probe stopped short.
@@ -722,10 +726,10 @@ impl Default for WellConfig {
                 // A push onto a floor, which is bounded by what the arm
                 // may do to a sample and not by which seat it is in.
                 abort_n: 8.0,
-                // Four rising samples for the fit, at a fifth of the
-                // bore's step: still a shorter push into the floor than
-                // the bore's two, and the half-abort bound stops it
-                // sooner on a stiff one.
+                // Four rising samples for the fit, against the bore's
+                // two, because the descent that reaches this floor is
+                // three steps long and has none of its own to spare.
+                // The half-abort bound stops it sooner on a stiff floor.
                 overtravel_steps: 4,
             },
             // Off the seat, where the bracket has room for its step.
