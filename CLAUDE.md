@@ -65,11 +65,27 @@ Rust RsDM GUI (`src/robot_gui_rs`, 독립 cargo workspace) — rsdm/rsplot을
 빌드: `cd src/robot_gui_rs && cargo build --release`.
 
 `2_Robot_GUI.desktop` → `launch_robot_gui.sh` → `robot-gui <waypoints.yaml>`.
-탭: Operate(시퀀스 조작/상태) / Camera(D405 color+depth) / Calibration
-(jog + 오프셋·틸트 테이블, 편집 셀만 텍스트 편집으로 저장 — 데몬의
-트림 persist와 같은 규율이라 동시 쓰기에 안전).
+탭 없이 **한 페이지**입니다 — State(상태 + 그립 널 결과) / Run(마운트·
+그립 널·퍽 이동·그리퍼·Advanced) / Teach(jog + 오프셋·틸트 테이블).
+테이블은 편집 셀만 텍스트 편집으로 저장하므로(데몬의 트림 persist와 같은
+규율) 동시 쓰기에 안전합니다.
 
-Operate의 Status에 **TCP 렌치가 실시간으로** 뜹니다(Force N / Torque Nm,
+카메라는 헤더의 **Camera window** 버튼으로 여는 별도 네이티브 창입니다
+(`--camera`는 카메라 전용 프로세스로 뜨는 기존 동작 유지). 두 이미지 모두
+같은 위젯이라 조작이 같습니다 — 휠로 확대, 드래그로 이동, 호버하면
+픽셀 좌표와 값(깊이는 mm + counts, 컬러는 RGB). 깊이 컬러맵 범위는
+Auto(2-98 퍼센타일) 또는 counts 직접 입력입니다. `RSDepthUnits_RBV`가
+mm 환산 계수라 상수로 박지 않습니다. silx식 ImageView(측면 히스토그램·
+프로파일 도구)는 이 카메라에 묻는 질문이 아니라 뺐습니다.
+
+멀티홈이라 CA 비컨이 인터페이스마다 두 번 들어오고 클라이언트가 이걸
+"IOC 재시작"으로 읽습니다. GUI 로그 필터가 `epics_ca_rs::client=error`로
+그 경고만 내립니다(진짜 장애는 화면에 DISCONNECTED로 뜹니다).
+
+State의 **그립 널 결과**는 `Robot:Null:` PV를 그대로 읽습니다 — 상태,
+반복 번호, 누적 보정 세 축, 마지막 닫힘 렌치, 한 줄 메시지.
+
+Status에 **TCP 렌치가 실시간으로** 뜹니다(Force N / Torque Nm,
 각 축 + 크기). 소스는 ur-monitor-ioc의 `Robot:UR:Receive:ActualTCPForce`
 — 그쪽 RTDE receive 스트림이라 시퀀서와 경합하지 않습니다. 프레임은
 **base**이고, 그립 널이 쓰는 트림과 같은 축입니다(x→x 트림, y→z 트림,
@@ -179,6 +195,11 @@ ws/
 | Robot:Vision:Quality | ao | 검출 품질 0-1 |
 | Robot:Vision:Seated | bi | 안착 판정 (0=Not Seated, 1=Seated) |
 | Robot:Vision:Tilt | ao | 퍽 상면 기울기 (deg) |
+| Robot:Null:State | longin | 그립 널 상태 (0=Idle, 1=Running, 2=Settled, 3=Failed) |
+| Robot:Null:Iter | longin | 진행 중인 반복 번호 |
+| Robot:Null:DX/DY/DZ | ai | 누적 보정 (mm, base x / base y / 깊이) |
+| Robot:Null:Force | ai | 마지막 닫힘 렌치 크기 (N) |
+| Robot:Null:Msg | stringin | 결과 한 줄 (39자) |
 
 ### Robot:Loaded PV
 
@@ -245,6 +266,11 @@ x↔base x, z↔base y, y↔깊이입니다. **부호는 둘 다 "닫히는 핑�
 회당 0.006 mm). 힘이 안 움직인 구간은 "기울기가 이보다 가파를 수
 없다"는 상한으로 바꿔 스텝을 키웁니다. 반복당 0.5 mm, 누적 1 mm를
 넘는 요구는 트림 오차가 아니라 시트 이상으로 보고 거부합니다.
+
+진행과 결과는 `Robot:Null:` PV로 나갑니다(State/Iter/DX·DY·DZ/Force/Msg
+— 위 표). 종료 상태는 `run_grip_null` 한 곳에서만 찍히고 루프의 에러
+타입이 메시지를 들고 다니므로, 이동 실패로 `?`가 튀어도 화면에 "running"이
+남지 않습니다. IOC db에 레코드가 없으면 데몬은 조용히 발행을 건너뜁니다.
 
 `taught_waypoints.yaml`은 텍스트 편집(주석 보존, tmp+rename, 재파싱
 검증)으로 갱신하고, 반복마다 그 파일을 다시 읽어 다음 집기에
