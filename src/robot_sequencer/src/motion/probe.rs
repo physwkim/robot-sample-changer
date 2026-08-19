@@ -518,7 +518,7 @@ impl Contact {
 
 /// Pre-contact samples needed before a baseline is a baseline rather than
 /// one reading that happened to be first.
-const MIN_BASELINE_SAMPLES: usize = 3;
+pub const MIN_BASELINE_SAMPLES: usize = 3;
 
 /// How many median absolute deviations above the baseline a sample has to
 /// sit to count as part of the ramp rather than as more of the same noise.

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::error::SequencerError;
-use crate::motion::MIN_EXECUTABLE_MM;
+use crate::motion::{MIN_BASELINE_SAMPLES, MIN_EXECUTABLE_MM};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -750,8 +750,12 @@ impl Default for WellConfig {
             },
             // Up off the seat, where the brackets can measure with no
             // tension on it, then back down so the floor probe starts
-            // from the centre they found.
-            heights_mm: vec![2.0, 0.0],
+            // from the centre they found -- but not all the way down.
+            // The taught seat hovers 0.075 mm over its floor (h7), which
+            // is one step, and a fit with one pre-contact sample has no
+            // baseline. From +0.3 the descent is 0.375 mm and still
+            // inside the well mouth (0.8 mm up).
+            heights_mm: vec![2.0, 0.3],
             // Not one lateral step, which is what the map used to read:
             // a bracket's walls are fitted from the force slope over
             // MEASURED travel, and the arm undershoots its commands, so
@@ -963,9 +967,17 @@ impl Config {
         // Arm motion inside a rack with a sample in the fingers, so the
         // list is bounded like every other number in this block. Below the
         // trigger pose is allowed but barely: down is where the seat is.
-        for (name, heights) in [
-            ("probe.bore.heights_mm", &config.probe.bore.heights_mm),
-            ("probe.well.heights_mm", &config.probe.well.heights_mm),
+        for (name, heights, depth) in [
+            (
+                "probe.bore.heights_mm",
+                &config.probe.bore.heights_mm,
+                &config.probe.bore.depth,
+            ),
+            (
+                "probe.well.heights_mm",
+                &config.probe.well.heights_mm,
+                &config.probe.well.depth,
+            ),
         ] {
             if heights.len() > 8 {
                 return Err(SequencerError(format!(
@@ -975,6 +987,19 @@ impl Config {
             if heights.iter().any(|h| !(-2.0..=10.0).contains(h)) {
                 return Err(SequencerError(format!(
                     "{name} entries must be within -2..10 mm of the trigger pose"
+                )));
+            }
+            // The floor is probed at the last level, and a floor is fitted
+            // from a force slope against a baseline taken before contact.
+            // A level parked on the seat leaves no room for that baseline:
+            // at h7 the taught pose hovers 0.075 mm, the descent tripped on
+            // its second sample, and the whole map was thrown away at the
+            // end for "the floor fit did not measure" (2026-08-19). A
+            // ladder that names its floor level has to lift it clear.
+            let baseline_mm = MIN_BASELINE_SAMPLES as f64 * depth.step_mm;
+            if heights.last().is_some_and(|h| *h < baseline_mm) {
+                return Err(SequencerError(format!(
+                    "{name} must end at least {baseline_mm} mm above the trigger pose                      ({MIN_BASELINE_SAMPLES} depth steps), so the floor probe has                      somewhere to take its baseline before it meets the floor"
                 )));
             }
         }
@@ -1224,6 +1249,15 @@ mod tests {
                 "step_under_the_executable_floor",
                 "probe:\n  well:\n    lateral:\n      step_mm: 0.01\n",
                 "probe.well.lateral.step_mm",
+            ),
+            // The ladder's last level is where the floor is probed, and
+            // this one is parked on the seat: exactly the run14 h7 shape,
+            // where the descent tripped on its second sample and the fit
+            // had no baseline to work from.
+            (
+                "floor_level_on_the_seat",
+                "probe:\n  well:\n    heights_mm: [2.0, 0.0]\n",
+                "probe.well.heights_mm",
             ),
             (
                 "travel_under_one_step",

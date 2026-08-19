@@ -18,7 +18,10 @@
 mod bringup;
 mod execute;
 mod probe;
-pub use probe::{Bracket, Centring, MIN_EXECUTABLE_MM, NEGLIGIBLE_MM, Probed, TiltLimits, Tilted};
+pub use probe::{
+    Bracket, Centring, MIN_BASELINE_SAMPLES, MIN_EXECUTABLE_MM, NEGLIGIBLE_MM, Probed, TiltLimits,
+    Tilted,
+};
 mod scene;
 
 pub(crate) use probe::ProbeLimits;
