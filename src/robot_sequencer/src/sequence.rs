@@ -113,37 +113,6 @@ impl Seat {
         }
     }
 
-    /// Which tool axes this seat has a null on at all.
-    ///
-    /// The stage has none in depth, and its wrench does not say so --
-    /// 2.05 N at the taught pose falling smoothly to 1.93, 1.53 and
-    /// 0.92 N as the arm backed off to -0.45 mm (2026-08-19), exactly
-    /// what a pose error being corrected looks like. It is not one. The
-    /// slope collapses as it goes (37, then 19, 8, 2.5 N/mm), and at
-    /// -0.93 mm the fingers closed to 7.5 mm where every other close on
-    /// this puck reads 3.9: they had left the neck for a wider feature,
-    /// and the wrench jumped to 3.4 N. The force was falling because the
-    /// grip was letting go, not because the seat was being found, so
-    /// there is no zero anywhere the puck is actually held. What depth
-    /// reads at the stage is the close pressing a puck onto a surface
-    /// that cannot yield; a rack well carries 0.13 N through the same
-    /// close, because there the neck sits proud of the well.
-    ///
-    /// Sideways the stage nulls like a well, and this is measured, not
-    /// assumed from the near-zero readings at the taught pose: pushed a
-    /// deliberate +0.20 mm in tool x, the close read +4.37 N -- 22 N/mm,
-    /// the same order as the rack seed -- and the loop walked it back to
-    /// +0.27 N in four rounds. So the stage's 0.50 mm bore, ten times a
-    /// well's play, does not let the puck yield out of a lateral
-    /// measurement, and the floor-level laterals there mean the taught
-    /// stage pose is sideways-correct to about 0.02 mm.
-    fn nullable(self) -> [bool; 3] {
-        match self {
-            Self::Holder(_) => [true; 3],
-            Self::Stage => [true, false, true],
-        }
-    }
-
     fn persist(
         self,
         path: &std::path::Path,
@@ -216,7 +185,7 @@ const NULL_AXES: [&str; 3] = ["tool x", "tool y (depth)", "tool z"];
 /// Measured, not derived: the lateral signs come out opposite to the
 /// obvious argument about which way a closing finger drags an arm. A
 /// property of the tool, so it holds at any seat the tool can null --
-/// which is not every axis of every seat; see [`Seat::nullable`].
+/// which is not every axis; see [`NULL_STEERED`].
 ///
 /// The lateral two are confirmed at both seats: a deliberate +0.20 mm
 /// in tool x at the stage read +4.37 N and this sign walked it back to
@@ -225,6 +194,45 @@ const NULL_AXES: [&str; 3] = ["tool x", "tool y (depth)", "tool z"];
 /// -0.14 N -- and 0.80 N is barely over the 0.50 N floor, so it is the
 /// weakest of the three.
 const NULL_TOOL_SIGN: [f64; 3] = [-1.0, 1.0, -1.0];
+
+/// Which tool axes the close can steer a pose on. Not depth, at either
+/// seat -- not because that axis reads nothing, but because what it
+/// reads has its zero in the wrong place.
+///
+/// Below a seated puck there is clearance, and the close hangs the puck
+/// in the finger detent rather than pressing it down, so the pads meet
+/// nothing until the arm is deep enough for them to catch under the
+/// puck's shoulder and try to lift it. Measured at h1 on 2026-08-19 by
+/// driving the seat pose deliberately deeper: +0.20 mm read +0.18 N and
+/// +0.50 mm read +0.05 N, the same as the +0.18 N that seat reads when
+/// it is correct -- and then +1.00 mm read -8.27 N with 0.88 Nm about
+/// base x. It is a step, not a slope. Walking that 8.27 N back down
+/// took 0.242 mm to reach 0.10 N, about 34 N/mm, so the catch sits
+/// roughly 0.7 mm below the taught pose with flat nothing above it.
+///
+/// Which means the zero of the depth force is the edge of that
+/// clearance, not the depth the seat wants. Steering to it parks the
+/// pose exactly where the next bit of drift bites: that h1 run was
+/// still holding +0.758 mm of the injected error when it ran out of
+/// iterations, and had it kept going it would have settled there and
+/// written it. The stage reads 2.05 N at its own taught pose for the
+/// same reason -- that pose already sits at the edge -- and backing off
+/// only unwinds the engagement: 1.93, 1.53, 0.92 N with the slope
+/// collapsing 37 -> 2.5 N/mm, until at -0.93 mm the fingers closed to
+/// 7.5 mm instead of 3.9, having left the neck for a wider feature.
+/// There is no crossing anywhere the puck is held.
+///
+/// The descent is not what touches: at +1.00 mm the arm reads
+/// (+2.76, -4.37, -5.84) N standing at the seat with the fingers open,
+/// against (+2.75, -4.11, -5.86) N taught. The whole 8 N appears across
+/// the close.
+///
+/// Sideways is a different measurement and it does null: +0.20 mm in
+/// tool x reads +4.37 N, 22 N/mm, and four rounds bring it to +0.27 N.
+/// Torque agrees on both counts -- base Tx held 0.012, 0.011, 0.010 Nm
+/// across the depths that read nothing, while 0.20 mm sideways took the
+/// stage's Tz from 0.010 to 0.524 Nm.
+const NULL_STEERED: [bool; 3] = [true, false, true];
 
 struct Level {
     /// Height above the pose the mode was triggered at, mm.
@@ -1136,6 +1144,19 @@ impl<'a> Sequencer<'a> {
             seat.label(),
             g.max_iterations
         ));
+        // Naming the steered axes here rather than leaving the reader to
+        // infer them from what moves: at the stage the depth wrench is
+        // measured and logged like the others but never acted on, and a
+        // 2 N reading that nothing answers looks like a bug otherwise.
+        let steered = || -> Vec<usize> { (0..3).filter(|i| NULL_STEERED[*i]).collect() };
+        log::info(&format!(
+            "  grip null: steering {}",
+            steered()
+                .iter()
+                .map(|&i| NULL_AXES[i])
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
         let mut total_mm = [0.0f64; 3];
         let mut wrote = false;
         // The slope the loop steers on, seeded from the file and then
@@ -1222,9 +1243,8 @@ impl<'a> Sequencer<'a> {
             ));
             // An axis inside the noise floor is left alone on both
             // counts, so "settled" and "not written" are one rule.
-            let nullable = seat.nullable();
             let live: [bool; 3] =
-                std::array::from_fn(|i| nullable[i] && force[i].abs() >= g.settled_n);
+                std::array::from_fn(|i| NULL_STEERED[i] && force[i].abs() >= g.settled_n);
             if !live.iter().any(|l| *l) {
                 // Confirmed, not declared. The scatter on one reading is
                 // an appreciable fraction of the floor, so a single
@@ -1236,9 +1256,14 @@ impl<'a> Sequencer<'a> {
                 quiet_rounds += 1;
                 if quiet_rounds >= 2 {
                     log::info(&format!(
-                        "grip null: settled at iteration {iteration}; every force \
-                         component was under {:.2} N twice running. Total move \
+                        "grip null: settled at iteration {iteration}; {} \
+                         under {:.2} N twice running. Total move \
                          ({:+.3}, {:+.3}, {:+.3}) mm in {}, {}, {}",
+                        steered()
+                            .iter()
+                            .map(|&i| NULL_AXES[i])
+                            .collect::<Vec<_>>()
+                            .join(", "),
                         g.settled_n,
                         total_mm[0],
                         total_mm[1],
@@ -1292,8 +1317,12 @@ impl<'a> Sequencer<'a> {
                 }
             });
             log::info(&format!(
-                "  grip null: steering on {:.1}, {:.1}, {:.1} N/mm for {}, {}, {}",
-                stiffness[0], stiffness[1], stiffness[2], NULL_AXES[0], NULL_AXES[1], NULL_AXES[2]
+                "  grip null: steering on {}",
+                steered()
+                    .iter()
+                    .map(|&i| format!("{:.1} N/mm for {}", stiffness[i], NULL_AXES[i]))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
             for (i, axis) in NULL_AXES.iter().enumerate() {
                 if step_mm[i].abs() > g.max_step_mm {
@@ -2790,24 +2819,26 @@ impl<'a> Sequencer<'a> {
 mod tests {
     use super::*;
 
-    /// The stage has no depth null and a rack well does; both null
-    /// sideways. Pinned because both halves are measurements, not
-    /// derivations (see [`Seat::nullable`]): the stage's depth wrench
-    /// looks exactly like a correctable pose error right up to the
-    /// point the fingers slide off the puck, and its laterals were
-    /// proven live by injecting 0.20 mm and watching the loop walk it
-    /// out. Turning depth back on there means moving a puck to justify
-    /// it.
+    /// Depth is never steered, at either seat. Pinned because that axis
+    /// does carry force and the force is still not a pose error (see
+    /// [`NULL_STEERED`]): its zero is the edge of the clearance under
+    /// the puck, so nulling on it parks the seat at the point where the
+    /// next drift catches. Turning it back on means measuring a puck,
+    /// not re-reading this comment.
     #[test]
-    fn the_stage_has_no_depth_null_and_a_rack_well_does() {
-        let rack = Seat::Holder(1).nullable();
-        let stage = Seat::Stage.nullable();
-        assert_eq!(rack, [true; 3], "a well is nullable on all three");
+    fn the_close_never_steers_depth() {
         assert!(
-            !stage[1],
-            "the stage's depth wrench is the close pressing the puck down, not a pose error"
+            !NULL_STEERED[1],
+            "depth is contact engagement, not misalignment"
         );
-        assert!(stage[0] && stage[2], "the stage nulls sideways at 22 N/mm");
+        assert!(
+            NULL_STEERED[0] && NULL_STEERED[2],
+            "both lateral axes are measured, at 22-30 N/mm"
+        );
+        assert_eq!(
+            NULL_AXES[1], "tool y (depth)",
+            "the disabled slot is the one the doc argues about"
+        );
     }
 
     /// The grip null used to read the base wrench and hand its three
