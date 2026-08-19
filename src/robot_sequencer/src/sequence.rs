@@ -389,7 +389,14 @@ impl<'a> Sequencer<'a> {
                 )),
                 (CalibMode::Recover, _) => log::info("Arm returned to holder standby"),
                 (CalibMode::SeatProbe, _) => log::info("Seat probe finished; nothing written"),
-                (CalibMode::HolderMap, _) => log::info(&format!(
+                // The run's own return value is whether the trims moved,
+                // so the summary reads it instead of claiming. It used to
+                // say "nothing written" for every map, including the ones
+                // that had just logged three trim lines above it.
+                (CalibMode::HolderMap, true) => log::info(&format!(
+                    "Holder map finished for holder {holder_number}; trims written above"
+                )),
+                (CalibMode::HolderMap, false) => log::info(&format!(
                     "Holder map finished for holder {holder_number}; nothing written"
                 )),
             }
