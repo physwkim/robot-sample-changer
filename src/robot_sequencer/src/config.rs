@@ -886,8 +886,17 @@ impl Config {
             ("probe.well.lateral", &config.probe.well.lateral),
             ("probe.well.depth", &config.probe.well.depth),
         ] {
-            if axis.step_mm <= 0.0 {
-                return Err(SequencerError(format!("{name}.step_mm must be positive")));
+            // Positive is not enough: below the floor the arm executes,
+            // a step is a command it does not carry out, and a probe
+            // built from those reports clearance that was never
+            // travelled. h7's well bracket commanded 0.010 mm, moved
+            // -0.004 mm against 0.74 N, and only the step-taken guard
+            // caught it (doc §16.4).
+            if axis.step_mm < MIN_EXECUTABLE_MM {
+                return Err(SequencerError(format!(
+                    "{name}.step_mm must be at least {MIN_EXECUTABLE_MM} mm, the smallest \
+                     move this arm executes"
+                )));
             }
             if axis.travel_mm < axis.step_mm {
                 return Err(SequencerError(format!(
@@ -1017,10 +1026,10 @@ impl Config {
         // A correction below the smallest step the arm executes does not
         // happen at all, and one above the radial clearance moves the
         // puck across the bore in a single nudge.
-        if !(0.02..=0.5).contains(&centring.step_mm) {
-            return Err(SequencerError(
-                "probe.centring.step_mm must be within 0.02..0.5 mm".into(),
-            ));
+        if !(MIN_EXECUTABLE_MM..=0.5).contains(&centring.step_mm) {
+            return Err(SequencerError(format!(
+                "probe.centring.step_mm must be within {MIN_EXECUTABLE_MM}..0.5 mm"
+            )));
         }
         // Zero would fail the first correction it needed rather than
         // disable correcting, so the range starts at one step's worth.
@@ -1181,6 +1190,13 @@ mod tests {
             (
                 "step_zero",
                 "probe:\n  well:\n    lateral:\n      step_mm: 0.0\n",
+                "probe.well.lateral.step_mm",
+            ),
+            // Positive but below the floor the arm executes: h7's well
+            // bracket commanded exactly this and travelled -0.004 mm.
+            (
+                "step_under_the_executable_floor",
+                "probe:\n  well:\n    lateral:\n      step_mm: 0.01\n",
                 "probe.well.lateral.step_mm",
             ),
             (
