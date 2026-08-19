@@ -67,10 +67,17 @@ Rust RsDM GUI (`src/robot_gui_rs`, 독립 cargo workspace) — rsdm/rsplot을
 `2_Robot_GUI.desktop` → `launch_robot_gui.sh` → `robot-gui <waypoints.yaml>`.
 탭: Operate(시퀀스 조작/상태) / Camera(D405 color+depth) / Calibration
 (jog + 오프셋·틸트 테이블, 편집 셀만 텍스트 편집으로 저장 — 데몬의
-holder-map persist와 같은 규율이라 동시 쓰기에 안전).
+트림 persist와 같은 규율이라 동시 쓰기에 안전).
 
-- CA는 브로드캐스트 search 그대로 둡니다 — 이 프로세스는 robot_ioc과
-  D405 IOC 둘 다에 붙으므로 `EPICS_CA_NAME_SERVERS`/`ADDR_LIST` 금지.
+Operate의 Status에 **TCP 렌치가 실시간으로** 뜹니다(Force N / Torque Nm,
+각 축 + 크기). 소스는 ur-monitor-ioc의 `Robot:UR:Receive:ActualTCPForce`
+— 그쪽 RTDE receive 스트림이라 시퀀서와 경합하지 않습니다. 프레임은
+**base**이고, 그립 널이 쓰는 트림과 같은 축입니다(x→x 트림, y→z 트림,
+z→깊이(y) 트림).
+
+- CA는 브로드캐스트 search 그대로 둡니다 — 이 프로세스는 robot_ioc,
+  D405 IOC, ur-monitor-ioc 셋 모두에 붙으므로
+  `EPICS_CA_NAME_SERVERS`/`ADDR_LIST` 금지.
 - 이미지는 **pvAccess 기본**: UDP 5076도 5064처럼 여러 IOC가 공유해서
   search가 엉키므로 TCP 직결(`ROBOT_GUI_PVA_SERVER`, 기본
   `127.0.0.1:5085` = st.d405.cmd의 `EPICS_PVAS_SERVER_PORT`).
