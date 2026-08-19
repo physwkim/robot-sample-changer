@@ -223,21 +223,21 @@ record(longin, "Robot:Null:Iter")
 }
 record(ai, "Robot:Null:DX")
 {
-    field(DESC, "Grip null cumulative move, base x")
+    field(DESC, "Grip null cumulative move, tool x")
     field(VAL,  "0.0")
     field(PREC, "3")
     field(EGU,  "mm")
 }
 record(ai, "Robot:Null:DY")
 {
-    field(DESC, "Grip null cumulative move, base y")
+    field(DESC, "Grip null move, tool y depth: unsteered")
     field(VAL,  "0.0")
     field(PREC, "3")
     field(EGU,  "mm")
 }
 record(ai, "Robot:Null:DZ")
 {
-    field(DESC, "Grip null cumulative move, depth")
+    field(DESC, "Grip null cumulative move, tool z")
     field(VAL,  "0.0")
     field(PREC, "3")
     field(EGU,  "mm")

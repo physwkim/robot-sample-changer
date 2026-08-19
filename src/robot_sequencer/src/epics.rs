@@ -181,7 +181,10 @@ impl NullState {
 pub struct NullReport {
     pub state: NullState,
     pub iteration: i32,
-    /// Cumulative move so far, mm, in base x, base y and depth.
+    /// Cumulative move so far, mm, in tool x, tool y (depth) and
+    /// tool z. The depth entry stays zero: nothing steers it (see
+    /// `NULL_STEERED`), and it is kept in the triple because the trim
+    /// slots it lines up with are still three.
     pub total_mm: [f64; 3],
     /// Magnitude of the last close wrench's force, N.
     pub force_n: f64,
