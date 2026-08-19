@@ -125,9 +125,9 @@ impl Seat {
     }
 }
 
-/// The tool-frame sum of every jog the daemon has executed since it was
-/// last zeroed, in mm, together with the seat those millimetres would be
-/// a trim for.
+/// The tool-frame displacement of the TCP from the pose the daemon last
+/// commanded: every jog since the current wait opened, in mm, together
+/// with the seat those millimetres would be a trim for.
 ///
 /// A jog and a trim are the same three axes and the same units up to the
 /// factor of a thousand: [`Motion::jog`] translates along the
@@ -138,7 +138,7 @@ impl Seat {
 /// [`Correction`].
 struct JogTotal {
     mm: [f64; 3],
-    /// The seat the current wait stands at, or `None` where it stands at
+    /// The seat this wait stands at, or `None` where it stands at
     /// none — the idle standby, the hand-eye aim, the seat probe the
     /// operator carried in mid-run. An apply is refused there rather
     /// than guessing: the trims move a seat's `on_position`, and a jog
@@ -437,10 +437,6 @@ impl<'a> Sequencer<'a> {
         loop {
             let start_from_step = self.wait_for_trigger(None);
             self.sequence_count += 1;
-            // Steps 0 and 1 plan to taught poses, undoing anything the
-            // operator jogged while the daemon was idle. The total has
-            // to start from zero for the same reason.
-            self.jog_zero();
 
             let holder_number = self.epics.read_holder();
             let calib_mode = self.epics.read_calib_mode();
@@ -2694,19 +2690,28 @@ impl<'a> Sequencer<'a> {
         self.process_jog_apply();
     }
 
-    /// Points the accumulator at the seat this wait stands at and drops
-    /// any apply request that arrived while the arm was moving — a press
-    /// made mid-trajectory is not a request about the pose the arm ends
-    /// at, and latching it would write the next hold's target.
+    /// Opens a wait: zeroes the accumulator, points it at the seat this
+    /// wait stands at, and drops any apply request that arrived while
+    /// the arm was moving — a press made mid-trajectory is not a request
+    /// about the pose the arm ends at, and latching it would write the
+    /// next hold's target.
+    ///
+    /// Zeroing here is what makes the total a trim. A hold begins at a
+    /// pose the daemon commanded, so "jogged since this hold opened" is
+    /// the displacement from that pose and nothing else; a total carried
+    /// in from an earlier wait would count jogs that the taught move in
+    /// between has already undone. This is the only zeroing point apart
+    /// from an apply consuming the total, so no step needs to remember
+    /// to clear it.
     fn jog_hold(&mut self, seat: Option<Seat>) {
+        self.jog.mm = [0.0; 3];
         self.jog.seat = seat;
         let _ = self.epics.take_jog_apply();
         self.publish_jog();
     }
 
-    /// Clears the accumulator. Called at every run start: the first
-    /// steps move to taught poses, which undoes whatever a jog added, so
-    /// carrying a total across one would be a lie.
+    /// Clears the accumulator after an apply has written it, so a second
+    /// press cannot write the same millimetres twice.
     fn jog_zero(&mut self) {
         self.jog.mm = [0.0; 3];
         self.publish_jog();
@@ -2746,7 +2751,7 @@ impl<'a> Sequencer<'a> {
                 let [x, y, z] = self.jog.mm;
                 log::info(&format!(
                     "TCP Jog completed successfully; jogged {x:+.3}, {y:+.3}, {z:+.3} mm \
-                     in tool x, y, z since the run started"
+                     in tool x, y, z since this wait opened"
                 ));
                 self.publish_jog();
             }
