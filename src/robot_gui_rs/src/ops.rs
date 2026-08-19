@@ -59,6 +59,7 @@ pub struct OpsPanel {
     loaded: Channel,
     gripper: Channel,
     gripper_rbv: RsdmLabel,
+    wrench: Channel,
 
     holder_sel: i64,
     null_holder: i64,
@@ -74,6 +75,13 @@ pub struct OpsPanel {
 
 fn ival(ch: &Channel) -> Option<i64> {
     ch.state().value.as_ref().and_then(PvValue::as_i64)
+}
+
+/// The three components and their magnitude, monospaced so the columns
+/// hold still while the numbers move.
+fn triple(v: &[f64]) -> String {
+    let mag = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    format!("{:+7.2} {:+7.2} {:+7.2}   |{:.2}|", v[0], v[1], v[2], mag)
 }
 
 impl OpsPanel {
@@ -92,6 +100,9 @@ impl OpsPanel {
             loaded: ch("Loaded")?,
             gripper: ch("Gripper")?,
             gripper_rbv: RsdmLabel::new(engine, &robot("Gripper_RBV"))?,
+            // Served by ur-monitor-ioc off its own RTDE receive stream,
+            // so reading it here costs the sequencer nothing.
+            wrench: ch("UR:Receive:ActualTCPForce")?,
             holder_sel: 1,
             null_holder: 1,
             null_source: 0,
@@ -280,6 +291,23 @@ impl OpsPanel {
             ui.end_row();
             ui.label("Gripper:");
             self.gripper_rbv.show(ui);
+            ui.end_row();
+            // Base frame, the frame the grip-null trims are written in:
+            // x -> holder x trim, y -> z trim, z -> depth (y) trim.
+            let w = self.wrench.state();
+            let w = w.value.as_ref().and_then(PvValue::as_f64_slice);
+            let w = w.filter(|v| v.len() >= 6);
+            ui.label("Force (N):");
+            match w {
+                Some(v) => ui.monospace(triple(&v[0..3])),
+                None => ui.label("-"),
+            };
+            ui.end_row();
+            ui.label("Torque (Nm):");
+            match w {
+                Some(v) => ui.monospace(triple(&v[3..6])),
+                None => ui.label("-"),
+            };
             ui.end_row();
         });
     }
