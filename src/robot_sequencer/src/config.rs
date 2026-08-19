@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::error::SequencerError;
+use crate::motion::MIN_EXECUTABLE_MM;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -437,7 +438,7 @@ impl Default for TiltConfig {
 /// at a well put the walls closer than one step, so contact landed
 /// mid-step and the rest of that step was driven into a rigid wall past
 /// the abort (h7 and h10, 2026-08-19).
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct BoreConfig {
     /// How far the fingers open before the probe steps, mm.
@@ -461,6 +462,21 @@ pub struct BoreConfig {
     pub lateral: ProbeAxisConfig,
     /// Downward, toward the bore floor.
     pub depth: ProbeAxisConfig,
+    /// Heights above the pose the probe was triggered at, mm, probed in
+    /// the order given and returned from at the end.
+    ///
+    /// Empty probes once, where it was triggered, and moves the arm
+    /// nowhere. A list asks the other question: a gripped puck at the
+    /// taught pose has under 0.05 mm of lateral freedom in every
+    /// direction and 8.11 N in 0.044 mm (2026-08-18), which is a closed
+    /// loop rather than a clearance, and the height at which that loop
+    /// opens is what says how deep the seat really engages.
+    ///
+    /// The moves are probe steps, not jogs: the operator jog gates on a
+    /// scene whose stage is a convex decomposition, and a convex hull
+    /// cannot represent a bore, so from a seated pose every jog is
+    /// refused before it starts.
+    pub heights_mm: Vec<f64>,
 }
 
 /// A holder well's lateral probe (`CalibMode` = Holder Map).
@@ -471,7 +487,7 @@ pub struct BoreConfig {
 /// is probed clamped" is therefore not a number an operator may set: it
 /// is what [`WellConfig::seat_probe`] builds, and there is nowhere in
 /// the file to say otherwise.
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct WellConfig {
     /// Sideways, toward a well wall.
@@ -485,6 +501,21 @@ pub struct WellConfig {
     /// with it, which is the depth axis failing in exactly the way the
     /// lateral one did.
     pub depth: ProbeAxisConfig,
+    /// Heights above the pose the probe was triggered at, mm, probed in
+    /// the order given and returned from at the end.
+    ///
+    /// Empty probes once, where it was triggered, and moves the arm
+    /// nowhere. A list asks the other question: a gripped puck at the
+    /// taught pose has under 0.05 mm of lateral freedom in every
+    /// direction and 8.11 N in 0.044 mm (2026-08-18), which is a closed
+    /// loop rather than a clearance, and the height at which that loop
+    /// opens is what says how deep the seat really engages.
+    ///
+    /// The moves are probe steps, not jogs: the operator jog gates on a
+    /// scene whose stage is a convex decomposition, and a convex hull
+    /// cannot represent a bore, so from a seated pose every jog is
+    /// refused before it starts.
+    pub heights_mm: Vec<f64>,
     /// Smallest measured off-centre worth writing to the trim file, mm.
     ///
     /// Its own number and not `lateral.step_mm` again, which is what the
@@ -503,11 +534,12 @@ pub struct WellConfig {
 ///
 /// Built by the seat's own config rather than assembled at the call
 /// site, so that "clamped" stays a property of being a well.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct SeatProbe {
     pub loosen_mm: f64,
     pub lateral: ProbeAxisConfig,
     pub depth: ProbeAxisConfig,
+    pub heights_mm: Vec<f64>,
 }
 
 impl BoreConfig {
@@ -517,6 +549,7 @@ impl BoreConfig {
             loosen_mm: self.loosen_mm,
             lateral: self.lateral,
             depth: self.depth,
+            heights_mm: self.heights_mm.clone(),
         }
     }
 }
@@ -528,6 +561,7 @@ impl WellConfig {
             loosen_mm: 0.0,
             lateral: self.lateral,
             depth: self.depth,
+            heights_mm: self.heights_mm.clone(),
         }
     }
 }
@@ -548,21 +582,6 @@ pub struct ProbeConfig {
     /// gently the arm may move next to a sample, which does not change
     /// between pushing sideways and pushing down.
     pub velocity_scale: f64,
-    /// Heights above the pose the probe was triggered at, mm, probed in
-    /// the order given and returned from at the end.
-    ///
-    /// Empty probes once, where it was triggered, and moves the arm
-    /// nowhere. A list asks the other question: a gripped puck at the
-    /// taught pose has under 0.05 mm of lateral freedom in every
-    /// direction and 8.11 N in 0.044 mm (2026-08-18), which is a closed
-    /// loop rather than a clearance, and the height at which that loop
-    /// opens is what says how deep the seat really engages.
-    ///
-    /// The moves are probe steps, not jogs: the operator jog gates on a
-    /// scene whose stage is a convex decomposition, and a convex hull
-    /// cannot represent a bore, so from a seated pose every jog is
-    /// refused before it starts.
-    pub heights_mm: Vec<f64>,
     /// Force allowed while moving between heights, N.
     ///
     /// Separate from the probes' own aborts because it bounds a different
@@ -574,6 +593,14 @@ pub struct ProbeConfig {
     /// +0.31 mm with 7.6-8.2 N sideways (three repeats, doc §16.12) before
     /// any height above that could be measured.
     pub lift_abort_n: f64,
+    /// One step of a move between heights, mm.
+    ///
+    /// Its own number for the same reason `lift_abort_n` is: a climb is
+    /// transport, not a measurement. Borrowing the depth probe's step
+    /// tied the two together, and once the well's depth step went to
+    /// 0.02 mm to resolve a 0.15 mm hover, a 2 mm lift became a hundred
+    /// steps of a size the arm can barely execute (`MIN_EXECUTABLE_MM`).
+    pub lift_step_mm: f64,
     /// The stage bore, probed loosened (`CalibMode` = Seat Probe).
     pub bore: BoreConfig,
     /// A holder well, probed clamped (`CalibMode` = Holder Map).
@@ -639,6 +666,7 @@ impl Default for BoreConfig {
                 // sample in the hard part of the contact.
                 overtravel_steps: 2,
             },
+            heights_mm: Vec::new(),
         }
     }
 }
@@ -651,12 +679,15 @@ impl Default for WellConfig {
     fn default() -> Self {
         Self {
             lateral: ProbeAxisConfig {
-                // Five steps to the tightest wall measured, so contact is
-                // read before the wall is loaded rather than after.
-                step_mm: 0.01,
-                // Ten times the largest play measured, which bounds a
-                // direction that finds nothing at ~40 s rather than the
-                // bore's ~4 min at this step size.
+                // The bore's step, because it is the only one this arm is
+                // measured to execute. A well's seat is tighter than it,
+                // which is what `heights_mm` is for: the bracket is run
+                // where the cross-section has room for this step, not
+                // shrunk below the floor the arm moves at.
+                step_mm: 0.05,
+                // Ten times the largest play measured at a seat; the
+                // mouth of a well is wider, so finding nothing here is
+                // the answer "the lift cleared it".
                 travel_mm: 0.5,
                 // The bore's threshold: it is set by what the arm can
                 // tell from its own standing scatter, which does not
@@ -697,9 +728,14 @@ impl Default for WellConfig {
                 // sooner on a stiff one.
                 overtravel_steps: 4,
             },
-            // One lateral step. The trim it guards is a taught-pose move,
-            // and a correction the probe cannot resolve is not one to
-            // make.
+            // Off the seat, where the bracket has room for its step.
+            heights_mm: vec![2.0],
+            // Not one lateral step, which is what the map used to read:
+            // a bracket's walls are fitted from the force slope over
+            // MEASURED travel, and the arm undershoots its commands, so
+            // a centre is resolved to well inside the step that found
+            // it. Tying the two together made a well's whole play about
+            // one step and left no writable window at all.
             persist_deadband_mm: 0.01,
         }
     }
@@ -711,13 +747,15 @@ impl Default for ProbeConfig {
             velocity_scale: 0.02,
             bore: BoreConfig::default(),
             well: WellConfig::default(),
-            heights_mm: Vec::new(),
             // Above the 10.14 N the first lift reached, so the force
             // through that feature can be recorded rather than aborted
             // at, and below the 23 N a rubbing insert was measured at
             // (doc §16.2) — the level this whole mode exists to keep the
             // sequence away from.
             lift_abort_n: 15.0,
+            // What the bore's depth probe used, which is proven to
+            // execute on this rig: 2 mm is twenty steps.
+            lift_step_mm: 0.10,
             centring: CentringConfig::default(),
             tilt: TiltConfig::default(),
         }
@@ -890,20 +928,29 @@ impl Config {
         // Arm motion inside a rack with a sample in the fingers, so the
         // list is bounded like every other number in this block. Below the
         // trigger pose is allowed but barely: down is where the seat is.
-        if config.probe.heights_mm.len() > 8 {
-            return Err(SequencerError(
-                "probe.heights_mm must have at most 8 entries (each is a full bracket set)".into(),
-            ));
+        for (name, heights) in [
+            ("probe.bore.heights_mm", &config.probe.bore.heights_mm),
+            ("probe.well.heights_mm", &config.probe.well.heights_mm),
+        ] {
+            if heights.len() > 8 {
+                return Err(SequencerError(format!(
+                    "{name} must have at most 8 entries (each is a full bracket set)"
+                )));
+            }
+            if heights.iter().any(|h| !(-2.0..=10.0).contains(h)) {
+                return Err(SequencerError(format!(
+                    "{name} entries must be within -2..10 mm of the trigger pose"
+                )));
+            }
         }
-        if config
-            .probe
-            .heights_mm
-            .iter()
-            .any(|h| !(-2.0..=10.0).contains(h))
-        {
-            return Err(SequencerError(
-                "probe.heights_mm entries must be within -2..10 mm of the trigger pose".into(),
-            ));
+        // Below the floor the arm can execute, a climb is a list of
+        // commands that do not move it; above one step of the shortest
+        // useful lift it is not a climb, it is a jump.
+        if !(MIN_EXECUTABLE_MM..=1.0).contains(&config.probe.lift_step_mm) {
+            return Err(SequencerError(format!(
+                "probe.lift_step_mm must be within {MIN_EXECUTABLE_MM}..1 mm (below that \
+                 the arm does not execute the step at all)"
+            )));
         }
         if !(1.0..=25.0).contains(&config.probe.lift_abort_n) {
             return Err(SequencerError(

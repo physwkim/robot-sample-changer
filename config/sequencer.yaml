@@ -362,15 +362,19 @@ probe:
                           # deliberately no loosen_mm here, because a well holds
                           # its puck by gravity and pads leaving the neck tip it
                           # out of the well (h2, 2026-08-19)
-    lateral:              # sideways, toward a well wall
-      step_mm: 0.01       # the wells measured 0.026-0.052 mm per side (h4/h7/h10,
-                          # 2026-08-18/19), so at the bore's 0.05 the wall lands
-                          # INSIDE the first step: contact is read only after the
-                          # rest of that step has been driven into a rigid wall,
-                          # which is what tripped the abort at h7 and h10
-      travel_mm: 0.5      # 10x the largest play measured. Bounds a direction that
-                          # finds nothing at ~40 s instead of the bore's ~4 min at
-                          # this step size
+    lateral:              # sideways, toward a well wall -- run at the top of
+                          # heights_mm, not at the seat
+      step_mm: 0.05       # the only step this arm is measured to execute. At the
+                          # seat the wells' 0.026-0.052 mm per side (h4/h7/h10,
+                          # 2026-08-18/19) puts the wall INSIDE one of them, which
+                          # is what tripped the abort at h7 and h10 -- and 0.01,
+                          # tried as the cure, was below the floor the arm moves at
+                          # all (commanded 0.010, travelled -0.004 at h7). The
+                          # clearance is what has to grow, so the probe steps back
+                          # off the seat instead: see heights_mm below
+      travel_mm: 0.5      # 10x the largest play measured at a seat. The mouth of
+                          # a well is wider than that, so a direction that finds
+                          # nothing here is the answer "the lift cleared it"
       threshold_n: 0.5    # set by the arm's standing scatter, which does not
                           # change with the seat
       abort_n: 12.0       # clamped probing has no finger play to absorb the seat's
@@ -400,6 +404,15 @@ probe:
       overtravel_steps: 4 # four rising samples for the fit at a fifth of the
                           # bore's step -- still a shorter push in than the
                           # bore's two, and the half-abort bound stops it sooner
+    heights_mm: [2.0]     # where the laterals are measured, mm above the taught
+                          # seat. At the seat a taught residual larger than the
+                          # play starts the bracket already pressed into a wall,
+                          # so it saturates before it has measured anything; the
+                          # force it reports there is the arm bending. Lifted, the
+                          # puck hangs in the grip inside a wider cross-section and
+                          # the same 0.05 mm step has room again. The floor probe
+                          # is NOT moved -- the depth trim is measured against the
+                          # seat's own floor, at level zero, as before
     persist_deadband_mm: 0.01
                           # smallest centre worth rewriting the taught pose for.
                           # Its own number, NOT lateral.step_mm, which is what the

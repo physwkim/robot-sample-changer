@@ -154,12 +154,23 @@ struct Level {
 #[derive(Debug, Clone, Copy, Default)]
 struct Seat {
     /// Lateral bracket centre along base x, which trims tool x.
+    ///
+    /// Measured at the topmost height the probe was asked for, not at
+    /// the seat: at the seat a taught residual larger than the well's
+    /// clearance starts the bracket already pressed against a wall, and
+    /// what it then reports is the arm bending, not the well.
     centre_x_mm: Option<f64>,
-    /// Lateral bracket centre along base y, which trims tool z.
+    /// Lateral bracket centre along base y, which trims tool z. Same
+    /// height as `centre_x_mm`.
     centre_y_mm: Option<f64>,
     /// How far below the start pose the floor is, from the
     /// force-versus-depth fit rather than the trip point, which carries
     /// the threshold and up to a step of overshoot in it. Trims tool y.
+    ///
+    /// From the seat level and only from there — the depth the sequence
+    /// hovers at is measured against the seat's floor, and a floor probe
+    /// started 2 mm higher either misses it or hits it after a travel
+    /// that means something else.
     floor_mm: Option<f64>,
 }
 
@@ -730,9 +741,11 @@ impl<'a> Sequencer<'a> {
         let limits = Limits {
             lateral: ProbeLimits::new(&seat.lateral, p.velocity_scale),
             depth,
-            // The moves between heights are stepped like the depth probe
-            // but bounded like a pick, not like a push onto a floor.
+            // A climb is transport, so it is bounded like a pick rather
+            // than like a push onto a floor and it walks in its own step
+            // rather than the depth probe's measurement step.
             lift: ProbeLimits {
+                step_mm: p.lift_step_mm,
                 abort_n: p.lift_abort_n,
                 ..depth
             },
@@ -749,17 +762,33 @@ impl<'a> Sequencer<'a> {
         // instead of them: a bracket that aborted at the bottom of a
         // ladder does not make the heights above it unmeasured, and this
         // mode's whole output is what it printed.
-        let (play_mm, grip_lost, (levels, walked, returned)) =
-            self.with_grip_loosened(seat.loosen_mm, |s| Ok(s.sweep_heights(limits)))?;
+        let (play_mm, grip_lost, (levels, walked, returned)) = self
+            .with_grip_loosened(seat.loosen_mm, |s| {
+                Ok(s.sweep_heights(limits, &seat.heights_mm))
+            })?;
 
-        // The trigger-pose level is the taught seat pose, so what it
-        // measured there IS the residual the taught trims carry.
+        let lifted = !seat.heights_mm.is_empty();
+        // Level zero is the taught seat pose, so its floor IS the depth
+        // residual the taught trims carry. The laterals come from the
+        // last height that was ASKED for — by index, so a walk that
+        // stopped short leaves them unmeasured instead of quietly
+        // handing back the preloaded seat brackets it did reach.
         // measure_level order: brackets[0] = base x, [1] = base y.
-        let seat = levels.first().map_or_else(Seat::default, |l| Seat {
-            centre_x_mm: l.brackets.first().and_then(|b| b.centre_mm()),
-            centre_y_mm: l.brackets.get(1).and_then(|b| b.centre_mm()),
-            floor_mm: l.floor.as_ref().and_then(|f| f.wall_mm()),
-        });
+        let lateral_level = seat.heights_mm.len();
+        let seat = Seat {
+            centre_x_mm: levels
+                .get(lateral_level)
+                .and_then(|l| l.brackets.first())
+                .and_then(Bracket::centre_mm),
+            centre_y_mm: levels
+                .get(lateral_level)
+                .and_then(|l| l.brackets.get(1))
+                .and_then(Bracket::centre_mm),
+            floor_mm: levels
+                .first()
+                .and_then(|l| l.floor.as_ref())
+                .and_then(Probed::wall_mm),
+        };
         log::info("========================================");
         log::info("SEAT PROBE RESULT (measured from the pose the probe started at)");
         // Half of it on each side, so the first `play/2` of every lateral
@@ -772,7 +801,7 @@ impl<'a> Sequencer<'a> {
             log::info("  the grip was held throughout — no play in front of the steps");
         }
         for level in &levels {
-            if self.config.probe.heights_mm.is_empty() {
+            if !lifted {
                 log::info("  at the pose the probe was triggered at:");
             } else {
                 log::info(&format!(
@@ -1039,6 +1068,7 @@ impl<'a> Sequencer<'a> {
     fn sweep_heights(
         &mut self,
         limits: Limits,
+        extra_heights_mm: &[f64],
     ) -> (
         Vec<Level>,
         Result<(), SequencerError>,
@@ -1052,7 +1082,7 @@ impl<'a> Sequencer<'a> {
         // taught pose the sequence itself uses, and the first vertical
         // move has to start from a centre like every other one.
         let mut heights = vec![0.0];
-        heights.extend_from_slice(&self.config.probe.heights_mm);
+        heights.extend_from_slice(extra_heights_mm);
         let mut levels = Vec::new();
         // Where the arm is relative to the trigger pose, in base mm. Every
         // move this mode makes goes through it, so the way back is one
