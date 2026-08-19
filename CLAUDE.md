@@ -65,10 +65,11 @@ Rust RsDM GUI (`src/robot_gui_rs`, 독립 cargo workspace) — rsdm/rsplot을
 빌드: `cd src/robot_gui_rs && cargo build --release`.
 
 `2_Robot_GUI.desktop` → `launch_robot_gui.sh` → `robot-gui <waypoints.yaml>`.
-탭 없이 **한 페이지**입니다 — State(상태 + 그립 널 결과) / Run(마운트·
-그립 널·퍽 이동·그리퍼·Advanced) / Teach(jog + 오프셋·틸트 테이블).
-테이블은 편집 셀만 텍스트 편집으로 저장하므로(데몬의 트림 persist와 같은
-규율) 동시 쓰기에 안전합니다.
+탭 둘입니다 — **Operate**(State: 상태 + 그립 널 결과 / Run: 마운트·그립
+널·퍽 이동·그리퍼·Advanced)와 **Teach**(jog + 누적·apply, 오프셋·틸트
+테이블). Teach만 라이브 상태가 아니라 티칭 파일을 편집하므로 갈랐고,
+스크롤 위치도 탭마다 따로 답니다. 테이블은 편집 셀만 텍스트 편집으로
+저장하므로(데몬의 트림 persist와 같은 규율) 동시 쓰기에 안전합니다.
 
 카메라는 헤더의 **Camera window** 버튼으로 여는 별도 네이티브 창입니다
 (`--camera`는 카메라 전용 프로세스로 뜨는 기존 동작 유지). 두 이미지 모두

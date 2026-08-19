@@ -86,6 +86,16 @@ fn card(ui: &mut egui::Ui, size: egui::Vec2, add: impl FnOnce(&mut egui::Ui)) {
     });
 }
 
+/// The two pages. Teaching is a different errand from running: it
+/// edits the taught file and it is the only page whose numbers are not
+/// live robot state, so it does not share a scroll position with the
+/// controls that move the arm.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Operate,
+    Teach,
+}
+
 struct RobotGui {
     // The engine owns the tokio runtime and every connection; it must
     // outlive the widgets holding Channel handles.
@@ -97,6 +107,7 @@ struct RobotGui {
     camera_only: bool,
     /// Whether the separate camera window is open.
     camera_open: bool,
+    tab: Tab,
     ops: ops::OpsPanel,
     camera: camera::CameraPanel,
     calib: calib::CalibPanel,
@@ -131,22 +142,28 @@ impl RobotGui {
             _engine: engine,
             camera_only,
             camera_open: false,
+            tab: Tab::Operate,
             ops,
             camera,
             calib,
         }
     }
 
-    /// The control surface, on one three-column grid: state at the top,
-    /// the things that start a move in the middle, the taught numbers
-    /// they write at the bottom. Every card is one or two columns wide
-    /// and every row is one height, so the edges line up down the page.
-    fn control_page(&mut self, ui: &mut egui::Ui) {
-        // A minimum width rather than a fit: below it the cards would
-        // clip their own contents, and a horizontal scrollbar is the
-        // better failure.
+    /// The width of one and two columns of the page's three-column
+    /// grid. A minimum rather than a fit: below it the cards would clip
+    /// their own contents, and a horizontal scrollbar is the better
+    /// failure.
+    fn columns(ui: &egui::Ui) -> (f32, f32) {
         let one = (((ui.available_width() - 2.0 * GAP) / 3.0) - GAP).max(248.0);
-        let two = one * 2.0 + GAP;
+        (one, one * 2.0 + GAP)
+    }
+
+    /// Everything that reads or moves the robot: state at the top, the
+    /// things that start a move below it. Every card is one or two
+    /// columns wide and every row is one height, so the edges line up
+    /// down the page.
+    fn operate_page(&mut self, ui: &mut egui::Ui) {
+        let (one, two) = Self::columns(ui);
 
         ui.heading("State");
         ui.horizontal_top(|ui| {
@@ -176,9 +193,11 @@ impl RobotGui {
             });
         });
         self.ops.note_line(ui);
+    }
 
-        ui.add_space(GAP);
-        ui.heading("Teach");
+    /// The taught numbers and the jog that measures them.
+    fn teach_page(&mut self, ui: &mut egui::Ui) {
+        let (one, two) = Self::columns(ui);
         ui.horizontal_top(|ui| {
             card(ui, egui::vec2(one, H_TEACH), |ui| self.calib.jog_group(ui));
             card(ui, egui::vec2(two, H_TEACH), |ui| {
@@ -232,8 +251,22 @@ impl eframe::App for RobotGui {
                 }
             });
         });
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.tab, Tab::Operate, "Operate");
+            ui.selectable_value(&mut self.tab, Tab::Teach, "Teach");
+        });
         ui.separator();
-        egui::ScrollArea::both().show(ui, |ui| self.control_page(ui));
+        // One scroll area per tab: sharing it would carry the operate
+        // page's offset into a shorter Teach page and open it scrolled
+        // past its own top.
+        match self.tab {
+            Tab::Operate => egui::ScrollArea::both()
+                .id_salt("page-operate")
+                .show(ui, |ui| self.operate_page(ui)),
+            Tab::Teach => egui::ScrollArea::both()
+                .id_salt("page-teach")
+                .show(ui, |ui| self.teach_page(ui)),
+        };
         self.camera_window(ui.ctx());
     }
 }
