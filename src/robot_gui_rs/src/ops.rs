@@ -60,6 +60,11 @@ pub struct OpsPanel {
     gripper: Channel,
     gripper_rbv: RsdmLabel,
     wrench: Channel,
+    null_state: Channel,
+    null_iter: Channel,
+    null_d: [Channel; 3],
+    null_force: Channel,
+    null_msg: Channel,
 
     holder_sel: i64,
     null_holder: i64,
@@ -76,6 +81,21 @@ pub struct OpsPanel {
 fn ival(ch: &Channel) -> Option<i64> {
     ch.state().value.as_ref().and_then(PvValue::as_i64)
 }
+
+fn fval(ch: &Channel) -> Option<f64> {
+    ch.state().value.as_ref().and_then(PvValue::as_f64)
+}
+
+fn sval(ch: &Channel) -> Option<String> {
+    match ch.state().value.as_ref() {
+        Some(PvValue::Str(s)) => Some(s.to_string()),
+        _ => None,
+    }
+}
+
+const GREEN: egui::Color32 = egui::Color32::from_rgb(0x4c, 0xaf, 0x50);
+const RED: egui::Color32 = egui::Color32::from_rgb(0xf4, 0x43, 0x36);
+const AMBER: egui::Color32 = egui::Color32::from_rgb(0xff, 0xb3, 0x00);
 
 /// The three components and their magnitude, monospaced so the columns
 /// hold still while the numbers move.
@@ -103,6 +123,11 @@ impl OpsPanel {
             // Served by ur-monitor-ioc off its own RTDE receive stream,
             // so reading it here costs the sequencer nothing.
             wrench: ch("UR:Receive:ActualTCPForce")?,
+            null_state: ch("Null:State")?,
+            null_iter: ch("Null:Iter")?,
+            null_d: [ch("Null:DX")?, ch("Null:DY")?, ch("Null:DZ")?],
+            null_force: ch("Null:Force")?,
+            null_msg: ch("Null:Msg")?,
             holder_sel: 1,
             null_holder: 1,
             null_source: 0,
@@ -263,9 +288,9 @@ impl OpsPanel {
         egui::Grid::new("status").striped(true).show(ui, |ui| {
             ui.label("EPICS:");
             if connected {
-                ui.colored_label(egui::Color32::from_rgb(0x4c, 0xaf, 0x50), "connected");
+                ui.colored_label(GREEN, "connected");
             } else {
-                ui.colored_label(egui::Color32::from_rgb(0xf4, 0x43, 0x36), "DISCONNECTED");
+                ui.colored_label(RED, "DISCONNECTED");
             }
             ui.end_row();
             ui.label("Step:");
@@ -312,176 +337,222 @@ impl OpsPanel {
         });
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui) {
-        self.confirm_modal(ui.ctx());
+    /// The pending-action confirmation. Drawn once a frame, before any
+    /// group, because it is a modal over the whole page.
+    pub fn begin(&mut self, ctx: &egui::Context) {
+        self.confirm_modal(ctx);
+    }
+
+    /// What the robot is doing and what the tool feels.
+    pub fn status_group(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            ui.strong("Status");
+            self.status_grid(ui);
+        });
+    }
+
+    /// The grip null's progress and its result — the numbers the daemon
+    /// writes to `Robot:Null:`, which is the only place a finished run
+    /// says whether it worked.
+    pub fn null_status_group(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            ui.strong("Grip null result");
+            let (label, color) = match ival(&self.null_state).unwrap_or(0) {
+                1 => ("running", AMBER),
+                2 => ("SETTLED", GREEN),
+                3 => ("FAILED", RED),
+                _ => ("idle", ui.visuals().weak_text_color()),
+            };
+            egui::Grid::new("nullstatus").striped(true).show(ui, |ui| {
+                ui.label("Result:");
+                ui.colored_label(color, label);
+                ui.end_row();
+                ui.label("Iteration:");
+                ui.label(ival(&self.null_iter).map_or("-".into(), |i| i.to_string()));
+                ui.end_row();
+                ui.label("Correction:");
+                let d: Vec<Option<f64>> = self.null_d.iter().map(fval).collect();
+                match (d[0], d[1], d[2]) {
+                    (Some(x), Some(y), Some(z)) => {
+                        ui.monospace(format!("{x:+7.3} {y:+7.3} {z:+7.3} mm"))
+                    }
+                    _ => ui.label("-"),
+                };
+                ui.end_row();
+                ui.label("Close wrench:");
+                match fval(&self.null_force) {
+                    Some(f) => ui.label(format!("{f:.2} N")),
+                    None => ui.label("-"),
+                };
+                ui.end_row();
+            });
+            ui.label("(correction is base x, base y, depth — the trim columns X, Z, Y)");
+            let msg = sval(&self.null_msg).unwrap_or_default();
+            if !msg.is_empty() {
+                ui.label(egui::RichText::new(msg).italics());
+            }
+        });
+    }
+
+    /// The stage errand, and the controls that interrupt whatever is
+    /// running.
+    pub fn sample_group(&mut self, ui: &mut egui::Ui) {
         let step = ival(&self.current_step).unwrap_or(0);
         let waiting = step == 12;
         let paused = ival(&self.stop).unwrap_or(0) != 0;
-
-        ui.horizontal_top(|ui| {
-            ui.group(|ui| {
-                ui.vertical(|ui| {
-                    ui.strong("Status");
-                    self.status_grid(ui);
-                });
+        ui.vertical(|ui| {
+            ui.strong("Sample");
+            ui.horizontal(|ui| {
+                ui.label("Holder:");
+                ui.add(egui::DragValue::new(&mut self.holder_sel).range(1..=10));
             });
-            ui.group(|ui| {
-                ui.vertical(|ui| {
-                    ui.strong("Sample");
-                    ui.horizontal(|ui| {
-                        ui.label("Holder:");
-                        ui.add(egui::DragValue::new(&mut self.holder_sel).range(1..=10));
-                    });
-                    if ui.button("Mount on stage").clicked() {
-                        self.request(Action::Mount(self.holder_sel));
-                    }
-                    if ui.button("Return from stage").clicked() {
-                        self.request(Action::Return(self.holder_sel));
-                    }
-                    ui.add_space(4.0);
-                    ui.scope(|ui| {
-                        if waiting {
-                            ui.strong("Measurement wait:");
-                        } else {
-                            ui.label("Measurement wait: (at step 12)");
-                        }
-                        ui.add_enabled_ui(waiting, |ui| {
-                            ui.horizontal(|ui| {
-                                if ui.button("Continue").clicked() {
-                                    self.wait.put(PvValue::Int(1));
-                                    self.note = "Continuing — retrieving the sample...".into();
-                                }
-                                if ui.button("Abort").clicked() {
-                                    self.wait.put(PvValue::Int(2));
-                                    self.trigger.put(PvValue::Int(0));
-                                    self.note =
-                                        "Stopped at the wait — sample left on the stage".into();
-                                }
-                            });
-                        });
-                    });
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        if paused {
-                            if ui.button("Resume").clicked() {
-                                self.stop.put(PvValue::Int(0));
-                                self.note = "Resumed".into();
-                            }
-                        } else if ui.button("Pause").clicked() {
-                            self.stop.put(PvValue::Int(1));
-                            self.note = "Pause requested — stops after the current step".into();
-                        }
-                        if ui.button("Recover").clicked() {
-                            self.request(Action::Recover);
-                        }
-                    });
-                });
-            });
-        });
-
-        ui.add_space(6.0);
-        ui.horizontal_top(|ui| {
-            ui.group(|ui| {
-                ui.vertical(|ui| {
-                    ui.strong("Grip null");
-                    ui.label("Close on the puck, write the trims the wrench asks for.");
-                    ui.horizontal(|ui| {
-                        ui.label("Holder:");
-                        ui.add(egui::DragValue::new(&mut self.null_holder).range(1..=10));
-                        ui.label("Puck from:");
-                        ui.add(egui::DragValue::new(&mut self.null_source).range(0..=10));
-                    });
-                    let own = self.null_source == 0 || self.null_source == self.null_holder;
-                    ui.label(if own {
-                        "(0 = the puck already in that holder)"
-                    } else {
-                        "(fetched first; the target seat must be empty)"
-                    });
-                    if ui.button("Null grip").clicked() {
-                        self.request(Action::GripNull {
-                            target: self.null_holder,
-                            source: self.null_source,
-                        });
-                    }
-                });
-            });
-            ui.group(|ui| {
-                ui.vertical(|ui| {
-                    ui.strong("Move puck");
-                    ui.label("Holder to holder, no stage leg.");
-                    ui.horizontal(|ui| {
-                        ui.label("From:");
-                        ui.add(egui::DragValue::new(&mut self.xfer_src).range(1..=10));
-                        ui.label("To:");
-                        ui.add(egui::DragValue::new(&mut self.xfer_target).range(1..=10));
-                    });
-                    let same = self.xfer_src == self.xfer_target;
-                    ui.label(if same {
-                        "(pick two different holders)"
-                    } else {
-                        "(the seat is not probed)"
-                    });
-                    if ui
-                        .add_enabled(!same, egui::Button::new("Move puck"))
-                        .clicked()
-                    {
-                        self.request(Action::Transfer {
-                            target: self.xfer_target,
-                            source: self.xfer_src,
-                        });
-                    }
-                });
-            });
-            ui.group(|ui| {
-                ui.vertical(|ui| {
-                    ui.strong("Gripper");
-                    ui.horizontal(|ui| {
-                        if ui.button("Open").clicked() {
-                            self.gripper.put(PvValue::Int(1));
-                        }
-                        if ui.button("Close").clicked() {
-                            self.gripper.put(PvValue::Int(0));
-                        }
-                    });
-                });
-            });
-            ui.group(|ui| {
-                ui.vertical(|ui| {
-                    ui.strong("Advanced");
-                    ui.horizontal(|ui| {
-                        ui.label("Mode:");
-                        egui::ComboBox::from_id_salt("adv-mode")
-                            .selected_text(MODE_NAMES[self.adv_mode])
-                            .show_ui(ui, |ui| {
-                                for (i, name) in MODE_NAMES.iter().enumerate() {
-                                    ui.selectable_value(&mut self.adv_mode, i, *name);
-                                }
-                            });
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Start step:");
-                        ui.add(egui::DragValue::new(&mut self.adv_start).range(0..=23));
-                        if ui.button("Trigger").clicked() {
-                            self.request(Action::Advanced {
-                                mode: self.adv_mode as i64,
-                                start: self.adv_start,
-                            });
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Pause at step:");
-                        ui.add(egui::DragValue::new(&mut self.pause_step_input).range(0..=23));
-                        if ui.button("Set").clicked() {
-                            self.pause_step.put(PvValue::Int(self.pause_step_input));
-                        }
-                        ui.label(format!("(now {})", ival(&self.pause_step).unwrap_or(0)));
-                    });
-                });
-            });
-        });
-
-        if !self.note.is_empty() {
+            if ui.button("Mount on stage").clicked() {
+                self.request(Action::Mount(self.holder_sel));
+            }
+            if ui.button("Return from stage").clicked() {
+                self.request(Action::Return(self.holder_sel));
+            }
             ui.add_space(4.0);
+            if waiting {
+                ui.strong("Measurement wait:");
+            } else {
+                ui.label("Measurement wait: (at step 12)");
+            }
+            ui.add_enabled_ui(waiting, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("Continue").clicked() {
+                        self.wait.put(PvValue::Int(1));
+                        self.note = "Continuing — retrieving the sample...".into();
+                    }
+                    if ui.button("Abort").clicked() {
+                        self.wait.put(PvValue::Int(2));
+                        self.trigger.put(PvValue::Int(0));
+                        self.note = "Stopped at the wait — sample left on the stage".into();
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if paused {
+                    if ui.button("Resume").clicked() {
+                        self.stop.put(PvValue::Int(0));
+                        self.note = "Resumed".into();
+                    }
+                } else if ui.button("Pause").clicked() {
+                    self.stop.put(PvValue::Int(1));
+                    self.note = "Pause requested — stops after the current step".into();
+                }
+                if ui.button("Recover").clicked() {
+                    self.request(Action::Recover);
+                }
+            });
+        });
+    }
+
+    pub fn grip_null_group(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            ui.strong("Grip null");
+            ui.label("Close on the puck, write the trims the wrench asks for.");
+            ui.horizontal(|ui| {
+                ui.label("Holder:");
+                ui.add(egui::DragValue::new(&mut self.null_holder).range(1..=10));
+                ui.label("Puck from:");
+                ui.add(egui::DragValue::new(&mut self.null_source).range(0..=10));
+            });
+            let own = self.null_source == 0 || self.null_source == self.null_holder;
+            ui.label(if own {
+                "(0 = the puck already in that holder)"
+            } else {
+                "(fetched first; the target seat must be empty)"
+            });
+            if ui.button("Null grip").clicked() {
+                self.request(Action::GripNull {
+                    target: self.null_holder,
+                    source: self.null_source,
+                });
+            }
+        });
+    }
+
+    pub fn move_puck_group(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            ui.strong("Move puck");
+            ui.label("Holder to holder, no stage leg.");
+            ui.horizontal(|ui| {
+                ui.label("From:");
+                ui.add(egui::DragValue::new(&mut self.xfer_src).range(1..=10));
+                ui.label("To:");
+                ui.add(egui::DragValue::new(&mut self.xfer_target).range(1..=10));
+            });
+            let same = self.xfer_src == self.xfer_target;
+            ui.label(if same {
+                "(pick two different holders)"
+            } else {
+                "(the seat is not probed)"
+            });
+            if ui
+                .add_enabled(!same, egui::Button::new("Move puck"))
+                .clicked()
+            {
+                self.request(Action::Transfer {
+                    target: self.xfer_target,
+                    source: self.xfer_src,
+                });
+            }
+        });
+    }
+
+    pub fn gripper_group(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            ui.strong("Gripper");
+            ui.horizontal(|ui| {
+                if ui.button("Open").clicked() {
+                    self.gripper.put(PvValue::Int(1));
+                }
+                if ui.button("Close").clicked() {
+                    self.gripper.put(PvValue::Int(0));
+                }
+            });
+        });
+    }
+
+    pub fn advanced_group(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            ui.strong("Advanced");
+            ui.horizontal(|ui| {
+                ui.label("Mode:");
+                egui::ComboBox::from_id_salt("adv-mode")
+                    .selected_text(MODE_NAMES[self.adv_mode])
+                    .show_ui(ui, |ui| {
+                        for (i, name) in MODE_NAMES.iter().enumerate() {
+                            ui.selectable_value(&mut self.adv_mode, i, *name);
+                        }
+                    });
+            });
+            ui.horizontal(|ui| {
+                ui.label("Start step:");
+                ui.add(egui::DragValue::new(&mut self.adv_start).range(0..=23));
+                if ui.button("Trigger").clicked() {
+                    self.request(Action::Advanced {
+                        mode: self.adv_mode as i64,
+                        start: self.adv_start,
+                    });
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Pause at step:");
+                ui.add(egui::DragValue::new(&mut self.pause_step_input).range(0..=23));
+                if ui.button("Set").clicked() {
+                    self.pause_step.put(PvValue::Int(self.pause_step_input));
+                }
+                ui.label(format!("(now {})", ival(&self.pause_step).unwrap_or(0)));
+            });
+        });
+    }
+
+    /// The last thing this panel did, if anything.
+    pub fn note_line(&self, ui: &mut egui::Ui) {
+        if !self.note.is_empty() {
             ui.label(&self.note);
         }
     }

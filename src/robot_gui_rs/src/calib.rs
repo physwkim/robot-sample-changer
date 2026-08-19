@@ -159,7 +159,7 @@ impl CalibPanel {
         }
     }
 
-    fn jog_ui(&mut self, ui: &mut egui::Ui) {
+    pub fn jog_group(&mut self, ui: &mut egui::Ui) {
         ui.strong("TCP jog (only serviced during a calibration hold)");
         ui.horizontal(|ui| {
             ui.label("Step (mm):");
@@ -185,7 +185,7 @@ impl CalibPanel {
         });
     }
 
-    fn table_ui(&mut self, ui: &mut egui::Ui) {
+    pub fn table_group(&mut self, ui: &mut egui::Ui) {
         ui.strong("Seat offsets and tilts (taught_waypoints.yaml)");
         if !self.have_table {
             ui.colored_label(egui::Color32::from_rgb(0xf4, 0x43, 0x36), &self.note);
@@ -256,13 +256,8 @@ impl CalibPanel {
         );
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_top(|ui| {
-            ui.group(|ui| self.jog_ui(ui));
-            ui.group(|ui| {
-                ui.vertical(|ui| self.table_ui(ui));
-            });
-        });
+    /// What the table last did — loaded, saved, or refused.
+    pub fn note_line(&self, ui: &mut egui::Ui) {
         if !self.note.is_empty() {
             ui.label(&self.note);
         }
