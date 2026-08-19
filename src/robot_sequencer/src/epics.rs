@@ -14,14 +14,16 @@ use epics_ca_rs::EpicsValue;
 use epics_ca_rs::client::{CaChannel, CaClient};
 use tokio::runtime::Runtime;
 
-use crate::config::{EpicsConfig, VisionConfig};
+use crate::config::{EpicsConfig, SeatCheckConfig, VisionConfig};
 use crate::error::SequencerError;
 use crate::log;
+use crate::seatcheck::{DepthCamera, DepthFrame, Lens};
 
 const GET_TIMEOUT: Duration = Duration::from_secs(1);
 const JOG_TIMEOUT: Duration = Duration::from_millis(500);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const VISION_POLL: Duration = Duration::from_millis(50);
+const FRAME_POLL: Duration = Duration::from_millis(10);
 
 /// `Robot:Wait` states (mbbo: 0=Wait, 1=Continue, 2=Abort).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,6 +138,21 @@ pub struct Epics {
     vision: Option<VisionChannels>,
     null: Option<NullChannels>,
     jog_total: Option<JogChannels>,
+    depth: Option<DepthChannels>,
+}
+
+/// The D405 depth stream: the frame, the counter that says whether it
+/// is this exposure or the last one, and the geometry it was taken
+/// under.
+///
+/// The geometry is read once at connect and kept, not re-read per
+/// frame: it changes with the stream profile, and a profile change is a
+/// restart of the camera IOC, not something that happens between two
+/// steps of a sequence.
+struct DepthChannels {
+    data: CaChannel,
+    counter: CaChannel,
+    camera: DepthCamera,
 }
 
 /// The grip null's progress records. All seven or none: a half-present
@@ -265,6 +282,7 @@ impl Epics {
     pub fn connect(
         config: &EpicsConfig,
         vision: Option<&VisionConfig>,
+        seat_check: Option<&SeatCheckConfig>,
     ) -> Result<Self, SequencerError> {
         let rt = Runtime::new()
             .map_err(|e| SequencerError(format!("cannot create tokio runtime: {e}")))?;
@@ -307,6 +325,65 @@ impl Epics {
             None => None,
         };
 
+        // Required when the check is on, for the reason vision's PVs are:
+        // a gate that quietly turns itself off because a camera PV did
+        // not answer at startup is worse than no gate, because the
+        // operator believes they have one.
+        let depth = match seat_check {
+            Some(s) => {
+                let data = required(&format!("{}ArrayData", s.depth_prefix))?;
+                let counter = required(&format!("{}ArrayCounter_RBV", s.depth_prefix))?;
+                let number = |name: &str| -> Result<f64, SequencerError> {
+                    let channel = required(name)?;
+                    rt.block_on(channel.get_with_timeout(GET_TIMEOUT))
+                        .ok()
+                        .and_then(|(_, v)| value_to_f64(&v))
+                        .ok_or_else(|| SequencerError(format!("PV '{name}' did not read")))
+                };
+                let c = &s.camera_prefix;
+                let (fx, fy) = (
+                    number(&format!("{c}RSDepthFx_RBV"))?,
+                    number(&format!("{c}RSDepthFy_RBV"))?,
+                );
+                let (ppx, ppy) = (
+                    number(&format!("{c}RSDepthPPx_RBV"))?,
+                    number(&format!("{c}RSDepthPPy_RBV"))?,
+                );
+                let unit_m = number(&format!("{c}RSDepthUnits_RBV"))?;
+                let width = number(&format!("{}ArraySize0_RBV", s.depth_prefix))? as usize;
+                let height = number(&format!("{}ArraySize1_RBV", s.depth_prefix))? as usize;
+                if width == 0 || height == 0 || unit_m <= 0.0 {
+                    return Err(SequencerError(format!(
+                        "seat check: {}ArraySize is {width}x{height} and {c}RSDepthUnits_RBV \
+                         is {unit_m} — the depth stream is not running",
+                        s.depth_prefix
+                    )));
+                }
+                log::info(&format!(
+                    "Seat check: depth {width}x{height}, fx {fx:.3}, ppx ({ppx:.1}, {ppy:.1}), \
+                     {:.4} mm per count",
+                    unit_m * 1000.0
+                ));
+                Some(DepthChannels {
+                    data,
+                    counter,
+                    // The depth stream is rectified before it leaves the
+                    // camera, so the model that describes it is the
+                    // pinhole alone.
+                    camera: DepthCamera {
+                        lens: Lens {
+                            k: [fx, 0.0, ppx, 0.0, fy, ppy, 0.0, 0.0, 1.0],
+                            dist: [0.0; 5],
+                        },
+                        unit_m,
+                        width,
+                        height,
+                    },
+                })
+            }
+            None => None,
+        };
+
         let epics = Self {
             trigger: required(&config.trigger_pv)?,
             start_step: required(&config.start_step_pv)?,
@@ -327,6 +404,7 @@ impl Epics {
             vision,
             null: null_channels(&optional, &config.null_prefix_pv),
             jog_total: jog_channels(&optional, &config.jog_prefix_pv),
+            depth,
             _client: client,
             rt,
         };
@@ -570,6 +648,70 @@ impl Epics {
         }
         let _ = self.put_i32(&j.apply, 0, JOG_TIMEOUT);
         true
+    }
+
+    /// The depth stream's geometry, or `None` when the seat check is off.
+    pub fn depth_camera(&self) -> Option<&DepthCamera> {
+        self.depth.as_ref().map(|d| &d.camera)
+    }
+
+    /// A depth frame the camera exposed after this call started.
+    ///
+    /// Waiting for the counter to advance, rather than reading the
+    /// pixels straight away, is the same discipline
+    /// `tools/handeye/detector.py` arrived at: a plain read lands on the
+    /// frame that was in flight while the arm was still moving, and a
+    /// seat check answered from the previous pose's view is a check that
+    /// passes for the wrong reason. Two counts, not one, because the
+    /// frame being clocked out when the call starts was exposed before
+    /// it.
+    pub fn depth_frame(&self, timeout: Duration) -> Option<DepthFrame> {
+        let depth = self.depth.as_ref()?;
+        let pixels = depth.camera.width * depth.camera.height;
+        let start = self.get_i32(&depth.counter, GET_TIMEOUT)?;
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match self.get_i32(&depth.counter, GET_TIMEOUT) {
+                Some(now) if now >= start + 2 => break,
+                _ if std::time::Instant::now() >= deadline => {
+                    log::warn(&format!(
+                        "seat check: no depth frame in {:.1} s (counter stuck at {start}) — \
+                         check the plugin's EnableCallbacks",
+                        timeout.as_secs_f64()
+                    ));
+                    return None;
+                }
+                _ => std::thread::sleep(FRAME_POLL),
+            }
+        }
+        let (_, value) = self
+            .rt
+            .block_on(
+                depth
+                    .data
+                    .get_with_timeout_count(timeout, u32::try_from(pixels).ok()?),
+            )
+            .ok()?;
+        // Z16 counts travel as a SHORT waveform, so everything past
+        // 3.2768 m arrives negative; `as u16` puts the bits back the way
+        // the camera wrote them.
+        let counts: Vec<u16> = match &value {
+            EpicsValue::ShortArray(a) => a.iter().map(|v| *v as u16).collect(),
+            EpicsValue::UShortArray(a) => a.clone(),
+            EpicsValue::LongArray(a) => a.iter().map(|v| *v as u16).collect(),
+            other => {
+                log::warn(&format!("seat check: depth frame came back as {other:?}"));
+                return None;
+            }
+        };
+        if counts.len() < pixels {
+            log::warn(&format!(
+                "seat check: depth frame is {} pixels, expected {pixels}",
+                counts.len()
+            ));
+            return None;
+        }
+        Some(DepthFrame { counts })
     }
 
     fn get_f64(&self, channel: &CaChannel, timeout: Duration) -> Option<f64> {

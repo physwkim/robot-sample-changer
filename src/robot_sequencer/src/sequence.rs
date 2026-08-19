@@ -25,6 +25,7 @@ use crate::model::{JointMap, Model};
 use crate::motion::{
     Bracket, Centring, Motion, NEGLIGIBLE_MM, ProbeLimits, Probed, TiltLimits, Tilted,
 };
+use crate::seatcheck::{HandEye, Verdict};
 use crate::waypoints::{WaypointData, persist_holder_trims, persist_stage_trims};
 
 const POLL: Duration = Duration::from_millis(100);
@@ -300,6 +301,34 @@ pub struct Sequencer<'a> {
     /// How far the operator has jogged since the last run started, and
     /// where that would be written.
     jog: JogTotal,
+    /// The hand-eye solve the seat check projects through, when it is
+    /// on. `None` disables every gate.
+    seat_check: Option<HandEye>,
+}
+
+/// What a step about to run needs of the seat it is aimed at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Expect {
+    /// A pick: there must be a puck to take.
+    Occupied,
+    /// A place: there must be room to put one.
+    Empty,
+}
+
+impl Expect {
+    fn verdict(self) -> Verdict {
+        match self {
+            Self::Occupied => Verdict::Occupied,
+            Self::Empty => Verdict::Empty,
+        }
+    }
+
+    fn complaint(self) -> &'static str {
+        match self {
+            Self::Occupied => "there is nothing to pick up",
+            Self::Empty => "something is already standing in it",
+        }
+    }
 }
 
 /// A measured correction gated against the configured deadband/limit.
@@ -410,6 +439,7 @@ impl<'a> Sequencer<'a> {
         gripper: Gripper,
         model: &'a Model,
         config: &'a Config,
+        seat_check: Option<HandEye>,
     ) -> Self {
         // Seed the request ids above the persisted Done echo — see
         // `vision_last_done` for why starting at 0 aliases stale answers.
@@ -427,6 +457,7 @@ impl<'a> Sequencer<'a> {
                 mm: [0.0; 3],
                 seat: None,
             },
+            seat_check,
         }
     }
 
@@ -627,6 +658,7 @@ impl<'a> Sequencer<'a> {
     fn run_normal(&mut self, w: &RunWaypoints, start: i32) -> Result<Outcome, SequencerError> {
         self.hand(0, "open_hand", true, start)?;
         self.arm(1, "holder_standby", &w.standby, start)?;
+        self.seat_gate(start <= 1, &w.standby, &w.on_pos, Expect::Occupied, "rack")?;
 
         let d_pick =
             self.vision_correction(start <= 1, &w.standby, VisionKind::PickAlign, "pick@rack")?;
@@ -640,6 +672,13 @@ impl<'a> Sequencer<'a> {
             self.vision_correction(start <= 5, &above_c, VisionKind::GripOffset, "grip@rack")?;
         self.cartesian(6, "holder_retreat", &w.retreat, start)?;
         self.arm(7, "sample_holder_standby", &w.sh_standby, start)?;
+        self.seat_gate(
+            start <= 7,
+            &w.sh_standby,
+            &w.sh_on_pos,
+            Expect::Empty,
+            "stage",
+        )?;
 
         let d_slot = self.vision_correction(
             start <= 7,
@@ -674,7 +713,17 @@ impl<'a> Sequencer<'a> {
         if !skip_remaining {
             // The arm has stood at sh_standby since step 12, through the
             // measurement wait, so that is the pose this observation is
-            // taken from — the wait does not move it.
+            // taken from — the wait does not move it. Same for the seat
+            // check, which is asked after the wait rather than before so
+            // that it also covers a sample lifted off the stage while
+            // the beamline had it.
+            self.seat_gate(
+                start <= 12,
+                &w.sh_standby,
+                &w.sh_on_pos,
+                Expect::Occupied,
+                "stage",
+            )?;
             let d_pick2 = self.vision_correction(
                 start <= 12,
                 &w.sh_standby,
@@ -695,6 +744,7 @@ impl<'a> Sequencer<'a> {
             )?;
             self.cartesian(17, "sample_holder_standby_2nd", &w.sh_standby, start)?;
             self.arm(18, "holder_standby_return", &w.standby, start)?;
+            self.seat_gate(start <= 18, &w.standby, &w.on_pos, Expect::Empty, "rack")?;
 
             let d_slot2 = self.vision_correction(
                 start <= 18,
@@ -1499,6 +1549,13 @@ impl<'a> Sequencer<'a> {
 
         self.hand(0, "open_hand", true, 0)?;
         self.arm(1, "holder_standby", &w_s.standby, 0)?;
+        self.seat_gate(
+            true,
+            &w_s.standby,
+            &w_s.on_pos,
+            Expect::Occupied,
+            &format!("holder {source}"),
+        )?;
         self.cartesian(2, "holder_above", &w_s.above, 0)?;
         self.cartesian(3, "holder_on_position", &w_s.on_pos, 0)?;
         self.hand(4, "close_gripper", false, 0)?;
@@ -1506,6 +1563,15 @@ impl<'a> Sequencer<'a> {
         self.cartesian(6, "holder_retreat", &w_s.retreat, 0)?;
         // The one move the stage leg used to make from its own standby.
         self.arm(18, "holder_standby_return", &w_t.standby, 0)?;
+        // The one thing this mode could never tell an operator before
+        // it dropped a second puck into an occupied well.
+        self.seat_gate(
+            true,
+            &w_t.standby,
+            &w_t.on_pos,
+            Expect::Empty,
+            &format!("holder {target}"),
+        )?;
         self.cartesian(19, "holder_above_final", &w_t.above, 0)?;
         self.cartesian(20, "holder_on_position_final", &w_t.on_pos, 0)?;
         self.hand(21, "open_gripper_final", true, 0)?;
@@ -2202,6 +2268,85 @@ impl<'a> Sequencer<'a> {
     /// over-limit correction are all errors: never guess, never
     /// auto-apply a large jump. In observe_only every failure is logged
     /// and swallowed — Phase C observation must not affect operation.
+    /// Ask the camera whether the seat the next steps are aimed at is in
+    /// the state they assume, and stop the run when it plainly is not.
+    ///
+    /// `run` carries the same meaning it has at every vision hook: false
+    /// when a `StartStep` resume skipped the move that would have put
+    /// the arm at `observe_from`, in which case the arm is somewhere
+    /// else and the window would be projected onto the wrong part of the
+    /// scene.
+    ///
+    /// A verdict of [`Verdict::Unreadable`] warns and lets the run
+    /// continue. The camera is a second opinion here — the seat's real
+    /// protection is still the wrench, which reads 4.4 N at 0.2 mm — and
+    /// a rig that refuses to run because a depth frame did not arrive
+    /// would be less available than the one this is being added to,
+    /// while protecting nothing more.
+    fn seat_gate(
+        &mut self,
+        run: bool,
+        observe_from: &JointMap,
+        seat: &JointMap,
+        expect: Expect,
+        label: &str,
+    ) -> Result<(), SequencerError> {
+        let (Some(eye), true) = (&self.seat_check, run) else {
+            return Ok(());
+        };
+        let Some(camera) = self.epics.depth_camera() else {
+            return Ok(());
+        };
+        let timeout = Duration::from_secs_f64(self.config.seat_check.timeout);
+        // `depth_frame` has already said why on this path.
+        let Some(frame) = self.epics.depth_frame(timeout) else {
+            return Ok(());
+        };
+        let base_t_ee = self.model.fk(observe_from)?;
+        let seat_pose = self.model.fk(seat)?;
+        let Some(reading) = eye.read_seat(&frame, camera, &base_t_ee, &seat_pose) else {
+            log::warn(&format!(
+                "  seat check @{label}: the seat does not project into the frame from \
+                 here — not checked"
+            ));
+            return Ok(());
+        };
+        if reading.verdict == Verdict::Unreadable {
+            log::warn(&format!(
+                "  seat check @{label}: unreadable, only {:.0}% of the window carried a \
+                 range — continuing without it",
+                reading.valid_fraction * 100.0
+            ));
+            return Ok(());
+        }
+        log::info(&format!(
+            "  seat check @{label}: {} — {:.1} mm against the seat's {:.1} mm ({:+.1} mm), \
+             {:.0}% of pixels {}-{} x {}-{} valid",
+            reading.verdict.label(),
+            reading.median_m * 1000.0,
+            reading.predicted_m * 1000.0,
+            reading.delta_m * 1000.0,
+            reading.valid_fraction * 100.0,
+            reading.window.c0,
+            reading.window.c1,
+            reading.window.r0,
+            reading.window.r1
+        ));
+        if reading.verdict != expect.verdict() {
+            return Err(SequencerError(format!(
+                "seat check @{label}: the seat reads {} and {} — the camera sees \
+                 {:.1} mm where the seat is {:.1} mm ({:+.1} mm). Fix the seat, or set \
+                 seat_check.enabled to false to run without the check",
+                reading.verdict.label(),
+                expect.complaint(),
+                reading.median_m * 1000.0,
+                reading.predicted_m * 1000.0,
+                reading.delta_m * 1000.0
+            )));
+        }
+        Ok(())
+    }
+
     fn vision_correction(
         &mut self,
         measure: bool,

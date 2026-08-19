@@ -30,6 +30,47 @@ pub struct Config {
     pub probe: ProbeConfig,
     #[serde(default)]
     pub grip_null: GripNullConfig,
+    #[serde(default)]
+    pub seat_check: SeatCheckConfig,
+}
+
+/// Ask the D405's depth stream whether the seat the arm is about to use
+/// is in the state the run assumes, before the arm commits to it.
+///
+/// Disabled by default, and necessarily so: it needs a camera and a
+/// `T_ee_cam.yaml` solved for where that camera is mounted, neither of
+/// which the URSim rehearsal has.
+///
+/// There is no window or threshold here. Those are measured constants
+/// and they live next to the measurement in `crate::seatcheck`; a seat
+/// window that an operator can retune from a config file is a seat
+/// window nobody can say the validation still covers.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SeatCheckConfig {
+    pub enabled: bool,
+    /// The hand-eye solve, as `tools/handeye/solve_joint.py` writes it.
+    pub hand_eye_yaml: PathBuf,
+    /// The NDStdArrays plugin carrying the Z16 depth frame.
+    pub depth_prefix: String,
+    /// The camera record the depth intrinsics and the count scale come
+    /// from. Its own, not the colour stream's.
+    pub camera_prefix: String,
+    /// Seconds to wait for a frame the camera exposed after the arm
+    /// stopped moving.
+    pub timeout: f64,
+}
+
+impl Default for SeatCheckConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hand_eye_yaml: PathBuf::from("../T_ee_cam.yaml"),
+            depth_prefix: "RS405:image2:".into(),
+            camera_prefix: "RS405:cam1:".into(),
+            timeout: 5.0,
+        }
+    }
 }
 
 /// [`crate::epics::CalibMode::GripNull`]: how the wrench a gripper close
@@ -820,6 +861,7 @@ impl Config {
         for object in &mut config.scene.objects {
             anchor(&mut object.stl);
         }
+        anchor(&mut config.seat_check.hand_eye_yaml);
         anchor(&mut config.handeye.detector);
         anchor(&mut config.handeye.out_dir);
         // Checked always, not only when the mode is selected: there is no
@@ -1111,6 +1153,9 @@ mod tests {
             &config.robot.output_recipe,
             &config.robot.input_recipe,
             &config.sequence.waypoints_yaml,
+            // On when production runs, so the file it names is as much
+            // a startup dependency as the URDF.
+            &config.seat_check.hand_eye_yaml,
         ] {
             assert!(path.exists(), "missing: {}", path.display());
         }
@@ -1162,6 +1207,10 @@ mod tests {
         // defaults must be the ones the daemon banner advertises.
         assert_eq!(config.handeye.angle_deg, 8.0);
         assert_eq!(config.handeye.min_samples, 5);
+        // The seat check has to default off and not merely be absent
+        // here: URSim has no camera, and `Epics::connect` requires every
+        // depth PV once it is on.
+        assert!(!config.seat_check.enabled);
     }
 
     /// Same reasoning as the hand-eye ranges, on the numbers that bound

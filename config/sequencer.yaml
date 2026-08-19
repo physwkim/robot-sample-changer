@@ -387,3 +387,30 @@ grip_null:
                         # object in the well reads exactly like a large steady
                         # force, and so does the wrong puck
   max_iterations: 6     # each is one pick and place, about 35 s
+
+# Ask the D405's depth stream whether the seat the arm is about to use is in
+# the state the step assumes -- a puck to pick, room to place -- before the
+# arm commits. The window and the threshold are measured constants and live
+# in src/seatcheck.rs next to the measurement; only what identifies this
+# rig's camera is here.
+#
+# What it is NOT is a clearance check. One pixel is 0.34 mm from a holder
+# standby, T_ee_cam's translation is uncertain by 0.45 mm 1-sigma and depth
+# noise is +-1 mm, against a rack well whose play is +-0.032 mm. Occupancy is
+# a different scale: a seated puck reads 4 mm nearer than its own grasp point
+# where an empty well reads 41 mm further (holder 2, loaded then emptied,
+# 2026-08-18). Clearance stays with the wrench, which reads 4.4 N at 0.2 mm.
+seat_check:
+  enabled: true
+  hand_eye_yaml: "../T_ee_cam.yaml"
+                        # what tools/handeye/solve_joint.py wrote; a remounted
+                        # camera means a fresh CalibMode=3 capture and a re-solve
+                        # into this file, and nothing else changes
+  depth_prefix: "RS405:image2:"
+                        # the NDStdArrays plugin carrying the Z16 frame. Its
+                        # EnableCallbacks must be on, or no frame ever arrives
+  camera_prefix: "RS405:cam1:"
+                        # the depth stream's own intrinsics and count scale --
+                        # 389.555 and 0.0001 m here, not the colour stream's
+  timeout: 5.0          # seconds to wait for a frame exposed after the arm
+                        # stopped; a miss warns and lets the run continue

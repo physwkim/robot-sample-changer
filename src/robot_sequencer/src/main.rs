@@ -20,6 +20,7 @@ mod handeye;
 mod log;
 mod model;
 mod motion;
+mod seatcheck;
 mod sequence;
 mod stream;
 mod waypoints;
@@ -33,6 +34,7 @@ use crate::error::SequencerError;
 use crate::gripper::Gripper;
 use crate::model::Model;
 use crate::motion::Motion;
+use crate::seatcheck::HandEye;
 use crate::sequence::Sequencer;
 
 fn run() -> Result<(), SequencerError> {
@@ -45,9 +47,15 @@ fn run() -> Result<(), SequencerError> {
     log::info("Loading robot model...");
     let model = Model::load(&config)?;
 
+    let seat_check = config
+        .seat_check
+        .enabled
+        .then(|| HandEye::load(&config.seat_check.hand_eye_yaml))
+        .transpose()?;
     let epics = Epics::connect(
         &config.epics,
         config.vision.enabled.then_some(&config.vision),
+        config.seat_check.enabled.then_some(&config.seat_check),
     )?;
     // A trigger left at 1 by a crash must not fire a sequence the moment
     // the daemon returns; clearing it is the C++ node's startup behavior.
@@ -143,9 +151,21 @@ fn run() -> Result<(), SequencerError> {
             config.vision.req_pv
         ));
     }
+    if let Some(eye) = &seat_check {
+        let t = eye.ee_t_cam.translation.vector * 1000.0;
+        log::info(&format!(
+            "  Seat check: ENABLED ({}, camera at ({:.1}, {:.1}, {:.1}) mm on the tool, \
+             solved at fx {:.1})",
+            config.seat_check.hand_eye_yaml.display(),
+            t.x,
+            t.y,
+            t.z,
+            eye.colour.k[0]
+        ));
+    }
     log::info("========================================");
 
-    Sequencer::new(epics, motion, gripper, &model, &config).run()
+    Sequencer::new(epics, motion, gripper, &model, &config, seat_check).run()
 }
 
 fn main() -> ExitCode {
