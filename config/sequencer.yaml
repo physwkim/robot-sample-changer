@@ -411,7 +411,7 @@ probe:
                           # two: the descent that reaches this floor is three
                           # steps long and has none of its own to spare. The
                           # half-abort bound stops it sooner on a stiff floor
-    heights_mm: [2.0, 0.3]
+    heights_mm: [2.0, 1.0, 0.3]
                           # where the laterals are measured, mm above the taught
                           # seat. At the seat a taught residual larger than the
                           # play starts the bracket already pressed into a wall,
