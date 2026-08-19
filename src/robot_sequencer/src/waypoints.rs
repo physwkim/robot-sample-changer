@@ -505,7 +505,8 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
-    /// The depth slot, which holder map writes from the floor fit. Read
+    /// The depth slot, which the grip null writes from the close's base
+    /// z force. Read
     /// relative to what the file already holds: these are live trims an
     /// operator edits, so an absolute expectation is a fixture that goes
     /// stale rather than a property of the writer.

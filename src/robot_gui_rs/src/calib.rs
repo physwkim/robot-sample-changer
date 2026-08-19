@@ -129,7 +129,7 @@ impl CalibPanel {
 
     /// Writes only the cells that differ from their loaded value.
     /// `apply_edits` itself starts from a fresh read of the file, so a
-    /// trim the daemon's holder map wrote since our load survives.
+    /// trim the daemon's grip null wrote since our load survives.
     fn save(&mut self) {
         let mut edits = Vec::new();
         for row in 0..ROWS {
@@ -252,7 +252,7 @@ impl CalibPanel {
         });
         ui.label(
             "Row 1's tilts are the shared base for every holder; rows 2-10 \
-             add their own trim. Holder map writes X/Z here by itself.",
+             add their own trim. Grip null writes X/Y/Z here by itself.",
         );
     }
 

@@ -1,5 +1,5 @@
 //! The operations panel: status readbacks, sample mount/return, the
-//! measurement wait, pause, recover, holder map, and the advanced
+//! measurement wait, pause, recover, grip null, and the advanced
 //! (mode + start-step) trigger — the same operator surface as the
 //! silx/PyQt panel, driven through rsdm channels.
 

@@ -214,8 +214,8 @@ fn gate_correction(d: [f64; 3], min_mm: f64, max_mm: f64) -> Gate {
 /// end of it.
 ///
 /// This was a `bool` that meant "skipped" to `Normal` and nothing to
-/// every other mode, so the holder map had no way to say it had written
-/// and its summary read "nothing written" over three trim lines.
+/// every other mode, so a mode that writes trims had no way to say it
+/// had, and its summary read "nothing written" over three trim lines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Outcome {
     /// The run did what the mode says, with nothing else to report.
@@ -719,11 +719,9 @@ impl<'a> Sequencer<'a> {
         }
     }
 
-    /// The probe body shared by [`Sequencer::run_seat_probe`] (after its
-    /// jog hold) and holder map mode (straight after seating the puck):
-    /// step into contact, measure every configured height, print the
-    /// report. Writing is the caller's business: mode 5 writes nothing,
-    /// holder map folds the returned centres into the trim file.
+    /// The probe body behind [`Sequencer::run_seat_probe`], after its jog
+    /// hold: step into contact, measure every configured height, print
+    /// the report.
     ///
     /// Everything measured goes to the log here; the return value
     /// carries only how far the probe got. It used to hand its bracket
@@ -1007,11 +1005,11 @@ impl<'a> Sequencer<'a> {
 
     /// Carry one puck from `MapSource` to `Holder`, straight across.
     ///
-    /// Holder map moves a puck between seats too, but through the stage:
-    /// it reuses the normal sequence's step numbers and that route is
-    /// holder to stage to holder by construction, so a transfer between
-    /// two seats sets the puck down and picks it up again on the way.
-    /// Here the arm retreats from the source and plans directly to the
+    /// Its own mode rather than a Normal run with two holders set,
+    /// because the normal step numbers carry the stage leg with them:
+    /// that route is holder to stage to holder by construction, so a
+    /// transfer along it would set the puck down and pick it up again on
+    /// the way. Here the arm retreats from the source and plans directly to the
     /// target standby — the same move step 18 already makes, from the
     /// source retreat instead of the stage standby.
     ///
@@ -1291,10 +1289,12 @@ impl<'a> Sequencer<'a> {
     /// as tight (0.050 mm per side, bracketed at holder 4) but holds the
     /// puck by gravity alone: a loosened pad pushing on the neck does
     /// not walk the puck to a wall, it tips it up and out of the well
-    /// (holder 2, both 2026-08-19). Holder map therefore probes clamped,
-    /// passing zero. The cost is range: a taught pose off by more than
-    /// the clearance starts the probe preloaded against a wall (6.9 N on
-    /// the first 0.05 mm step) and saturates instead of measuring.
+    /// (holder 2, both 2026-08-19), so a well has to be probed clamped.
+    /// The cost is range: a taught pose off by more than the clearance
+    /// starts the probe preloaded against a wall (6.9 N on the first
+    /// 0.05 mm step) and saturates instead of measuring. That cost is
+    /// why wells are trimmed by [`Sequencer::run_grip_null`] now and no
+    /// caller here passes zero any more.
     ///
     /// Restoring is not optional and not the probe's business to remember.
     /// A run that ends on an abort or a blocked retrace leaves the operator
