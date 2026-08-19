@@ -494,11 +494,16 @@ impl OpsPanel {
             let stage = self.null_holder == 0;
             fields(ui, "gripnull-fields", |ui| {
                 ui.label("Seat:");
-                ui.add(
-                    egui::DragValue::new(&mut self.null_holder)
-                        .range(0..=10)
-                        .custom_formatter(|n, _| seat_name(n as i64)),
-                );
+                // A list, not a spinner: the stage is not "holder zero"
+                // to anyone standing at the rig, and dragging past it to
+                // reach holder 1 reads as an off-by-one.
+                egui::ComboBox::from_id_salt("gripnull-seat")
+                    .selected_text(seat_name(self.null_holder))
+                    .show_ui(ui, |ui| {
+                        for n in 0..=10i64 {
+                            ui.selectable_value(&mut self.null_holder, n, seat_name(n));
+                        }
+                    });
                 ui.end_row();
                 ui.label("Puck from:");
                 // The fetch is rack to rack, so the stage nulls whatever
