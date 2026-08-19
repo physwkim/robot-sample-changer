@@ -100,7 +100,7 @@ fn run() -> Result<(), SequencerError> {
     log::info("    5=Seat probe (trigger, jog the gripped puck into the seat, trigger again;");
     log::info(&format!(
         "      steps into contact at {:.2}/{:.2} N, measures, writes nothing)",
-        config.probe.bore.lateral.threshold_n, config.probe.depth.threshold_n
+        config.probe.bore.lateral.threshold_n, config.probe.bore.depth.threshold_n
     ));
     log::info("    6=Holder map (fetch the puck, probe the seat, leave it seated;");
     log::info(&format!(

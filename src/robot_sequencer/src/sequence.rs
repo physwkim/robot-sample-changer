@@ -144,6 +144,25 @@ struct Level {
     tilts: Vec<Tilted>,
 }
 
+/// What the seat-level probe found, in mm from the pose it started at.
+///
+/// Three independent `Option`s and not one `Option` over the set: an
+/// axis that failed to bracket says nothing about the two that did, and
+/// which one is missing is what the operator needs told. What to do
+/// with a partial answer is the writer's decision, not the prober's —
+/// see [`Sequencer::persist_seat_centres`].
+#[derive(Debug, Clone, Copy, Default)]
+struct Seat {
+    /// Lateral bracket centre along base x, which trims tool x.
+    centre_x_mm: Option<f64>,
+    /// Lateral bracket centre along base y, which trims tool z.
+    centre_y_mm: Option<f64>,
+    /// How far below the start pose the floor is, from the
+    /// force-versus-depth fit rather than the trip point, which carries
+    /// the threshold and up to a step of overshoot in it. Trims tool y.
+    floor_mm: Option<f64>,
+}
+
 pub struct Sequencer<'a> {
     epics: Epics,
     motion: Motion<'a>,
@@ -702,13 +721,12 @@ impl<'a> Sequencer<'a> {
     /// check itself reporting the puck lost — and the outer `Err` means
     /// even the walk back failed, so the arm is somewhere a caller must
     /// not build on.
-    #[allow(clippy::type_complexity)]
     fn seat_probe_here(
         &mut self,
         seat: SeatProbe,
-    ) -> Result<(Option<(f64, f64)>, Option<SequencerError>), SequencerError> {
+    ) -> Result<(Seat, Option<SequencerError>), SequencerError> {
         let p = &self.config.probe;
-        let depth = ProbeLimits::new(&p.depth, p.velocity_scale);
+        let depth = ProbeLimits::new(&seat.depth, p.velocity_scale);
         let limits = Limits {
             lateral: ProbeLimits::new(&seat.lateral, p.velocity_scale),
             depth,
@@ -734,14 +752,13 @@ impl<'a> Sequencer<'a> {
         let (play_mm, grip_lost, (levels, walked, returned)) =
             self.with_grip_loosened(seat.loosen_mm, |s| Ok(s.sweep_heights(limits)))?;
 
-        // The trigger-pose level is the taught seat pose, so its bracket
-        // centres are the trim residuals holder map persists.
+        // The trigger-pose level is the taught seat pose, so what it
+        // measured there IS the residual the taught trims carry.
         // measure_level order: brackets[0] = base x, [1] = base y.
-        let seat = levels.first().and_then(|l| {
-            Some((
-                l.brackets.first()?.centre_mm()?,
-                l.brackets.get(1)?.centre_mm()?,
-            ))
+        let seat = levels.first().map_or_else(Seat::default, |l| Seat {
+            centre_x_mm: l.brackets.first().and_then(|b| b.centre_mm()),
+            centre_y_mm: l.brackets.get(1).and_then(|b| b.centre_mm()),
+            floor_mm: l.floor.as_ref().and_then(|f| f.wall_mm()),
         });
         log::info("========================================");
         log::info("SEAT PROBE RESULT (measured from the pose the probe started at)");
@@ -917,55 +934,90 @@ impl<'a> Sequencer<'a> {
         if let Some(e) = probed {
             return Err(e);
         }
-        self.persist_seat_centres(target, seat)
+        self.persist_seat_centres(target, seat, wd.holder_on_lift * 1000.0)
     }
 
-    /// The write half of holder map: folds the seat-level bracket
-    /// centres into the holder's trim slots in the taught-waypoints
+    /// The write half of holder map: folds what the seat-level probe
+    /// measured into the holder's trim slots in the taught-waypoints
     /// file, which the next trigger reloads like everything in it.
     ///
-    /// Bracket "base x" corrects the x trim (tool x is base +x at the
-    /// seats) and bracket "base y" the z trim (tool z is base +y) — the
-    /// same mapping every hand-tuned trim used. A centre within one
-    /// lateral probe step is measurement grain, not error, and leaves
-    /// the taught value alone; one past `PERSIST_CAP_MM` is not a trim,
-    /// it is something wrong with the seat (a foreign object in the
-    /// bore reads exactly like this), so the write is refused and the
-    /// number reported instead of absorbed.
+    /// All three axes or none. The frame mapping is the one every
+    /// hand-tuned trim used: bracket "base x" corrects the x trim (tool
+    /// x is base +x at the seats), bracket "base y" the z trim (tool z
+    /// is base +y), and the floor the y trim (tool y is base −z, and
+    /// positive is deeper). A missing axis is a probe that did not
+    /// measure, not a zero, so writing the other two would move the
+    /// taught pose along a plane whose third coordinate is unknown —
+    /// the run is refused instead, naming what is missing.
+    ///
+    /// The depth correction is `floor − holder_on_position_lift`,
+    /// because the taught pose deliberately hovers by that lift: the
+    /// floor sitting further away than the lift means the puck rides
+    /// higher than the teaching intends, by exactly the difference.
+    ///
+    /// A correction inside `persist_deadband_mm` is measurement grain
+    /// and leaves the taught value alone; one past `PERSIST_CAP_MM` is
+    /// not a trim at all, it is something wrong with the seat (a foreign
+    /// object in the well reads exactly like this), so the write is
+    /// refused and the number reported rather than absorbed.
     fn persist_seat_centres(
         &mut self,
         holder: i32,
-        seat: Option<(f64, f64)>,
+        seat: Seat,
+        lift_mm: f64,
     ) -> Result<bool, SequencerError> {
         const PERSIST_CAP_MM: f64 = 1.0;
-        let Some((cx_mm, cy_mm)) = seat else {
-            return Err(SequencerError(
-                "holder map: the seat-level brackets did not find both walls, \
-                 so there is no centre to write; the taught trims are unchanged"
-                    .into(),
-            ));
-        };
-        for (name, c) in [("x", cx_mm), ("y", cy_mm)] {
+        let missing: Vec<&str> = [
+            ("base x wall bracket", seat.centre_x_mm.is_none()),
+            ("base y wall bracket", seat.centre_y_mm.is_none()),
+            ("the floor fit", seat.floor_mm.is_none()),
+        ]
+        .into_iter()
+        .filter_map(|(name, absent)| absent.then_some(name))
+        .collect();
+        if !missing.is_empty() {
+            return Err(SequencerError(format!(
+                "holder map: {} did not measure, so the seat is located in \
+                 fewer than three axes; the taught trims are unchanged",
+                missing.join(" and ")
+            )));
+        }
+        // Every correction in tool axes, which is what the trim slots
+        // are: x from the base x bracket, z from the base y bracket, y
+        // from how far the floor missed the taught hover by.
+        let corrections = [
+            ("x", "base x centre", seat.centre_x_mm.unwrap_or_default()),
+            ("z", "base y centre", seat.centre_y_mm.unwrap_or_default()),
+            (
+                "y",
+                "floor against the taught lift",
+                seat.floor_mm.unwrap_or_default() - lift_mm,
+            ),
+        ];
+        for (trim, what, c) in corrections {
             if c.abs() > PERSIST_CAP_MM {
                 return Err(SequencerError(format!(
-                    "holder map: base {name} centre {c:+.3} mm exceeds the \
-                     {PERSIST_CAP_MM} mm persist cap — that is not a trim \
-                     error; nothing was written"
+                    "holder map: {what} is {c:+.3} mm, past the \
+                     {PERSIST_CAP_MM} mm persist cap — that is not a {trim} \
+                     trim error; nothing was written"
                 )));
             }
         }
         let deadband_mm = self.config.probe.well.persist_deadband_mm;
-        let dx = (cx_mm.abs() >= deadband_mm).then_some(cx_mm / 1000.0);
-        let dz = (cy_mm.abs() >= deadband_mm).then_some(cy_mm / 1000.0);
-        if dx.is_none() && dz.is_none() {
+        let over = |c: f64| (c.abs() >= deadband_mm).then_some(c / 1000.0);
+        let [dx, dz, dy] = corrections.map(|(_, _, c)| over(c));
+        if dx.is_none() && dy.is_none() && dz.is_none() {
+            let [cx, cz, cy] = corrections.map(|(_, _, c)| c);
             log::info(&format!(
-                "holder map: both centres ({cx_mm:+.3}, {cy_mm:+.3} mm) are \
-                 within the {deadband_mm} mm persist deadband; the taught \
-                 trims already hold the optimum and were kept"
+                "holder map: all three corrections (x {cx:+.3}, y {cy:+.3}, \
+                 z {cz:+.3} mm) are within the {deadband_mm} mm persist \
+                 deadband; the taught trims already hold the optimum and \
+                 were kept"
             ));
             return Ok(false);
         }
-        for line in persist_holder_trims(&self.config.sequence.waypoints_yaml, holder, dx, dz)? {
+        for line in persist_holder_trims(&self.config.sequence.waypoints_yaml, holder, dx, dy, dz)?
+        {
             log::info(&line);
         }
         Ok(false)

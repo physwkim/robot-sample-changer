@@ -1500,7 +1500,7 @@ mod tests {
             .bore
             .lateral
             .step_mm
-            .min(config.probe.depth.step_mm);
+            .min(config.probe.bore.depth.step_mm);
 
         for (name, taught) in [
             ("holder1_on_position", &w.holder1_on_position),

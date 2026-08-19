@@ -451,6 +451,8 @@ pub struct BoreConfig {
     pub loosen_mm: f64,
     /// Sideways, toward a bore wall.
     pub lateral: ProbeAxisConfig,
+    /// Downward, toward the bore floor.
+    pub depth: ProbeAxisConfig,
 }
 
 /// A holder well's lateral probe (`CalibMode` = Holder Map).
@@ -466,6 +468,15 @@ pub struct BoreConfig {
 pub struct WellConfig {
     /// Sideways, toward a well wall.
     pub lateral: ProbeAxisConfig,
+    /// Downward, toward the well floor.
+    ///
+    /// Its own block for the same reason the lateral one is: the taught
+    /// pose hovers `holder_on_position_lift` (0.15 mm) above the floor,
+    /// and the bore's 0.10 mm step puts the whole descent inside one or
+    /// two samples — h7 reported "too few rising samples to fit a floor"
+    /// with it, which is the depth axis failing in exactly the way the
+    /// lateral one did.
+    pub depth: ProbeAxisConfig,
     /// Smallest measured off-centre worth writing to the trim file, mm.
     ///
     /// Its own number and not `lateral.step_mm` again, which is what the
@@ -478,8 +489,9 @@ pub struct WellConfig {
     pub persist_deadband_mm: f64,
 }
 
-/// What the lateral probe needs to know about the seat in front of it:
-/// how much play to open before stepping, and how finely to step.
+/// What a probe needs to know about the seat in front of it: how much
+/// play to open before stepping, and how finely to step toward a wall
+/// and toward the floor.
 ///
 /// Built by the seat's own config rather than assembled at the call
 /// site, so that "clamped" stays a property of being a well.
@@ -487,6 +499,7 @@ pub struct WellConfig {
 pub struct SeatProbe {
     pub loosen_mm: f64,
     pub lateral: ProbeAxisConfig,
+    pub depth: ProbeAxisConfig,
 }
 
 impl BoreConfig {
@@ -495,6 +508,7 @@ impl BoreConfig {
         SeatProbe {
             loosen_mm: self.loosen_mm,
             lateral: self.lateral,
+            depth: self.depth,
         }
     }
 }
@@ -505,6 +519,7 @@ impl WellConfig {
         SeatProbe {
             loosen_mm: 0.0,
             lateral: self.lateral,
+            depth: self.depth,
         }
     }
 }
@@ -555,8 +570,6 @@ pub struct ProbeConfig {
     pub bore: BoreConfig,
     /// A holder well, probed clamped (`CalibMode` = Holder Map).
     pub well: WellConfig,
-    /// Downward, toward the seat floor.
-    pub depth: ProbeAxisConfig,
     /// Turning the sample in place at every level, instead of pushing it
     /// around.
     pub tilt: TiltConfig,
@@ -607,6 +620,17 @@ impl Default for BoreConfig {
                 // abort limit is checked on every one.
                 overtravel_steps: 3,
             },
+            depth: ProbeAxisConfig {
+                step_mm: 0.10,
+                travel_mm: 4.0,
+                threshold_n: 1.0,
+                abort_n: 8.0,
+                // Two, not three: the floor is stiffer than a bore wall
+                // (16 N/mm against 4), so the load bound stops this early
+                // anyway, and 0.2 mm is what it takes to put a second
+                // sample in the hard part of the contact.
+                overtravel_steps: 2,
+            },
         }
     }
 }
@@ -643,8 +667,31 @@ impl Default for WellConfig {
                 // trip point, no slope to fit" with three.
                 overtravel_steps: 5,
             },
-            // One step. The trim it guards is a taught-pose move, and a
-            // correction the probe cannot resolve is not one to make.
+            depth: ProbeAxisConfig {
+                // Seven steps to the 0.15 mm the taught pose hovers by,
+                // against the bore's one and a half.
+                step_mm: 0.02,
+                // Four times the hover, so "no floor within" says the seat
+                // is not where the pose believes rather than that the
+                // probe stopped short.
+                travel_mm: 0.6,
+                // The floor answers at about 16 N/mm, so one step is
+                // 0.32 N and contact is caught within two of them. The
+                // bore's 1.0 N would be three steps deep by the time it
+                // tripped, which is most of the hover.
+                threshold_n: 0.5,
+                // A push onto a floor, which is bounded by what the arm
+                // may do to a sample and not by which seat it is in.
+                abort_n: 8.0,
+                // Four rising samples for the fit, at a fifth of the
+                // bore's step: still a shorter push into the floor than
+                // the bore's two, and the half-abort bound stops it
+                // sooner on a stiff one.
+                overtravel_steps: 4,
+            },
+            // One lateral step. The trim it guards is a taught-pose move,
+            // and a correction the probe cannot resolve is not one to
+            // make.
             persist_deadband_mm: 0.01,
         }
     }
@@ -663,17 +710,6 @@ impl Default for ProbeConfig {
             // (doc §16.2) — the level this whole mode exists to keep the
             // sequence away from.
             lift_abort_n: 15.0,
-            depth: ProbeAxisConfig {
-                step_mm: 0.10,
-                travel_mm: 4.0,
-                threshold_n: 1.0,
-                abort_n: 8.0,
-                // Two, not three: the floor is stiffer than a bore wall
-                // (16 N/mm against 4), so the load bound stops this early
-                // anyway, and 0.2 mm is what it takes to put a second
-                // sample in the hard part of the contact.
-                overtravel_steps: 2,
-            },
             centring: CentringConfig::default(),
             tilt: TiltConfig::default(),
         }
@@ -800,8 +836,9 @@ impl Config {
         // first time has already been triggered.
         for (name, axis) in [
             ("probe.bore.lateral", &config.probe.bore.lateral),
+            ("probe.bore.depth", &config.probe.bore.depth),
             ("probe.well.lateral", &config.probe.well.lateral),
-            ("probe.depth", &config.probe.depth),
+            ("probe.well.depth", &config.probe.well.depth),
         ] {
             if axis.step_mm <= 0.0 {
                 return Err(SequencerError(format!("{name}.step_mm must be positive")));
@@ -1083,8 +1120,8 @@ mod tests {
             ),
             (
                 "abort_under_threshold",
-                "probe:\n  depth:\n    threshold_n: 2.0\n    abort_n: 1.0\n",
-                "probe.depth.abort_n",
+                "probe:\n  bore:\n    depth:\n      threshold_n: 2.0\n      abort_n: 1.0\n",
+                "probe.bore.depth.abort_n",
             ),
             (
                 "step_zero",
@@ -1093,8 +1130,8 @@ mod tests {
             ),
             (
                 "travel_under_one_step",
-                "probe:\n  depth:\n    step_mm: 0.5\n    travel_mm: 0.2\n",
-                "probe.depth.travel_mm",
+                "probe:\n  well:\n    depth:\n      step_mm: 0.5\n      travel_mm: 0.2\n",
+                "probe.well.depth.travel_mm",
             ),
             (
                 "velocity_hi",

@@ -241,6 +241,7 @@ pub fn persist_holder_trims(
     path: &Path,
     holder: i32,
     dx_m: Option<f64>,
+    dy_m: Option<f64>,
     dz_m: Option<f64>,
 ) -> Result<Vec<String>, SequencerError> {
     if !(1..=10).contains(&holder) {
@@ -254,7 +255,7 @@ pub fn persist_holder_trims(
     // (delta, scalar key for holder 1, list key for holders 2-10,
     //  read-back accessor)
     type ReadBack = fn(&WaypointData, usize) -> Option<f64>;
-    let slots: [(&str, Option<f64>, &str, &str, ReadBack); 2] = [
+    let slots: [(&str, Option<f64>, &str, &str, ReadBack); 3] = [
         (
             "x",
             dx_m,
@@ -265,6 +266,19 @@ pub fn persist_holder_trims(
                     Some(w.holder1_on_x_offset)
                 } else {
                     w.holder_multi_x_offsets.get(i).copied()
+                }
+            },
+        ),
+        (
+            "y",
+            dy_m,
+            "holder1_on_position_y_offset",
+            "holder_multi_y_offsets",
+            |w, i| {
+                if i == usize::MAX {
+                    Some(w.holder1_on_y_offset)
+                } else {
+                    w.holder_multi_y_offsets.get(i).copied()
                 }
             },
         ),
@@ -455,7 +469,7 @@ mod tests {
     #[test]
     fn persist_edits_holder1_scalars_in_place() {
         let path = temp_copy("h1");
-        let report = persist_holder_trims(&path, 1, Some(0.0001), None).expect("persist");
+        let report = persist_holder_trims(&path, 1, Some(0.0001), None, None).expect("persist");
         assert_eq!(report.len(), 1, "{report:?}");
         let data = WaypointData::load(&path).expect("reload");
         assert_eq!(data.holder1_on_x_offset, 0.0001);
@@ -471,7 +485,8 @@ mod tests {
         let path = temp_copy("multi");
         // holder 4 -> index 2; both slots at once. The z list wraps two
         // lines in the production file, which is the case this exercises.
-        let report = persist_holder_trims(&path, 4, Some(-0.0005), Some(0.0002)).expect("persist");
+        let report =
+            persist_holder_trims(&path, 4, Some(-0.0005), None, Some(0.0002)).expect("persist");
         assert_eq!(report.len(), 2, "{report:?}");
         let data = WaypointData::load(&path).expect("reload");
         assert_eq!(data.holder_multi_x_offsets[2], 0.001);
@@ -483,13 +498,46 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// The depth slot, which holder map writes from the floor fit. Read
+    /// relative to what the file already holds: these are live trims an
+    /// operator edits, so an absolute expectation is a fixture that goes
+    /// stale rather than a property of the writer.
+    #[test]
+    fn persist_edits_the_depth_slot_beside_the_lateral_ones() {
+        let path = temp_copy("depth");
+        let before = WaypointData::load(&path).expect("load");
+        let report =
+            persist_holder_trims(&path, 7, Some(0.0001), Some(-0.00002), None).expect("persist");
+        assert_eq!(report.len(), 2, "{report:?}");
+        let after = WaypointData::load(&path).expect("reload");
+        // Holder 7 -> index 5.
+        assert_eq!(
+            after.holder_multi_y_offsets[5],
+            round7(before.holder_multi_y_offsets[5] - 0.00002)
+        );
+        assert_eq!(
+            after.holder_multi_x_offsets[5],
+            round7(before.holder_multi_x_offsets[5] + 0.0001)
+        );
+        // The axis that was not measured leaves its slot alone.
+        assert_eq!(
+            after.holder_multi_z_offsets[5],
+            before.holder_multi_z_offsets[5]
+        );
+        assert_eq!(
+            after.holder_multi_y_offsets[4], before.holder_multi_y_offsets[4],
+            "neighbour untouched"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
     #[test]
     fn persist_refuses_a_missing_key_and_leaves_the_file() {
         let path = temp_copy("missing");
         let mut text = std::fs::read_to_string(&path).expect("read");
         text = text.replace("holder_multi_z_offsets", "renamed_away");
         std::fs::write(&path, &text).expect("write");
-        let err = persist_holder_trims(&path, 4, None, Some(0.0002));
+        let err = persist_holder_trims(&path, 4, None, None, Some(0.0002));
         assert!(err.is_err());
         assert_eq!(std::fs::read_to_string(&path).expect("read"), text);
         std::fs::remove_file(&path).ok();
