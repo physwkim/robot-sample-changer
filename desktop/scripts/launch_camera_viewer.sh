@@ -1,5 +1,5 @@
 #!/bin/bash
-printf '\033]0;[3] Camera Viewer - D405\007'
+printf '\033]0;[4] Camera Viewer - D405\007'
 REPO=/home/bl9b/work/robot-sample-changer
 BIN="$REPO/src/robot_gui_rs/target/release/robot-gui"
 

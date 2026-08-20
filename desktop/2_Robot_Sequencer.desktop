@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=[1] Robot Sequencer
+Name=[2] Robot Sequencer
 Comment=Start the robot sequence daemon (robot_ioc runs via systemd)
 Icon=utilities-terminal
 Terminal=true

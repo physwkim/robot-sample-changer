@@ -1,7 +1,7 @@
 #!/bin/bash
 printf '\033]0;[0] Robot IOC - robot_ioc\007'
 # Brings up the robot EPICS soft IOC, so the Robot Sequencer has PVs to
-# connect to. Run this before [1] Robot Sequencer -- the daemon exits five
+# connect to. Run this before [2] Robot Sequencer -- the daemon exits five
 # seconds after start with "PV 'Robot:Trigger' is not connected" otherwise.
 #
 # The IOC is a systemd *user* unit (robot-ioc.service) running the binary
@@ -58,6 +58,6 @@ echo "  (state above is autosave-restored; the sequencer overwrites it on the"
 echo "   next trigger. CurrentStep > 0 means resume per CLAUDE.md, not idle.)"
 echo
 echo "Console : telnet localhost 20001   (Ctrl-] then 'quit' to leave it running)"
-echo "Next    : [1] Robot Sequencer"
+echo "Next    : [2] Robot Sequencer"
 echo "Stop    : systemctl --user stop $UNIT"
 exec bash

@@ -1,5 +1,5 @@
 #!/bin/bash
-printf '\033]0;[2] Robot GUI - rsdm\007'
+printf '\033]0;[3] Robot GUI - rsdm\007'
 # One control panel at a time; camera-viewer instances (--camera) don't count.
 if pgrep -af '/robot-gui' | grep -v -- --camera | grep -q robot-gui; then
     echo "Robot GUI is already running."

@@ -1,5 +1,5 @@
 #!/bin/bash
-printf '\033]0;[1] Robot Sequencer - robot-sequencer\007'
+printf '\033]0;[2] Robot Sequencer - robot-sequencer\007'
 if pgrep -x "robot-sequencer" > /dev/null; then
     echo "Robot Sequencer is already running."
     read -p "Press Enter to close..."
