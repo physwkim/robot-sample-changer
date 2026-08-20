@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=[0] Robot IOC
+Comment=Start the robot EPICS IOC (systemd); run before Robot Sequencer
+Icon=network-server
+Terminal=true
+Exec=/home/bl9b/work/robot-sample-changer/desktop/scripts/launch_robot_ioc.sh
+Categories=Development;
