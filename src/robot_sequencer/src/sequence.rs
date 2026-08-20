@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use cspace_core::geometry::{Isometry3, Vector3};
 
-use crate::config::{CentringConfig, Config, SeatProbe};
+use crate::config::{CentringConfig, Config, GripNullConfig, SeatProbe};
 use crate::epics::{CalibMode, Epics, NullReport, NullState, VisionKind, WaitStatus};
 use crate::error::SequencerError;
 use crate::gripper::Gripper;
@@ -269,6 +269,27 @@ const NULL_TOOL_SIGN: [f64; 3] = [-1.0, 1.0, -1.0];
 /// across the depths that read nothing, while 0.20 mm sideways took the
 /// stage's Tz from 0.010 to 0.524 Nm.
 const NULL_STEERED: [bool; 3] = [true, false, true];
+
+/// Whether two closes at one pose are the same measurement.
+///
+/// Only the steered axes are asked. The one thing a further close buys
+/// is a step it can trust, and the step reads nothing else; `settled_n`
+/// draws the line because it is already where this loop separates
+/// measurement grain from signal, and a pair further apart than that
+/// cannot both be grain.
+fn null_closes_agree(a: &[f64; 3], b: &[f64; 3], settled_n: f64) -> bool {
+    (0..3).all(|i| !NULL_STEERED[i] || (a[i] - b[i]).abs() < settled_n)
+}
+
+/// Component-wise median of three closes: the reading that survives one
+/// excursion of any size, on any axis, in any of the three.
+fn null_median(closes: [[f64; 3]; 3]) -> [f64; 3] {
+    std::array::from_fn(|i| {
+        let mut v = [closes[0][i], closes[1][i], closes[2][i]];
+        v.sort_by(f64::total_cmp);
+        v[1]
+    })
+}
 
 struct Level {
     /// Height above the pose the mode was triggered at, mm.
@@ -1107,8 +1128,10 @@ impl<'a> Sequencer<'a> {
     /// to where the fingers close on its puck without loading it.
     ///
     /// One trigger runs the whole loop. Each iteration picks the puck
-    /// (steps 0-5), puts it straight back (20-23), and steers on the
-    /// wrench the close left on the tool. The pose error is legible
+    /// (steps 0-5) and puts it straight back (20-23) twice over, and
+    /// steers on the two closes taken together -- one close is not a
+    /// measurement at this scatter; see [`Sequencer::null_close_wrench`].
+    /// The pose error is legible
     /// there and nowhere else this daemon can reach: the puck is held by
     /// the well, so pads that meet it off-centre press it on one side
     /// and the reaction lands on the arm at tens of newtons per
@@ -1296,56 +1319,9 @@ impl<'a> Sequencer<'a> {
             report.iteration = iteration as i32;
             report.message = format!("iteration {iteration} of {}", g.max_iterations);
             self.epics.publish_null(report);
-            self.hand(0, "open_hand", true, 0)?;
-            self.arm(1, "holder_standby", &standby, 0)?;
-            self.cartesian(2, "holder_above", &above, 0)?;
-            self.cartesian(3, "holder_on_position", &on_pos, 0)?;
-            let measured = self.hand(4, "close_gripper", false, 0)?;
-            // Taken here, with the arm still in the seat: the wrench is
-            // read in the base frame and every axis below is a tool
-            // axis, and this is the pose that relates them.
-            let axes = Axes::in_tool(&mut self.motion)?;
-            // The puck goes back before anything is decided: the reading
-            // is already taken, and every exit below -- settled, capped,
-            // out of iterations -- must leave the seat as it found it.
-            self.cartesian(5, "holder_above_return", &above, 0)?;
-            self.cartesian(20, "holder_on_position_final", &on_pos, 0)?;
-            self.hand(21, "open_gripper_final", true, 0)?;
-            self.cartesian(22, "holder_above_final_return", &above, 0)?;
-            self.cartesian(23, "holder_standby_final", &standby, 0)?;
-
-            let Some(w) = measured else {
-                return Err(NullFailure::new(
-                    "failed: the close reported no wrench",
-                    "grip null: the close reported no wrench, so there is \
-                     nothing to steer on; the puck is back in its seat and \
-                     the taught trims are unchanged"
-                        .into(),
-                ));
-            };
-            // The same wrench, said in the frame the trims are written
-            // in: each base component carries its own tool-frame
-            // direction, so the sum is the base vector re-expressed.
-            let force = axes.say(&[w[0], w[1], w[2]]);
+            let force = self.null_close_wrench(&standby, &above, &on_pos, &g, report)?;
             report.force_n = force.iter().map(|f| f * f).sum::<f64>().sqrt();
             self.epics.publish_null(report);
-            log::info(&format!(
-                "  grip null: the close left ({:+.2}, {:+.2}, {:+.2}) N base, \
-                 ({:+.3}, {:+.3}, {:+.3}) Nm; in tool ({:+.2}, {:+.2}, {:+.2}) N \
-                 for {}, {}, {}",
-                w[0],
-                w[1],
-                w[2],
-                w[3],
-                w[4],
-                w[5],
-                force[0],
-                force[1],
-                force[2],
-                NULL_AXES[0],
-                NULL_AXES[1],
-                NULL_AXES[2]
-            ));
             // An axis inside the noise floor is left alone on both
             // counts, so "settled" and "not written" are one rule.
             let live: [bool; 3] =
@@ -1484,6 +1460,148 @@ impl<'a> Sequencer<'a> {
                 g.settled_n
             ),
         ))
+    }
+
+    /// The close wrench one iteration steers on, in the seat's tool
+    /// frame: two closes, and a third when the two disagree.
+    ///
+    /// One close is not a measurement here. Closes at one pose scatter
+    /// by an appreciable fraction of `settled_n`, and now and then one
+    /// lands somewhere else outright -- at h10 six of them read -1.17,
+    /// -0.98, -1.03, **+1.81**, -1.13, -0.89 N on base y with the arm
+    /// inside 0.01 mm of the same pose every time (2026-08-20). The rest
+    /// of the wrench moved with the odd one (base z 4.97 against
+    /// 4.0-4.2, base Tx -0.475 against -0.39 Nm), so it was a grip that
+    /// landed differently and not a noisy sample of a good one. Only
+    /// another close can tell those apart, which is why this repeats the
+    /// pick instead of re-reading the stream.
+    ///
+    /// The loop cannot absorb one. An excursion is by construction
+    /// `>= settled_n` from its neighbours, which is exactly what the
+    /// secant reads as a real response: it steps the wrong way on the
+    /// excursion and then divides the snap back by that wrong step. At
+    /// h10 that spent iterations 4-6 going 0.008 mm *backwards*, and the
+    /// run ran out of iterations having moved 0.038 mm in all against a
+    /// seat error measured in tenths of a millimetre (2026-08-20).
+    ///
+    /// Two closes that agree are averaged; two that do not are broken by
+    /// a third and the component-wise median taken, which drops a lone
+    /// excursion outright. Agreement is [`null_closes_agree`], the
+    /// median [`null_median`] -- the median over all three components so
+    /// the reading stays one wrench, the agreement over the steered ones
+    /// only for the reason given there.
+    fn null_close_wrench(
+        &mut self,
+        standby: &JointMap,
+        above: &JointMap,
+        on_pos: &JointMap,
+        g: &GripNullConfig,
+        report: &mut NullReport,
+    ) -> Result<[f64; 3], NullFailure> {
+        // The iteration's own line, restored below: a close cycle is
+        // most of a minute and there are two or three of them, so the
+        // record says which one the arm is in rather than going quiet.
+        let stem = report.message.clone();
+        report.message = format!("{stem}: close 1");
+        self.epics.publish_null(report);
+        let first = self.null_close(standby, above, on_pos)?;
+        report.message = format!("{stem}: close 2");
+        self.epics.publish_null(report);
+        let second = self.null_close(standby, above, on_pos)?;
+        report.message = stem.clone();
+
+        if null_closes_agree(&first, &second, g.settled_n) {
+            let mean: [f64; 3] = std::array::from_fn(|i| (first[i] + second[i]) / 2.0);
+            log::info(&format!(
+                "  grip null: the two closes agree inside {:.2} N; steering on \
+                 ({:+.2}, {:+.2}, {:+.2}) N",
+                g.settled_n, mean[0], mean[1], mean[2]
+            ));
+            return Ok(mean);
+        }
+        log::info(&format!(
+            "  grip null: the two closes differ by ({:+.2}, {:+.2}, {:+.2}) N, past \
+             the {:.2} N floor -- a third breaks the tie",
+            second[0] - first[0],
+            second[1] - first[1],
+            second[2] - first[2],
+            g.settled_n
+        ));
+        report.message = format!("{stem}: close 3");
+        self.epics.publish_null(report);
+        let third = self.null_close(standby, above, on_pos)?;
+        report.message = stem;
+        let median = null_median([first, second, third]);
+        log::info(&format!(
+            "  grip null: the median of three is ({:+.2}, {:+.2}, {:+.2}) N",
+            median[0], median[1], median[2]
+        ));
+        Ok(median)
+    }
+
+    /// One pick, close, read and put-back at this seat, returning what
+    /// the close left on the tool said in the seat's tool frame.
+    ///
+    /// The step numbers are the Normal sequence's, so `PauseStep` and
+    /// `CurrentStep` read the same here as anywhere else; calling this
+    /// more than once an iteration repeats them, which they already do
+    /// once an iteration.
+    fn null_close(
+        &mut self,
+        standby: &JointMap,
+        above: &JointMap,
+        on_pos: &JointMap,
+    ) -> Result<[f64; 3], NullFailure> {
+        self.hand(0, "open_hand", true, 0)?;
+        self.arm(1, "holder_standby", standby, 0)?;
+        self.cartesian(2, "holder_above", above, 0)?;
+        self.cartesian(3, "holder_on_position", on_pos, 0)?;
+        let measured = self.hand(4, "close_gripper", false, 0)?;
+        // Taken here, with the arm still in the seat: the wrench is
+        // read in the base frame and every axis below is a tool
+        // axis, and this is the pose that relates them.
+        let axes = Axes::in_tool(&mut self.motion)?;
+        // The puck goes back before anything is decided: the reading
+        // is already taken, and every exit the caller can take --
+        // settled, capped, out of iterations -- must leave the seat as
+        // it found it.
+        self.cartesian(5, "holder_above_return", above, 0)?;
+        self.cartesian(20, "holder_on_position_final", on_pos, 0)?;
+        self.hand(21, "open_gripper_final", true, 0)?;
+        self.cartesian(22, "holder_above_final_return", above, 0)?;
+        self.cartesian(23, "holder_standby_final", standby, 0)?;
+
+        let Some(w) = measured else {
+            return Err(NullFailure::new(
+                "failed: the close reported no wrench",
+                "grip null: the close reported no wrench, so there is \
+                 nothing to steer on; the puck is back in its seat and \
+                 the taught trims are unchanged"
+                    .into(),
+            ));
+        };
+        // The same wrench, said in the frame the trims are written
+        // in: each base component carries its own tool-frame
+        // direction, so the sum is the base vector re-expressed.
+        let force = axes.say(&[w[0], w[1], w[2]]);
+        log::info(&format!(
+            "  grip null: the close left ({:+.2}, {:+.2}, {:+.2}) N base, \
+             ({:+.3}, {:+.3}, {:+.3}) Nm; in tool ({:+.2}, {:+.2}, {:+.2}) N \
+             for {}, {}, {}",
+            w[0],
+            w[1],
+            w[2],
+            w[3],
+            w[4],
+            w[5],
+            force[0],
+            force[1],
+            force[2],
+            NULL_AXES[0],
+            NULL_AXES[1],
+            NULL_AXES[2]
+        ));
+        Ok(force)
     }
 
     /// Carry one puck from `MapSource` to `Holder`, straight across.
@@ -3173,6 +3291,58 @@ mod tests {
             NULL_AXES[1], "tool y (depth)",
             "the disabled slot is the one the doc argues about"
         );
+    }
+
+    /// Agreement is a strict floor on the steered axes and blind to the
+    /// unsteered one. The boundaries are the difference sitting exactly
+    /// on `settled_n` -- which is a disagreement, because the loop
+    /// already treats that figure as the smallest thing it will call
+    /// signal -- and an arbitrarily large depth difference, which buys
+    /// no third close because nothing reads depth.
+    #[test]
+    fn two_closes_agree_by_the_steered_axes_alone() {
+        let n = 0.5;
+        let a = [0.0, 0.0, 0.0];
+        assert!(
+            null_closes_agree(&a, &[0.499, 0.0, -0.499], n),
+            "inside the floor on both steered axes is one measurement"
+        );
+        assert!(
+            !null_closes_agree(&a, &[n, 0.0, 0.0], n),
+            "a difference of exactly settled_n is signal, not grain"
+        );
+        assert!(
+            !null_closes_agree(&a, &[0.0, 0.0, -n], n),
+            "the far lateral axis is asked on the same terms"
+        );
+        assert!(
+            null_closes_agree(&a, &[0.0, 40.0, 0.0], n),
+            "depth is never steered, so it never buys a third close"
+        );
+    }
+
+    /// The median drops one excursion of any size, per component. The
+    /// h10 numbers are the case that motivates the whole repeat: five
+    /// closes around -1.0 N on base y and one at +1.81 (2026-08-20),
+    /// where a mean of the pair that included it would still have
+    /// steered the wrong way.
+    #[test]
+    fn the_median_drops_a_lone_excursion() {
+        let good = [-0.30, -4.02, -1.03];
+        let odd = [-0.81, -4.97, 1.81];
+        let also = [-0.18, -4.01, -1.13];
+        for order in [[odd, good, also], [good, odd, also], [good, also, odd]] {
+            let m = null_median(order);
+            assert!(
+                (m[2] - (-1.03)).abs() < 1e-12 || (m[2] - (-1.13)).abs() < 1e-12,
+                "the +1.81 close must not survive, whichever slot it lands in: {m:?}"
+            );
+            assert!(m[2] < 0.0, "and the steered sign must come from the pair");
+        }
+        // Per component, not per close: an excursion on one axis does
+        // not carry that close's other axes out with it.
+        let m = null_median([[9.0, 0.0, 0.0], [0.1, 9.0, 0.2], [0.2, 0.1, 9.0]]);
+        assert_eq!(m, [0.2, 0.1, 0.2]);
     }
 
     /// A jog total is a trim in the units the file wants and nothing
