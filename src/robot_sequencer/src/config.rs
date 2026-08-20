@@ -91,6 +91,14 @@ pub struct GripNullConfig {
     /// moved 0.031 mm (2026-08-19). Measured at two holders — h9 read
     /// 29.4 N/mm in tool x and 103 in tool z, h10 28-36 in tool x and
     /// 36.6 in depth.
+    ///
+    /// The depth entry is dormant, not spare: `NULL_STEERED` turns that
+    /// axis off at both seats, so nothing reads index 1 today and tuning
+    /// it changes nothing. It stays measured and three wide because the
+    /// array is indexed by tool axis alongside `NULL_AXES`,
+    /// `NULL_TOOL_SIGN` and `NULL_STEERED` — a two-wide array would put
+    /// the tool z seed at index 1 and make every one of those lookups a
+    /// separate mapping to get wrong.
     pub stiffness_n_per_mm: [f64; 3],
     /// Fraction of the computed step actually taken.
     ///

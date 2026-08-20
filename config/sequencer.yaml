@@ -372,7 +372,11 @@ grip_null:
                         # 36.6 in depth, 2026-08-19). After the first step the
                         # loop steers on the slope it measures itself, because a
                         # seed too stiff makes it crawl: h8's tool z took
-                        # 0.006 mm a round against a force that did not move
+                        # 0.006 mm a round against a force that did not move.
+                        # The middle entry is dormant: depth is steered at
+                        # neither seat (NULL_STEERED), so nothing reads it --
+                        # it is kept measured, and indexed by tool axis, for
+                        # the day that constant changes
   damping: 0.7          # two-point stiffness estimates need margin: at 0.7 the
                         # iteration still contracts with a stiffness wrong by 2x
                         # either way, where 1.0 sits on the edge of oscillating
