@@ -685,13 +685,17 @@ impl OpsPanel {
             ui.horizontal_top(|ui| {
                 ui.vertical(|ui| {
                     fields(ui, "hold-fields", |ui| {
-                        ui.label("Source holder:");
+                        ui.label("Holder:");
                         ui.add(egui::DragValue::new(&mut self.hold_holder).range(1..=10));
                         ui.end_row();
                     });
+                    // Both buttons name the pick, because both do the same
+                    // one: mode 1 and mode 2 differ only in where they stand
+                    // afterwards. "Hold at holder N" read as though the field
+                    // chose a source the stage button was free to ignore.
                     ui.horizontal(|ui| {
                         if ui
-                            .button(format!("Hold at holder {}", self.hold_holder))
+                            .button(format!("Pick {}, hold there", self.hold_holder))
                             .clicked()
                         {
                             self.request(Action::Hold {
@@ -699,7 +703,10 @@ impl OpsPanel {
                                 at_stage: false,
                             });
                         }
-                        if ui.button("Hold at stage").clicked() {
+                        if ui
+                            .button(format!("Pick {}, hold at stage", self.hold_holder))
+                            .clicked()
+                        {
                             self.request(Action::Hold {
                                 holder: self.hold_holder,
                                 at_stage: true,
@@ -724,8 +731,9 @@ impl OpsPanel {
                 });
             });
             ui.label(
-                "Pick above the holder itself, or carry that puck to the stage. \
-                 Apply lands on whichever seat is named here, not on Holder.",
+                "Either way the puck comes from this holder — a hold cannot \
+                 fetch one seat's puck to another's. Apply lands on the seat \
+                 named above, not on Holder.",
             );
         });
     }
