@@ -124,7 +124,16 @@ pub struct GripNullConfig {
     /// in the well reads exactly like a large steady force, and so does
     /// a puck that is not the one the pose was taught for.
     pub max_total_mm: f64,
-    /// Give up after this many picks. Each is roughly 35 s.
+    /// Give up after this many iterations.
+    ///
+    /// An iteration is no longer one pick and place: the close is taken
+    /// twice and a third time when the two disagree, so at the 35 s a
+    /// pick-and-place takes it costs about 70 s, or 105 s when it
+    /// splits — six of them is 7 to 10 minutes, not 3.5. The count is
+    /// unchanged all the same. It bounds a seat that is not converging,
+    /// and the rounds a converging one needs did not change when the
+    /// measurement inside them got better; cutting it to fit the old
+    /// wall-clock would abandon seats that settle on the fifth.
     pub max_iterations: u32,
 }
 

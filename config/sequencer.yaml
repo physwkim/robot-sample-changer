@@ -390,7 +390,10 @@ grip_null:
   max_total_mm: 1.0     # past this the seat is wrong, not the trim: a foreign
                         # object in the well reads exactly like a large steady
                         # force, and so does the wrong puck
-  max_iterations: 6     # each is one pick and place, about 35 s
+  max_iterations: 6     # each is two picks and places, three when the two
+                        # closes disagree -- about 70 s, or 105 s when it
+                        # splits. The cap bounds a seat that will not
+                        # converge, not the clock
 
 # Ask the D405's depth stream whether the seat the arm is about to use is in
 # the state the step assumes -- a puck to pick, room to place -- before the
