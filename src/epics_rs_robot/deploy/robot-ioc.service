@@ -10,11 +10,12 @@ WorkingDirectory=/home/bl9b/ws/src/epics_rs_robot/robot_ioc
 
 # robot_ioc reads these (defaulted in main.rs, set explicitly for clarity).
 #
-# ROBOT_DB must be this repository's db, not main.rs's /home/bl9b/ws/db
-# default: that older copy has no CalibMode 3-7 state labels and no
-# Robot:MapSource record, so grip null (6) and holder transfer (7) lose the
-# PVs they steer by. The daemon reads an undefined mbbo value fine, but
-# MapSource simply would not exist.
+# ROBOT_DB must be this repository's db. main.rs now defaults to the db/ of
+# whichever checkout the binary was built from, and this unit runs the binary
+# built under ~/ws -- so the default would still land on ~/ws/db, a copy with
+# no CalibMode 3-7 state labels and no Robot:MapSource record. Grip null (6)
+# and holder transfer (7) would lose the PVs they steer by; the daemon reads
+# an undefined mbbo value fine, but MapSource simply would not exist.
 Environment=ROBOT_DB=/home/bl9b/work/robot-sample-changer/db
 # ROBOT_IOC stays under the tree the binary was built from -- it is where
 # autosave/robot_state.sav already lives, and moving it would start the IOC

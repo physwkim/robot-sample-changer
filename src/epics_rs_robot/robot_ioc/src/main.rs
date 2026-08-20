@@ -19,7 +19,18 @@ use epics_ca_rs::server::run_ca_ioc;
 #[epics_base_rs::epics_main]
 async fn main() -> CaResult<()> {
     // Default the macros used by st.cmd. Override by exporting them before launch.
-    epics_base_rs::runtime::env::set_default("ROBOT_DB", "/home/bl9b/ws/db");
+    //
+    // Both defaults are relative to the checkout this binary was built
+    // from, so a hand-run serves that tree's own db rather than another
+    // one's. The absolute /home/bl9b/ws/db this used to name is a copy
+    // with no CalibMode 3-7 labels and no Robot:MapSource, so a binary
+    // built in the sample-changer repo would come up missing the records
+    // grip null and holder transfer steer by -- and say nothing about it.
+    // systemd passes ROBOT_DB explicitly regardless (see deploy/).
+    epics_base_rs::runtime::env::set_default(
+        "ROBOT_DB",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../../db"),
+    );
     epics_base_rs::runtime::env::set_default("ROBOT_IOC", env!("CARGO_MANIFEST_DIR"));
 
     let args: Vec<String> = std::env::args().collect();

@@ -1,7 +1,8 @@
 # Robot soft-record IOC startup script.
 # Replaces: softIoc -d db/robot.db
 #
-# ROBOT_DB defaults to /home/bl9b/ws/db (set in main.rs); override via env.
+# ROBOT_DB defaults to the db/ of the checkout this binary was built from
+# (set in main.rs); override via env. The systemd unit always sets it.
 
 dbLoadRecords("$(ROBOT_DB)/robot.db")
 
