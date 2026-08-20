@@ -3,11 +3,14 @@ printf '\033]0;[3] Camera Viewer - D405\007'
 REPO=/home/bl9b/work/robot-sample-changer
 BIN="$REPO/src/robot_gui_rs/target/release/robot-gui"
 
-# The D405 IOC runs under procServ (console: telnet 20003), started by
-# run-d405-ioc.sh — there is no systemd unit for it. Bring it up if gone.
-if ! pgrep -f 'release/d435i-ioc' > /dev/null; then
-    echo "D405 IOC is not running — starting it (procServ, console 20003)..."
-    setsid nohup /home/bl9b/work/run-d405-ioc.sh > /dev/null 2>&1 &
+# The D405 IOC is a systemd user unit (console: telnet 20003). Ask systemd
+# rather than starting a copy by hand: a hand-started IOC lives outside the
+# unit, so starting the service afterwards leaves two IOCs on the RS405:
+# prefix. Both answer CA name searches, only one can hold the camera, and the
+# other looks exactly like dead hardware.
+if ! systemctl --user is-active --quiet d405-ioc.service; then
+    echo "D405 IOC is not running — starting it (systemd, console 20003)..."
+    systemctl --user start d405-ioc.service
     sleep 5
 fi
 
