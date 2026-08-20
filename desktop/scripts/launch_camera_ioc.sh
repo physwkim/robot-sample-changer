@@ -1,5 +1,5 @@
 #!/bin/bash
-printf '\033]0;[0] Camera IOC - D405\007'
+printf '\033]0;[4] Camera IOC - D405\007'
 # Brings up the D405 areaDetector IOC and starts acquisition, so the Camera
 # Viewer has images to show.
 #

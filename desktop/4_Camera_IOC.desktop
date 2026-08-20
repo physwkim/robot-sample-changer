@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
-Name=[0] Camera IOC
-Comment=Start the D405 IOC (systemd) and begin acquisition; run before Camera Viewer
+Name=[4] Camera IOC
+Comment=Start the D405 IOC (systemd) and begin acquisition; required by [3] Camera Viewer
 Icon=camera-photo
 Terminal=true
 Exec=/home/bl9b/work/robot-sample-changer/desktop/scripts/launch_camera_ioc.sh
