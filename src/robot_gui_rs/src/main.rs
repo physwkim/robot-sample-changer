@@ -69,6 +69,7 @@ const GAP: f32 = 8.0;
 const H_STATE: f32 = 248.0;
 const H_RUN: f32 = 216.0;
 const H_MANUAL: f32 = 140.0;
+const H_HOLD: f32 = 132.0;
 const H_TEACH: f32 = 430.0;
 
 /// One box on the page's three-column grid.
@@ -196,8 +197,18 @@ impl RobotGui {
     }
 
     /// The taught numbers and the jog that measures them.
+    ///
+    /// The hold card comes first because nothing below it does anything
+    /// until a hold is standing: the jog is only serviced while the arm
+    /// waits, and Apply only lands while the daemon is publishing a
+    /// seat. It spans the full width rather than sharing its row, which
+    /// would need a second card invented to fill the gap.
     fn teach_page(&mut self, ui: &mut egui::Ui) {
         let (one, two) = Self::columns(ui);
+        card(ui, egui::vec2(one + GAP + two, H_HOLD), |ui| {
+            self.ops.calib_hold_group(ui)
+        });
+        ui.add_space(GAP);
         ui.horizontal_top(|ui| {
             card(ui, egui::vec2(one, H_TEACH), |ui| self.calib.jog_group(ui));
             card(ui, egui::vec2(two, H_TEACH), |ui| {
@@ -205,6 +216,9 @@ impl RobotGui {
             });
         });
         self.calib.note_line(ui);
+        // The hold card's own feedback lives on the ops panel, so this
+        // page has to show it too or a press here reports nowhere.
+        self.ops.note_line(ui);
     }
 
     /// The camera in its own native window, for as long as it is open.

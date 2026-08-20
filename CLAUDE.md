@@ -86,8 +86,14 @@ Rust RsDM GUI (`src/robot_gui_rs`, 독립 cargo workspace) — rsdm/rsplot을
 
 `2_Robot_GUI.desktop` → `launch_robot_gui.sh` → `robot-gui <waypoints.yaml>`.
 탭 둘입니다 — **Operate**(State: 상태 + 그립 널 결과 / Run: 마운트·그립
-널·퍽 이동·그리퍼·Advanced)와 **Teach**(jog + 누적·apply, 오프셋·틸트
-테이블). Teach만 라이브 상태가 아니라 티칭 파일을 편집하므로 갈랐고,
+널·퍽 이동·그리퍼·Advanced)와 **Teach**(캘리브레이션 hold, jog + 누적·apply,
+오프셋·틸트 테이블). Teach 맨 위 **Calibration hold**가 홀더 N의 퍽을
+집어 그 시트 위(모드 1) 또는 스테이지 위(모드 2)에 세웁니다 — Apply가
+설 자리가 있는 hold가 이 둘뿐이라 표의 Holder 행과 Stage 행이 각각
+여기서 나옵니다. hold를 끝내는 건 `Wait`이 아니라 **두 번째 Trigger**
+이고(`calibration_hold`가 `wait_for_trigger`), 버튼은 `Robot:Jog:Target`이
+비어 있지 않을 때만 눌립니다 — 안 그러면 hold를 끝내는 게 아니라
+`CalibMode`에 남아 있던 모드로 새 런을 띄웁니다. Teach만 라이브 상태가 아니라 티칭 파일을 편집하므로 갈랐고,
 스크롤 위치도 탭마다 따로 답니다. 테이블은 편집 셀만 텍스트 편집으로
 저장하므로(데몬의 트림 persist와 같은 규율) 동시 쓰기에 안전합니다.
 

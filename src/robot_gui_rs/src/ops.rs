@@ -15,9 +15,25 @@ use crate::pvs::{MODE_NAMES, robot, step_name};
 enum Action {
     Mount(i64),
     Return(i64),
-    GripNull { target: i64, source: i64 },
-    Transfer { target: i64, source: i64 },
-    Advanced { mode: i64, start: i64 },
+    GripNull {
+        target: i64,
+        source: i64,
+    },
+    Transfer {
+        target: i64,
+        source: i64,
+    },
+    /// A calibration hold: pick `holder`'s puck and stand where the jog
+    /// can measure a seat -- above that holder (mode 1) or above the
+    /// stage bore (mode 2, carrying the puck there).
+    Hold {
+        holder: i64,
+        at_stage: bool,
+    },
+    Advanced {
+        mode: i64,
+        start: i64,
+    },
     Recover,
 }
 
@@ -39,6 +55,13 @@ impl Action {
             }
             Action::Transfer { target, source } => {
                 format!("Move the puck from holder {source} to holder {target}")
+            }
+            Action::Hold { holder, at_stage } => {
+                if *at_stage {
+                    format!("Carry holder {holder}'s puck to the stage and hold there for jogging")
+                } else {
+                    format!("Pick holder {holder}'s puck and hold above that seat for jogging")
+                }
             }
             Action::Advanced { mode, start } => {
                 let name = MODE_NAMES.get(*mode as usize).copied().unwrap_or("?");
@@ -62,6 +85,11 @@ pub struct OpsPanel {
     loaded: Channel,
     gripper: Channel,
     gripper_rbv: RsdmLabel,
+    /// The seat the daemon says a hold is standing at, empty when none
+    /// is. `CalibPanel` reads it too, for the Apply button; a second
+    /// subscription to one PV costs a channel and keeps both panels
+    /// able to answer the question without asking the other.
+    jog_target: Channel,
     wrench: Channel,
     null_state: Channel,
     null_iter: Channel,
@@ -74,6 +102,7 @@ pub struct OpsPanel {
     null_source: i64,
     xfer_target: i64,
     xfer_src: i64,
+    hold_holder: i64,
     adv_mode: usize,
     adv_start: i64,
     pause_step_input: i64,
@@ -146,6 +175,7 @@ impl OpsPanel {
             loaded: ch("Loaded")?,
             gripper: ch("Gripper")?,
             gripper_rbv: RsdmLabel::new(engine, &robot("Gripper_RBV"))?,
+            jog_target: ch("Jog:Target")?,
             // Served by ur-monitor-ioc off its own RTDE receive stream,
             // so reading it here costs the sequencer nothing.
             wrench: ch("UR:Receive:ActualTCPForce")?,
@@ -159,6 +189,7 @@ impl OpsPanel {
             null_source: 0,
             xfer_target: 6,
             xfer_src: 7,
+            hold_holder: 1,
             adv_mode: 0,
             adv_start: 0,
             pause_step_input: 0,
@@ -239,6 +270,26 @@ impl OpsPanel {
                     "Moving the puck from holder {source} to holder {target} — \
                      straight across, no stage leg and no probe"
                 );
+            }
+            Action::Hold { holder, at_stage } => {
+                put(&self.holder, holder);
+                put(&self.calib_mode, if at_stage { 2 } else { 1 });
+                // Both modes honour StartStep for their skip logic, so a
+                // value left over from a resume would drop the pick and
+                // hold with an empty gripper.
+                put(&self.start_step, 0);
+                put(&self.pause_step, 0);
+                self.pause_step_input = 0;
+                put(&self.trigger, 1);
+                self.note = if at_stage {
+                    format!(
+                        "Carrying holder {holder}'s puck to the stage — jog there, Apply,                          then end the hold to put it back"
+                    )
+                } else {
+                    format!(
+                        "Picking holder {holder}'s puck — jog above that seat, Apply,                          then end the hold to put it back"
+                    )
+                };
             }
             Action::Advanced { mode, start } => {
                 put(&self.calib_mode, mode);
@@ -602,6 +653,80 @@ impl OpsPanel {
                     self.gripper.put(PvValue::Int(0));
                 }
             });
+        });
+    }
+
+    /// The two calibration holds, drawn on the Teach page because that
+    /// is the errand they serve: each stands the arm where the daemon
+    /// publishes a seat in `Jog:Target`, and those holds are the only
+    /// places Apply has somewhere to land (CLAUDE.md, "Jog와 Jog
+    /// Apply"). Mode 1 holds above the holder it picked from and mode 2
+    /// carries that puck to the stage, so between them they reach the
+    /// Holder rows and the Stage row of the table beside this card.
+    ///
+    /// Ending a hold is a second `Trigger`, not a `Wait`: the daemon
+    /// parks in `calibration_hold`, which is `wait_for_trigger`. That
+    /// write goes straight out instead of through [`Self::request`] for
+    /// the reason the measurement wait's Continue does -- the run is
+    /// deliberately standing here and this is its sanctioned
+    /// continuation, so a "a sequence is running or was interrupted"
+    /// confirmation would be describing the very thing being ended.
+    /// Starting a hold still goes through `request`, because that does
+    /// start a sequence.
+    ///
+    /// `Jog:Target` is also what enables the button. Without that gate a
+    /// press with no hold standing would not end anything -- it would
+    /// trigger a fresh run of whatever mode was left in `CalibMode`.
+    pub fn calib_hold_group(&mut self, ui: &mut egui::Ui) {
+        let target = sval(&self.jog_target).unwrap_or_default();
+        let holding = !target.is_empty();
+        ui.vertical(|ui| {
+            ui.strong("Calibration hold");
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    fields(ui, "hold-fields", |ui| {
+                        ui.label("Source holder:");
+                        ui.add(egui::DragValue::new(&mut self.hold_holder).range(1..=10));
+                        ui.end_row();
+                    });
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(format!("Hold at holder {}", self.hold_holder))
+                            .clicked()
+                        {
+                            self.request(Action::Hold {
+                                holder: self.hold_holder,
+                                at_stage: false,
+                            });
+                        }
+                        if ui.button("Hold at stage").clicked() {
+                            self.request(Action::Hold {
+                                holder: self.hold_holder,
+                                at_stage: true,
+                            });
+                        }
+                    });
+                });
+                ui.separator();
+                ui.vertical(|ui| {
+                    if holding {
+                        ui.colored_label(GREEN, format!("Holding at {target} — jog, then Apply"));
+                    } else {
+                        ui.label("No hold standing.");
+                    }
+                    ui.add_enabled_ui(holding, |ui| {
+                        if ui.button("Return the puck and end the hold").clicked() {
+                            self.trigger.put(PvValue::Int(1));
+                            self.note =
+                                "Ending the hold — returning the puck to its holder".to_string();
+                        }
+                    });
+                });
+            });
+            ui.label(
+                "Pick above the holder itself, or carry that puck to the stage. \
+                 Apply lands on whichever seat is named here, not on Holder.",
+            );
         });
     }
 
