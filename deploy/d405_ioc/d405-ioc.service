@@ -1,0 +1,63 @@
+[Unit]
+Description=Intel RealSense D405 areaDetector IOC (epics-rs) via procServ
+Documentation=file:///home/bl9b/work/epics-rs-iocs/README.md
+After=network-online.target
+Wants=network-online.target
+
+# Rate-limit restarts (see Restart= below). These two live in [Unit], not
+# [Service] -- systemd ignores them with a warning if put with Restart=.
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=/home/bl9b/work/epics-rs-iocs/iocs/d435i-ioc
+
+# caget/caput for the ExecStartPost and ExecStop steps below.
+Environment=PATH=/home/bl9b/epics/bin/linux-x86_64:/usr/local/bin:/usr/bin:/bin
+# Never pin this to a unicast address: this host runs several CA servers
+# sharing UDP 5064, and a unicast search reaches only whichever socket the
+# kernel picks, so PVs resolve at random. Broadcast reaches all of them.
+Environment=EPICS_CA_AUTO_ADDR_LIST=YES
+
+# Console on TCP 20003 (robot_ioc 20001, ur_monitor_ioc 20002). Same procServ
+# idiom as the robot units: --foreground for systemd supervision, --ignore so
+# a console ^D/^C cannot kill the IOC. procServ also supplies the pty the
+# iocsh REPL needs -- run straight under systemd the IOC reads EOF on stdin
+# and exits immediately.
+ExecStart=/usr/bin/procServ \
+  --foreground --quiet \
+  --name d405_ioc \
+  --chdir /home/bl9b/work/epics-rs-iocs/iocs/d435i-ioc \
+  --logfile /home/bl9b/work/epics-rs-iocs/iocs/d435i-ioc/procServ-d405.log \
+  --logstamp \
+  --ignore "^D^C" \
+  20003 \
+  /home/bl9b/work/epics-rs-iocs/target/release/d435i-ioc \
+  /home/bl9b/work/epics-rs-iocs/iocs/d435i-ioc/st.d405.cmd
+
+# Finish the autosave restore. pass1 restore writes the saved VAL into
+# RSStreamMode but never processes the record, so the mode does not reach the
+# driver: RSStreamMode reads back the saved 15fps while RSStreamMode_RBV stays
+# on the driver default of 30 and the camera streams at 30. It cannot be done
+# inside st.cmd either -- the framework runs the restore after the script
+# finishes. So wait for the IOC, then force one process.
+ExecStartPost=/bin/sh -c 'for i in $(seq 1 40); do sleep 2; caget -w 2 RS405:cam1:RSStreamMode >/dev/null 2>&1 && break; done; sleep 2; want=$(caget -w 3 -t -n RS405:cam1:RSStreamMode 2>/dev/null); have=$(caget -w 3 -t -n RS405:cam1:RSStreamMode_RBV 2>/dev/null); [ -n "$want" ] && [ "$want" != "$have" ] && caput -w 5 RS405:cam1:RSStreamMode.PROC 1 >/dev/null 2>&1; exit 0'
+
+# Stop acquisition BEFORE the IOC dies. This is not politeness: killing the
+# IOC mid-stream leaves the RealSense firmware hung -- it keeps answering USB
+# enumeration but delivers no frames, and a USB bus reset does not clear it
+# (a bus reset leaves VBUS on, so the camera's ASIC keeps its state).
+# Recovering one took an xHCI controller reset; the other needed a physical
+# replug. TimeoutStopSec below must stay comfortably above this settle time.
+ExecStop=/bin/sh -c 'caput -w 10 RS405:cam1:Acquire 0 >/dev/null 2>&1; sleep 4; exit 0'
+
+# on-failure, not always: a camera that has wedged makes the IOC exit, and
+# restarting straight back into the same wedged device just loops. The burst
+# limit stops that loop rather than hammering the hardware.
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target
