@@ -1,4 +1,4 @@
-# robot_ioc — procServ + systemd 부팅 자동시작
+# robot_ioc — procServ + systemd(유저) 부팅 자동시작
 
 `robot_ioc`(EPICS soft IOC)를 procServ 아래에서 데몬으로 돌리고 systemd로 부팅 시
 자동 시작합니다. procServ가 iocsh 콘솔을 TCP 20001(localhost 전용)로 노출하므로,
@@ -11,7 +11,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 cd ~/ws/src/epics_rs_robot && cargo build --release -p robot_ioc
 ```
 
-## 2. 설치 & 활성화 (sudo 필요)
+## 2. 설치 & 활성화 (**유저 유닛**, sudo 없음)
 
 먼저 수동으로 돌던 IOC가 있으면 정지:
 ```bash
@@ -23,21 +23,40 @@ pkill -x robot_ioc
 `~/ws/db`를 가리키고, 그 db에는 CalibMode 3-7 라벨도 `Robot:MapSource`도
 없습니다(그립 널·홀더 간 이동이 쓰는 PV):
 ```bash
-sudo install -m 644 ~/work/robot-sample-changer/src/epics_rs_robot/deploy/robot-ioc.service \
-     /etc/systemd/system/robot-ioc.service
+install -m 644 ~/work/robot-sample-changer/src/epics_rs_robot/deploy/robot-ioc.service \
+     ~/.config/systemd/user/robot-ioc.service
+systemctl --user daemon-reload
+systemctl --user enable --now robot-ioc.service
+```
+
+이 호스트의 다른 IOC 둘(`ur-monitor-ioc`, `d405-ioc`)과 같은 유저 유닛입니다.
+root가 필요한 항목이 하나도 없어서입니다 — TCP 20001도 CA 5064도 비특권
+포트이고 경로는 전부 `/home/bl9b` 아래입니다. sudo를 뗀 값은 데스크톱
+런처(`[0] Robot IOC`)가 IOC를 직접 띄울 수 있다는 것입니다.
+
+로그인 없이도 유지되려면 linger가 켜져 있어야 합니다(이 호스트는 이미 켜짐):
+```bash
+loginctl show-user "$USER" -p Linger      # Linger=yes
+```
+
+**구 시스템 유닛을 지우세요.** `/etc/systemd/system/robot-ioc.service`에 2026-06-01
+사본이 남아 있으면 같은 이름이 시스템·유저 양쪽에 존재하고, 그 사본은
+`ROBOT_DB=~/ws/db`를 들고 있습니다. 지우는 것만 sudo가 필요합니다:
+```bash
+sudo systemctl disable --now robot-ioc.service      # 시스템 쪽
+sudo rm /etc/systemd/system/robot-ioc.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now robot-ioc.service
 ```
 
 ## 3. 상태 / 로그 / 제어
 
 ```bash
-systemctl status robot-ioc.service
-journalctl -u robot-ioc.service -f          # systemd 레벨 로그
+systemctl --user status robot-ioc.service
+journalctl --user -u robot-ioc.service -f   # systemd 레벨 로그
 tail -f ~/ws/src/epics_rs_robot/robot_ioc/ioc/procServ.log   # IOC 콘솔 출력
 
-sudo systemctl restart robot-ioc.service
-sudo systemctl stop robot-ioc.service
+systemctl --user restart robot-ioc.service
+systemctl --user stop robot-ioc.service
 ```
 
 ## 4. 실행 중 IOC의 iocsh 콘솔 붙기/나가기
@@ -53,8 +72,8 @@ procServ 콘솔에서 `Ctrl-X` = IOC 자식 프로세스 재시작(restart), `Ct
 
 ## 동작 방식 / 복원력
 
-- procServ가 IOC 자식이 죽으면 **자동 재시작**(holdoff 후). systemd는 procServ 자체가
-  죽으면 **재시작**(`Restart=always`). → 2중 복원력.
+- procServ가 IOC 자식이 죽으면 **자동 재시작**(holdoff 후). `systemd --user`는
+  procServ 자체가 죽으면 **재시작**(`Restart=always`). → 2중 복원력.
 - IOC가 재시작돼도 autosave(`robot_ioc/autosave/robot_state.sav`)가 Robot:CurrentStep 등
   상태를 복원하므로, 크래시 후 재개 흐름이 그대로 유지됩니다 (CLAUDE.md 참고).
 

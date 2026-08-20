@@ -38,23 +38,30 @@ cd ~/epics-rs-iocs && cargo build --release -p ur-robot-ioc
 
 ## 실행
 
-### 1. EPICS IOC (필수, 현재는 수동 기동)
+### 1. EPICS IOC (필수)
 
 `robot_ioc`(Rust)가 `db/robot.db` PV를 CA로 서빙 (autosave 포함,
 procServ 콘솔 20001).
 
+**유저 레벨 systemd**로 돕니다 — `~/.config/systemd/user/robot-ioc.service`,
+`enabled` + linger on이라 부팅부터 뜹니다. 다른 IOC 둘과 같은 방식이고
+sudo가 필요 없습니다(20001·5064 모두 비특권, 경로는 전부 홈 아래).
+
 ```bash
-ROBOT_DB=~/work/robot-sample-changer/db \
-  ~/ws/src/epics_rs_robot/target/release/robot_ioc
+systemctl --user status|restart|stop robot-ioc
 ```
+
+`0_Robot_IOC.desktop` = `scripts/launch_robot_ioc.sh` — 유닛을 띄우고
+PV가 답하는지까지 확인합니다. 시퀀서보다 먼저입니다.
 
 `ROBOT_DB`는 반드시 이 저장소의 `db/`입니다 — 바이너리의 컴파일 기본값
 `~/ws/db`는 CalibMode 3-7 라벨도 `Robot:MapSource`도 없는 구 사본이라
-그립 널과 홀더 간 이동이 쓰는 PV가 사라집니다.
+그립 널과 홀더 간 이동이 쓰는 PV가 사라집니다. 유닛이 이걸 명시하고,
+런처는 `Robot:MapSource`가 있는지로 어느 db가 올라왔는지 확인합니다.
 
-**부팅 자동 기동은 꺼져 있습니다.** 시스템 유닛 `robot-ioc.service`는
-`disabled`이고, 설치본은 아직 `ROBOT_DB=~/ws/db`를 들고 있습니다. 켜려면
-이 저장소의 사본을 먼저 설치하세요 — `src/epics_rs_robot/deploy/README.md`.
+`/etc/systemd/system/robot-ioc.service`에 구 시스템 유닛 사본이 남아
+있으면 지우세요(`ROBOT_DB=~/ws/db`를 들고 있고, 이름이 시스템·유저
+양쪽에 존재하게 됩니다) — `src/epics_rs_robot/deploy/README.md`.
 
 ### 2. robot-sequencer 데몬
 

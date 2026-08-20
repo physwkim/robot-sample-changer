@@ -6,8 +6,6 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=bl9b
-Group=bl9b
 WorkingDirectory=/home/bl9b/ws/src/epics_rs_robot/robot_ioc
 
 # robot_ioc reads these (defaulted in main.rs, set explicitly for clarity).
@@ -42,5 +40,11 @@ Restart=always
 RestartSec=5
 TimeoutStopSec=15
 
+# A user unit, like ur-monitor-ioc and d405-ioc on this host: no User=/Group=
+# (systemd --user already runs as bl9b) and the target is the per-user
+# default, not multi-user. Nothing here wants root -- TCP 20001 and CA 5064
+# are unprivileged and every path is under /home/bl9b -- and dropping sudo is
+# what lets the desktop launcher start it. `loginctl enable-linger bl9b` is
+# what keeps it up with nobody logged in.
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
