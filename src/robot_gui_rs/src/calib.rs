@@ -106,6 +106,157 @@ pub struct CalibPanel {
     note: String,
 }
 
+/// One arrowhead at `tip`, pointing away from `tail`.
+fn head(p: &egui::Painter, tip: egui::Pos2, tail: egui::Pos2, stroke: egui::Stroke) {
+    let d = (tip - tail).normalized();
+    let n = egui::vec2(-d.y, d.x);
+    p.line_segment([tip, tip - d * 5.0 + n * 3.0], stroke);
+    p.line_segment([tip, tip - d * 5.0 - n * 3.0], stroke);
+}
+
+/// A double-headed arrow: one jog axis, both of its buttons.
+fn axis_arrow(p: &egui::Painter, a: egui::Pos2, b: egui::Pos2, stroke: egui::Stroke) {
+    p.line_segment([a, b], stroke);
+    head(p, a, b, stroke);
+    head(p, b, a, stroke);
+}
+
+fn box_at(p: &egui::Painter, x: (f32, f32), y: (f32, f32), fill: egui::Color32, s: egui::Stroke) {
+    let r = egui::Rect::from_min_max(egui::pos2(x.0, y.0), egui::pos2(x.1, y.1));
+    p.rect_filled(r, 1.0, fill);
+    p.rect_stroke(r, 1.0, s, egui::StrokeKind::Inside);
+}
+
+/// Which way the three jog buttons actually move the gripper, drawn
+/// rather than described.
+///
+/// The frame is `ik_frame` (`robotiq_hande_end`) — what `Motion::jog`
+/// rotates its millimetres out of, and what the trim columns next door
+/// are written in. Not `tool0`: the URDF turns the coupler 180° about z
+/// away from it, so tool0's x and y point the other way.
+///
+/// The URDF fixes two of the three: the fingers slide along ±x
+/// (`robotiq_hande_*_finger_joint`, `axis 1 0 0`, and every joint from
+/// there to `robotiq_hande_end` is rpy 0), and the gripper reaches out
+/// along +z. FK of the four taught seats puts +y within 0.1° of straight
+/// down at all of them, which is what lets this label +y "into the seat"
+/// — and is why `above_y_offset` is negative to stand 5 mm clear.
+fn axis_figure(ui: &mut egui::Ui) {
+    let w = ui.available_width().clamp(220.0, 320.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 104.0), egui::Sense::hover());
+    let p = ui.painter_at(rect);
+    let v = ui.visuals();
+    let ink = egui::Stroke::new(1.0, v.text_color());
+    let faint = egui::Stroke::new(1.0, v.weak_text_color());
+    let metal = v.widgets.inactive.bg_fill;
+    let ghost = v.widgets.noninteractive.bg_fill;
+    let puck = v.selection.bg_fill;
+    let cap = egui::FontId::proportional(9.5);
+    let tag = egui::FontId::proportional(10.5);
+    let label = |at: egui::Pos2, anchor: egui::Align2, s: &str| {
+        p.text(at, anchor, s, tag.clone(), v.text_color());
+    };
+
+    let half = (rect.width() - 10.0) / 2.0;
+    let front = egui::Rect::from_min_size(rect.min, egui::vec2(half, rect.height()));
+    let plan = egui::Rect::from_min_size(
+        rect.min + egui::vec2(half + 10.0, 0.0),
+        egui::vec2(half, rect.height()),
+    );
+
+    // Seen from in front of the jaws. The body is directly behind the
+    // pads at a seat — z is horizontal there — so it is a silhouette,
+    // not a box stacked on top of them.
+    p.text(
+        front.center_top(),
+        egui::Align2::CENTER_TOP,
+        "from the front",
+        cap.clone(),
+        v.weak_text_color(),
+    );
+    let (cx, t) = (front.center().x, front.top() + 16.0);
+    box_at(&p, (cx - 20.0, cx + 20.0), (t, t + 26.0), ghost, faint);
+    for (x0, x1) in [(cx - 18.0, cx - 9.0), (cx + 9.0, cx + 18.0)] {
+        box_at(&p, (x0, x1), (t + 10.0, t + 40.0), metal, ink);
+    }
+    p.circle_filled(egui::pos2(cx, t + 34.0), 7.0, puck);
+    p.line_segment(
+        [
+            egui::pos2(cx - 28.0, t + 45.0),
+            egui::pos2(cx + 28.0, t + 45.0),
+        ],
+        faint,
+    );
+    for i in 0..5 {
+        let x = cx - 24.0 + 12.0 * i as f32;
+        p.line_segment(
+            [egui::pos2(x, t + 45.0), egui::pos2(x - 4.0, t + 49.0)],
+            faint,
+        );
+    }
+    let ax = front.left() + 10.0;
+    axis_arrow(&p, egui::pos2(ax, t + 4.0), egui::pos2(ax, t + 42.0), ink);
+    label(egui::pos2(ax, t - 1.0), egui::Align2::CENTER_BOTTOM, "−Y");
+    label(egui::pos2(ax, t + 47.0), egui::Align2::CENTER_TOP, "+Y");
+    axis_arrow(
+        &p,
+        egui::pos2(cx - 26.0, t + 60.0),
+        egui::pos2(cx + 26.0, t + 60.0),
+        ink,
+    );
+    label(
+        egui::pos2(cx - 30.0, t + 60.0),
+        egui::Align2::RIGHT_CENTER,
+        "−X",
+    );
+    label(
+        egui::pos2(cx + 30.0, t + 60.0),
+        egui::Align2::LEFT_CENTER,
+        "+X",
+    );
+
+    // Looking straight down the axis the arm descends on.
+    p.text(
+        plan.center_top(),
+        egui::Align2::CENTER_TOP,
+        "from above",
+        cap,
+        v.weak_text_color(),
+    );
+    let (px, pt) = (plan.center().x, plan.top() + 16.0);
+    box_at(
+        &p,
+        (px - 19.0, px + 19.0),
+        (pt + 34.0, pt + 46.0),
+        ghost,
+        faint,
+    );
+    for (x0, x1) in [(px - 16.0, px - 7.0), (px + 7.0, px + 16.0)] {
+        box_at(&p, (x0, x1), (pt + 8.0, pt + 34.0), metal, ink);
+    }
+    p.circle_filled(egui::pos2(px, pt + 21.0), 7.0, puck);
+    let az = plan.right() - 10.0;
+    axis_arrow(&p, egui::pos2(az, pt + 6.0), egui::pos2(az, pt + 46.0), ink);
+    label(egui::pos2(az, pt + 1.0), egui::Align2::CENTER_BOTTOM, "+Z");
+    label(egui::pos2(az, pt + 51.0), egui::Align2::CENTER_TOP, "−Z");
+    axis_arrow(
+        &p,
+        egui::pos2(px - 26.0, pt + 60.0),
+        egui::pos2(px + 26.0, pt + 60.0),
+        ink,
+    );
+    label(
+        egui::pos2(px - 30.0, pt + 60.0),
+        egui::Align2::RIGHT_CENTER,
+        "−X",
+    );
+    label(
+        egui::pos2(px + 30.0, pt + 60.0),
+        egui::Align2::LEFT_CENTER,
+        "+X",
+    );
+}
+
 impl CalibPanel {
     pub fn new(engine: &Engine, yaml_path: PathBuf) -> Result<Self, EngineError> {
         let mut panel = Self {
@@ -204,6 +355,11 @@ impl CalibPanel {
                 ui.end_row();
             }
         });
+        axis_figure(ui);
+        ui.small(
+            "X closes across the pads, Z runs along the jaw, +Y goes down \
+             into the seat. The trim columns are these same axes.",
+        );
         ui.separator();
         ui.label("Jogged this run (tool x, y, z):");
         let travel: Vec<Option<f64>> = self.travel.iter().map(fval).collect();
