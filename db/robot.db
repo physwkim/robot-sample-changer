@@ -277,7 +277,7 @@ record(ai, "Robot:Null:DZ")
 }
 record(ai, "Robot:Null:Force")
 {
-    field(DESC, "Grip null last close wrench magnitude")
+    field(DESC, "Grip null close wrench, steered axes")
     field(VAL,  "0.0")
     field(PREC, "2")
     field(EGU,  "N")

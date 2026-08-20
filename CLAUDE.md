@@ -236,7 +236,7 @@ ws/
 | Robot:Null:State | longin | 그립 널 상태 (0=Idle, 1=Running, 2=Settled, 3=Failed) |
 | Robot:Null:Iter | longin | 진행 중인 반복 번호 |
 | Robot:Null:DX/DY/DZ | ai | 누적 보정 (mm, 툴 x / 툴 y=깊이 / 툴 z; 깊이는 조향 안 하므로 항상 0) |
-| Robot:Null:Force | ai | 마지막 닫힘 렌치 크기 (N) |
+| Robot:Null:Force | ai | 마지막 닫힘 렌치 크기 (N, 조향 축만 — 깊이 제외) |
 | Robot:Null:Msg | stringin | 결과 한 줄 (39자) |
 
 ### Jog와 Jog Apply

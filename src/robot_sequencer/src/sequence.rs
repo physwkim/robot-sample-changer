@@ -1320,7 +1320,18 @@ impl<'a> Sequencer<'a> {
             report.message = format!("iteration {iteration} of {}", g.max_iterations);
             self.epics.publish_null(report);
             let force = self.null_close_wrench(&standby, &above, &on_pos, &g, report)?;
-            report.force_n = force.iter().map(|f| f * f).sum::<f64>().sqrt();
+            // Over the steered axes only, so the number on the screen is
+            // the one the loop is deciding on. Depth belongs to the same
+            // wrench but not to the same question: its zero sits at the
+            // clearance edge under the puck, so a seat standing there
+            // reads several newtons of depth while the loop is correctly
+            // calling the lateral axes settled -- and a magnitude over
+            // all three would report that run as if it had not converged.
+            report.force_n = steered()
+                .iter()
+                .map(|&i| force[i] * force[i])
+                .sum::<f64>()
+                .sqrt();
             self.epics.publish_null(report);
             // An axis inside the noise floor is left alone on both
             // counts, so "settled" and "not written" are one rule.
