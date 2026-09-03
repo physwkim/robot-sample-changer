@@ -2403,6 +2403,11 @@ impl<'a> Sequencer<'a> {
         log::info("  Set Trigger=1 to start the capture from where the arm is");
         log::info("========================================");
         self.set_status("hand-eye: aim, then trigger");
+        // The same Hold every other jog-serving wait publishes. Without
+        // it this loop reads the operator's jogs while `Robot:State`
+        // still says Running, which is the GUI's word for "reads no
+        // commands" -- so the jog buttons it services were greyed out.
+        self.set_state(DaemonState::Hold);
         self.jog_hold(None);
         let mut next_probe = std::time::Instant::now();
         loop {
@@ -2410,6 +2415,7 @@ impl<'a> Sequencer<'a> {
                 if !self.epics.write_trigger(0) {
                     log::warn("Failed to reset trigger PV to 0, continuing anyway...");
                 }
+                self.set_state(DaemonState::Running);
                 return;
             }
             self.service_hold();
