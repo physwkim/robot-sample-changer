@@ -579,26 +579,6 @@ enum Gate {
     TooLarge(f64),
 }
 
-/// Blocks while `Stop` is set.
-///
-/// A free function over `&Epics` rather than a `&mut self` method so the
-/// hand-eye capture, which holds a mutable borrow of `motion` across its
-/// whole loop, can honour the same pause the sequence steps do instead of
-/// keeping a second copy of this loop.
-fn wait_for_stop_clear(epics: &Epics) {
-    if epics.read_stop() == 0 {
-        return;
-    }
-    log::info("STOPPED - Waiting for Stop PV to become 0...");
-    loop {
-        if epics.read_stop() == 0 {
-            log::info("Stop cleared, resuming execution...");
-            return;
-        }
-        std::thread::sleep(POLL);
-    }
-}
-
 /// A list for the log, or `-` when it is empty.
 fn or_dash(items: &[String]) -> String {
     if items.is_empty() {
@@ -2632,7 +2612,11 @@ impl<'a> Sequencer<'a> {
         // ones whose line is blocked, so a refusal below is a real fault.
         let mut detector_died = None;
         for (label, goal) in &schedule.poses {
-            wait_for_stop_clear(&self.epics);
+            self.stopped_hold(&format!("at hand-eye {label}"));
+            // The capture said nothing about itself until now, which is
+            // why the pause above needs a line of its own to hand back
+            // to.
+            self.set_status(format!("hand-eye: capturing {label}"));
             log::info(&format!("Capturing {label}"));
             self.motion.move_direct(goal, velocity, velocity, label)?;
             let observed = self.motion.current_joints()?;
@@ -3086,6 +3070,32 @@ impl<'a> Sequencer<'a> {
 
     // ---- step executors ------------------------------------------------
 
+    /// The `Stop` pause, with a line that says it is one.
+    ///
+    /// `Robot:State` cannot answer this: the daemon services no
+    /// commands while it is stopped, so it is Running and has to stay
+    /// Running -- a standing state here would open GUI controls that
+    /// nothing is reading. That leaves the status line, and the pause
+    /// used to be the one halt it did not describe: the record went on
+    /// naming the step that had just finished, so the screen said
+    /// "step 9" of an arm that was not going to move again until
+    /// someone cleared `Stop`. Every caller writes its own next line,
+    /// so this one only has to survive the wait.
+    fn stopped_hold(&mut self, where_at: &str) {
+        if self.epics.read_stop() == 0 {
+            return;
+        }
+        self.set_status(format!("paused by Robot:Stop {where_at}"));
+        log::info("STOPPED - Waiting for Stop PV to become 0...");
+        loop {
+            if self.epics.read_stop() == 0 {
+                log::info("Stop cleared, resuming execution...");
+                return;
+            }
+            std::thread::sleep(POLL);
+        }
+    }
+
     /// Shared prologue: resume-skip, then block while `Stop` is set.
     /// Returns false when the step is skipped.
     fn step_prologue(&mut self, step: i32, name: &str, start: i32) -> bool {
@@ -3093,7 +3103,7 @@ impl<'a> Sequencer<'a> {
             log::info(&format!("Skipping step {step} ({name})"));
             return false;
         }
-        wait_for_stop_clear(&self.epics);
+        self.stopped_hold(&format!("before step {step}"));
         log::info(&format!("Step {step}: {name}"));
         self.set_status(format!("step {step}: {name}"));
         true
