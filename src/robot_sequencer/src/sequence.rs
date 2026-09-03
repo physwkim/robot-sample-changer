@@ -519,6 +519,11 @@ pub struct Sequencer<'a> {
     /// Last seen `Robot:Gripper` command; -1 = unknown (first successful
     /// read initializes without executing).
     last_gripper_cmd: i32,
+    /// The mode of the run in progress, which is what says whether a
+    /// step number is inside a carry. Written once per run by
+    /// [`Sequencer::run`] and read only from [`Sequencer::step_prologue`],
+    /// which nothing outside a run reaches.
+    run_mode: CalibMode,
     sequence_count: u32,
     /// Monotonic id for the vision handshake (`Robot:Vision:Req`/`Done`).
     vision_req_id: i32,
@@ -678,6 +683,7 @@ impl<'a> Sequencer<'a> {
             model,
             config,
             last_gripper_cmd: -1,
+            run_mode: CalibMode::Normal,
             sequence_count: 0,
             vision_req_id,
             jog: JogTotal {
@@ -705,6 +711,7 @@ impl<'a> Sequencer<'a> {
             } = self.wait_for_trigger(DaemonState::Idle, self.idle_status.clone(), None);
             self.set_state(DaemonState::Running);
             self.sequence_count += 1;
+            self.run_mode = calib_mode;
 
             let mode_name = match calib_mode {
                 CalibMode::Holder => "Holder",
@@ -3107,17 +3114,42 @@ impl<'a> Sequencer<'a> {
         }
     }
 
-    /// Shared prologue: resume-skip, then block while `Stop` is set.
-    /// Returns false when the step is skipped.
-    fn step_prologue(&mut self, step: i32, name: &str, start: i32) -> bool {
+    /// Shared prologue: resume-skip, block while `Stop` is set, then
+    /// check the fingers against what this step needs. Returns false
+    /// when the step is skipped.
+    ///
+    /// The fingers are asked here rather than only at the run's first
+    /// step because they can change after it. Every wait the daemon
+    /// stands in services `Robot:Gripper` -- the measurement wait, a
+    /// calibration hold, a `PauseStep` pause -- so an operator who opens
+    /// the gripper mid-run puts the puck down wherever the arm is
+    /// standing, and the steps that follow would walk an empty hand into
+    /// the seat and record it as filled. A puck that slips out of the
+    /// pads on the way has the same shape and no press behind it. The
+    /// check costs one width read, which the driver's own thread keeps
+    /// live.
+    ///
+    /// After [`Sequencer::stopped_hold`], so that a `Stop` pause is the
+    /// place to fix the fingers rather than a wait that ends in this
+    /// refusal.
+    fn step_prologue(&mut self, step: i32, name: &str, start: i32) -> Result<bool, SequencerError> {
         if step < start {
             log::info(&format!("Skipping step {step} ({name})"));
-            return false;
+            return Ok(false);
         }
         self.stopped_hold(&format!("before step {step}"));
+        if let Some(needs) = Hands::before_step(self.run_mode, step)
+            && let Some(fingers) = self.gripper.fingers()
+            && let Some(refusal) = needs.refuses(fingers)
+        {
+            return Err(SequencerError(format!(
+                "{} before step {step} ({name}): {}. {}",
+                refusal.status, refusal.detail, refusal.advice
+            )));
+        }
         log::info(&format!("Step {step}: {name}"));
         self.set_status(format!("step {step}: {name}"));
-        true
+        Ok(true)
     }
 
     /// Shared epilogue after a successful step: publish `CurrentStep`,
@@ -3135,7 +3167,7 @@ impl<'a> Sequencer<'a> {
         goal: &JointMap,
         start: i32,
     ) -> Result<(), SequencerError> {
-        if !self.step_prologue(step, name, start) {
+        if !self.step_prologue(step, name, start)? {
             return Ok(());
         }
         self.motion.move_planned(
@@ -3159,7 +3191,7 @@ impl<'a> Sequencer<'a> {
         goal: &JointMap,
         start: i32,
     ) -> Result<(), SequencerError> {
-        if !self.step_prologue(step, name, start) {
+        if !self.step_prologue(step, name, start)? {
             return Ok(());
         }
         let gentle = self.config.sequence.cartesian_velocity_scale;
@@ -3180,7 +3212,7 @@ impl<'a> Sequencer<'a> {
         open: bool,
         start: i32,
     ) -> Result<Option<[f64; 6]>, SequencerError> {
-        if !self.step_prologue(step, name, start) {
+        if !self.step_prologue(step, name, start)? {
             return Ok(None);
         }
         let before = self.grip_reading(name);
