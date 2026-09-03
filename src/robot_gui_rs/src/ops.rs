@@ -24,6 +24,9 @@ enum Action {
         target: i64,
         source: i64,
     },
+    /// Put the puck the arm is already carrying into `holder`, without
+    /// picking anything first: the place leg of a Normal run on its own.
+    Divert(i64),
     /// A calibration hold: pick `holder`'s puck and stand where the jog
     /// can measure a seat -- above that holder (mode 1) or above the
     /// stage bore (mode 2, carrying the puck there).
@@ -56,6 +59,9 @@ impl Action {
             }
             Action::Transfer { target, source } => {
                 format!("Move the puck from holder {source} to holder {target}")
+            }
+            Action::Divert(h) => {
+                format!("Put the puck the arm is carrying into holder {h}")
             }
             Action::Hold { holder, at_stage } => {
                 if *at_stage {
@@ -273,6 +279,21 @@ impl OpsPanel {
                 put(&self.wait, 0);
                 put(&self.trigger, 1);
                 self.note = format!("Retrieving the sample from the stage back to holder {h}...");
+            }
+            Action::Divert(h) => {
+                put(&self.holder, h);
+                put(&self.calib_mode, 0);
+                // Step 18 plans to the target holder's standby from
+                // wherever the arm is standing, and 19-23 are the place
+                // leg. Everything before it is a pick, which is exactly
+                // what must not happen: the puck is already in the
+                // fingers, which is why the run stopped where it did.
+                put(&self.start_step, 18);
+                put(&self.pause_step, 0);
+                self.pause_step_input = 0;
+                put(&self.wait, 0);
+                put(&self.trigger, 1);
+                self.note = format!("Putting the carried puck into holder {h}...");
             }
             Action::GripNull { target, source } => {
                 put(&self.holder, target);
@@ -629,6 +650,22 @@ impl OpsPanel {
             }
             if ui.button("Return from stage").clicked() {
                 self.request(Action::Return(self.holder_sel));
+            }
+            // The way out of a seat check that stopped the run holding
+            // the puck -- the stage occupied before step 8, or the
+            // holder it came from occupied before step 19. Both leave
+            // the arm at a standby with the puck in the fingers, and
+            // both are answered by placing it somewhere else.
+            if ui
+                .button("Put carried puck in holder")
+                .on_hover_text(
+                    "For a run stopped because the seat it was about to fill is \
+                     occupied: places the puck the arm is holding into the holder \
+                     above, skipping the pick.",
+                )
+                .clicked()
+            {
+                self.request(Action::Divert(self.holder_sel));
             }
             ui.add_space(4.0);
             if waiting {
