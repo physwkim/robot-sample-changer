@@ -419,5 +419,25 @@ seat_check:
   camera_prefix: "RS405:cam1:"
                         # the depth stream's own intrinsics and count scale --
                         # 389.555 and 0.0001 m here, not the colour stream's
+  rack_window_bias_mm: [0.0, 0.0, 0.0]
+                        # the ten wells keep the window the 2026-08-19
+                        # fingerprints were measured with -- unchanged
+  stage_window_bias_mm: [0.0, 8.0, 0.0]
+                        # the stage was moved on the rig 2026-09-03 and
+                        # re-taught into the seat trims. The window follows
+                        # the trim, so it moved too, and landed just above
+                        # the puck: the seated puck's top edge fell on the
+                        # window's last row and the median read the
+                        # background 50 mm behind it. Measured against a
+                        # seated puck with the arm parked at the wait:
+                        #   +0 mm +53.1 (empty)  +2 mm +43.2 (empty)
+                        #   +4 mm  -8.2  +6 -7.9  +8 -7.3  +10 -7.3
+                        # so the edge is at +3 and the plateau runs past
+                        # +10; +8 sits in the middle of it at 74% valid
+                        # pixels. It moves the sampling window only -- the
+                        # grasp point the median is judged against, and the
+                        # pose the arm drives to, are untouched.
+                        #   seat_scan config/sequencer.yaml stage 1 bias:0,8,0
+                        # re-measures it against a live frame.
   timeout: 5.0          # seconds to wait for a frame exposed after the arm
                         # stopped; a miss warns and lets the run continue

@@ -155,6 +155,12 @@ const WINDOW_HALF_X_M: f64 = 0.005;
 /// 4 mm below the grasp point empty is 138 mm against 128 mm seated,
 /// and 8 mm below the two are the same holder body at 126 mm. So the
 /// window sits mostly above the grasp point and stops just under it.
+/// Both numbers are the *rack's*, and where a seat presents its puck
+/// differently the difference is a bias on the window rather than a
+/// second pair of constants — see `seat_check.*_window_bias_mm` and
+/// `Seat::window_bias`. The stage earned one when it was moved on
+/// 2026-09-03: its puck top now shows itself below the grasp point,
+/// where this window reaches only 2 mm.
 const WINDOW_UP_M: f64 = 0.006;
 const WINDOW_DOWN_M: f64 = 0.002;
 
@@ -274,17 +280,24 @@ impl HandEye {
     /// other about the approach axis, so the same rectangle lands with
     /// its axes swapped at the stage and a pixel half-size taken from
     /// the rack would sample the wrong shape there.
+    /// `bias` moves the window in the seat's own tool frame, metres, and
+    /// nothing else: the grasp point the reading is measured against
+    /// stays where the seat is. That separation is the point — the bias
+    /// says where this seat shows its puck to the camera, not where the
+    /// seat is, so biasing the window never moves the arm and never
+    /// changes what "occupied" means.
     pub fn window(
         &self,
         base_t_ee: &Isometry3<f64>,
         seat_pose: &Isometry3<f64>,
         cam: &DepthCamera,
+        bias: [f64; 3],
     ) -> Option<Window> {
         let (mut c0, mut c1, mut r0, mut r1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
         for x in [-WINDOW_HALF_X_M, WINDOW_HALF_X_M] {
             for y in [-WINDOW_UP_M, WINDOW_DOWN_M] {
                 let corner = Point3::from(
-                    (seat_pose * Translation3::new(x, y, 0.0))
+                    (seat_pose * Translation3::new(x + bias[0], y + bias[1], bias[2]))
                         .translation
                         .vector,
                 );
@@ -316,8 +329,9 @@ impl HandEye {
         cam: &DepthCamera,
         base_t_ee: &Isometry3<f64>,
         seat_pose: &Isometry3<f64>,
+        bias: [f64; 3],
     ) -> Option<Reading> {
-        let window = self.window(base_t_ee, seat_pose, cam)?;
+        let window = self.window(base_t_ee, seat_pose, cam, bias)?;
         let grasp = Point3::from(seat_pose.translation.vector);
         let (_, _, predicted_m) = self.look(base_t_ee, &grasp, &cam.lens)?;
 
@@ -477,11 +491,50 @@ mod tests {
     /// by patch, the rows that separate the two run 300-329 and the
     /// columns 285-340; outside that the empty well and the seated puck
     /// return the same holder body to within 1 mm.
+    /// The rack's window, unmoved -- what every fingerprint below was
+    /// measured with.
+    const NO_BIAS: [f64; 3] = [0.0; 3];
+
+    /// A bias moves the window and nothing else. The pair matters more
+    /// than either half: if it moved the grasp point too, a biased
+    /// window would keep reading zero delta wherever it was pointed and
+    /// the check would answer "occupied" about anything it happened to
+    /// land on.
+    #[test]
+    fn a_window_bias_moves_the_window_and_leaves_the_grasp_point() {
+        let cam = depth_camera();
+        let (base_t_ee, seat) = rack_seat(2);
+        let eye = handeye();
+        let plain = eye
+            .window(&base_t_ee, &seat, &cam, NO_BIAS)
+            .expect("window");
+        let moved = eye
+            .window(&base_t_ee, &seat, &cam, [0.0, 0.008, 0.0])
+            .expect("window");
+        assert_ne!(plain, moved, "an 8 mm bias left the window where it was");
+
+        let frame = flat_frame(0.2, &cam);
+        let a = eye
+            .read_seat(&frame, &cam, &base_t_ee, &seat, NO_BIAS)
+            .expect("reading");
+        let b = eye
+            .read_seat(&frame, &cam, &base_t_ee, &seat, [0.0, 0.008, 0.0])
+            .expect("reading");
+        assert!(
+            (a.predicted_m - b.predicted_m).abs() < 1e-9,
+            "the bias moved the grasp point: {} vs {}",
+            a.predicted_m,
+            b.predicted_m
+        );
+    }
+
     #[test]
     fn the_window_lands_on_the_rows_that_separate_loaded_from_empty() {
         let cam = depth_camera();
         let (base_t_ee, seat) = rack_seat(2);
-        let w = handeye().window(&base_t_ee, &seat, &cam).expect("window");
+        let w = handeye()
+            .window(&base_t_ee, &seat, &cam, NO_BIAS)
+            .expect("window");
         assert!(
             (300..=305).contains(&w.r0) && (322..=329).contains(&w.r1),
             "rows {}-{} are outside the measured separating band 300-329",
@@ -512,7 +565,7 @@ mod tests {
         let cam = depth_camera();
         let read = |holder: i32, mm: f64| {
             let (base_t_ee, seat) = rack_seat(holder);
-            eye.read_seat(&flat_frame(mm, &cam), &cam, &base_t_ee, &seat)
+            eye.read_seat(&flat_frame(mm, &cam), &cam, &base_t_ee, &seat, NO_BIAS)
                 .expect("seat is in view")
         };
         let loaded = read(2, 131.6);
@@ -549,7 +602,7 @@ mod tests {
         };
         let (base_t_ee, seat) = rack_seat(2);
         let dark = eye
-            .read_seat(&blank, &cam, &base_t_ee, &seat)
+            .read_seat(&blank, &cam, &base_t_ee, &seat, NO_BIAS)
             .expect("seat is in view");
         assert_eq!(dark.verdict, Verdict::Unreadable, "{dark:?}");
     }

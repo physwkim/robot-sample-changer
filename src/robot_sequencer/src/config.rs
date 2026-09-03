@@ -59,12 +59,28 @@ pub struct SeatCheckConfig {
     /// Seconds to wait for a frame the camera exposed after the arm
     /// stopped moving.
     pub timeout: f64,
+    /// Where each kind of seat shows its puck to the camera, mm, in the
+    /// seat's own tool frame (x, y=approach, z). It moves the sampling
+    /// window only — never the grasp point the median is compared
+    /// against, and never the arm.
+    ///
+    /// Zero is "the rack's window, unchanged", which is what both were
+    /// until the stage was moved on the rig: a seat whose puck top no
+    /// longer falls inside a window reaching 6 mm out of the seat and
+    /// 2 mm into it needs the window moved, not the trim, because the
+    /// trim is where the arm goes.
+    #[serde(default)]
+    pub rack_window_bias_mm: [f64; 3],
+    #[serde(default)]
+    pub stage_window_bias_mm: [f64; 3],
 }
 
 impl Default for SeatCheckConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            rack_window_bias_mm: [0.0; 3],
+            stage_window_bias_mm: [0.0; 3],
             hand_eye_yaml: PathBuf::from("../T_ee_cam.yaml"),
             depth_prefix: "RS405:image2:".into(),
             camera_prefix: "RS405:cam1:".into(),

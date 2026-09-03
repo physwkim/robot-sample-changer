@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use cspace_core::geometry::{Isometry3, Vector3};
 
-use crate::config::{CentringConfig, Config, GripNullConfig, SeatProbe};
+use crate::config::{CentringConfig, Config, GripNullConfig, SeatCheckConfig, SeatProbe};
 use crate::epics::{CalibMode, DaemonState, Epics, NullReport, NullState, VisionKind, WaitStatus};
 use crate::error::SequencerError;
 use crate::gripper::Gripper;
@@ -119,9 +119,10 @@ impl LegStandby {
 /// Which seat a grip null is working on: `Robot:Holder = 0` is the
 /// stage bore, 1-10 the rack wells.
 ///
-/// The two differ in three things and nothing else — the taught poses
-/// the pick uses, the trim slots the correction lands in, and what the
-/// log calls them. The correction rule itself does not differ, because
+/// The two differ in four things and nothing else — the taught poses
+/// the pick uses, the trim slots the correction lands in, where each
+/// shows its puck to the depth camera ([`Seat::window_bias`]), and what
+/// the log calls them. The correction rule itself does not differ, because
 /// it is stated in the tool frame and both seats are gripped by the same
 /// tool; the stage is only turned about 92 degrees from the rack around
 /// the approach axis, which the frame handles rather than a second
@@ -138,6 +139,17 @@ impl Seat {
             Self::Stage => "the stage".into(),
             Self::Holder(h) => format!("holder {h}"),
         }
+    }
+
+    /// Where this seat shows its puck to the camera, metres, in its own
+    /// tool frame. The seat check's window is the rack's shape; this is
+    /// how far it has to move to be on *this* seat's puck.
+    fn window_bias(self, config: &SeatCheckConfig) -> [f64; 3] {
+        let mm = match self {
+            Self::Stage => config.stage_window_bias_mm,
+            Self::Holder(_) => config.rack_window_bias_mm,
+        };
+        mm.map(|v| v / 1000.0)
     }
 
     fn persist(
@@ -2534,7 +2546,8 @@ impl<'a> Sequencer<'a> {
         };
         let base_t_ee = self.model.fk(observe_from)?;
         let seat_pose = self.model.fk(seat)?;
-        let Some(reading) = eye.read_seat(&frame, camera, &base_t_ee, &seat_pose) else {
+        let bias = which.window_bias(&self.config.seat_check);
+        let Some(reading) = eye.read_seat(&frame, camera, &base_t_ee, &seat_pose, bias) else {
             log::warn(&format!(
                 "  seat check @{label}: the seat does not project into the frame from \
                  here — not checked"
