@@ -224,6 +224,7 @@ ws/
 | Robot:Gripper | bo | 그리퍼 명령 (0=Close, 1=Open) |
 | Robot:Gripper_RBV | bi | 그리퍼 상태 피드백 (0=Close, 1=Open) |
 | Robot:Loaded | bi | 샘플 로드 상태 (0=Not Loaded, 1=Loaded) |
+| Robot:SeatCheck | bo | 카메라 시트 점유 확인 스위치 (0=Off, 1=On, autosave 없음) |
 | Robot:JogX/Y/Z | longout | TCP jog 방향 (-1/0/+1, 툴 프레임) |
 | Robot:JogStep | ao | jog 스텝 크기 (mm, 0.01-10) |
 | Robot:Jog:DX/DY/DZ | ai | 이번 런에서 jog한 누적량 (mm, 툴 x/y/z) |

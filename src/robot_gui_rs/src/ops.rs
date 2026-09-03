@@ -82,6 +82,11 @@ pub struct OpsPanel {
     map_source: Channel,
     stop: Channel,
     pause_step: Channel,
+    /// The camera seat check's on/off record. Not gated on the daemon
+    /// answering: it is a record the daemon reads at each gate, not a
+    /// command handshake, so it can be flipped while the arm moves and
+    /// takes effect at the next seat.
+    seat_check: Channel,
     current_step: Channel,
     loaded: Channel,
     gripper: Channel,
@@ -177,6 +182,7 @@ impl OpsPanel {
             map_source: ch("MapSource")?,
             stop: ch("Stop")?,
             pause_step: ch("PauseStep")?,
+            seat_check: ch("SeatCheck")?,
             current_step: ch("CurrentStep")?,
             loaded: ch("Loaded")?,
             gripper: ch("Gripper")?,
@@ -808,6 +814,28 @@ impl OpsPanel {
                         self.pause_step.put(PvValue::Int(self.pause_step_input));
                     }
                     ui.label(format!("(now {})", ival(&self.pause_step).unwrap_or(0)));
+                });
+                ui.end_row();
+                ui.label("Seat check:");
+                ui.horizontal(|ui| {
+                    // The record is the truth and the box only shows it,
+                    // so an Off set from caput or from another client
+                    // reads back here.
+                    let live = self.seat_check.state().connected;
+                    let mut on = ival(&self.seat_check).unwrap_or(1) != 0;
+                    ui.add_enabled_ui(live, |ui| {
+                        if ui.checkbox(&mut on, "camera confirms the seat").changed() {
+                            self.seat_check.put(PvValue::Int(i64::from(on)));
+                        }
+                    });
+                    if !live {
+                        // The record is newer than a running IOC that has
+                        // not reloaded robot.db, and a box that writes
+                        // nowhere would read as a check that is on.
+                        ui.colored_label(RED, "no Robot:SeatCheck record — restart the IOC");
+                    } else if !on {
+                        ui.colored_label(RED, "off — seats are not checked");
+                    }
                 });
                 ui.end_row();
             });

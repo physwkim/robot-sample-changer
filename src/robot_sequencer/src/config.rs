@@ -217,6 +217,12 @@ pub struct EpicsConfig {
     /// reason.
     #[serde(default = "default_map_source_pv")]
     pub map_source_pv: String,
+    /// The operator's runtime switch for the camera seat check.
+    /// Defaulted like `map_source_pv`, and optional in `Epics::connect`
+    /// for the same reason: a config or a database that predates the
+    /// record keeps working, with the check on.
+    #[serde(default = "default_seat_check_pv")]
+    pub seat_check_pv: String,
     /// Prefix of the grip null's progress records — the family is
     /// `State`, `Iter`, `DX`, `DY`, `DZ`, `Force` and `Msg`. One prefix
     /// rather than seven names because `db/robot.db` adds and removes
@@ -252,6 +258,10 @@ fn default_null_prefix_pv() -> String {
 
 fn default_jog_prefix_pv() -> String {
     "Robot:Jog:".into()
+}
+
+fn default_seat_check_pv() -> String {
+    "Robot:SeatCheck".into()
 }
 
 fn default_state_pv() -> String {

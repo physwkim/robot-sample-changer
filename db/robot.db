@@ -65,6 +65,22 @@ record(bo, "Robot:Stop")
     field(ONAM, "Pause")
     field(VAL,  "0")
 }
+# Runtime switch for the camera seat check, for the operator who has to
+# run while the check is wrong -- a stage that moved, a camera that came
+# back off its mount. `seat_check.enabled` in sequencer.yaml decides
+# whether the check exists at all (it loads the hand-eye file); this
+# decides whether it runs, and the daemon reads it once per gate.
+#
+# NOT autosaved on purpose: a disabled safety check must not be what an
+# IOC restart quietly restores. The record comes up On, and turning it
+# off is a decision someone makes in front of the rig.
+record(bo, "Robot:SeatCheck")
+{
+    field(DESC, "Camera seat check on/off")
+    field(ZNAM, "Off")
+    field(ONAM, "On")
+    field(VAL,  "1")
+}
 record(longin, "Robot:CurrentStep")
 {
     field(DESC, "Robot current step (1-30)")

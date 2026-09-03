@@ -2497,6 +2497,13 @@ impl<'a> Sequencer<'a> {
         let (Some(eye), true) = (&self.seat_check, run) else {
             return Ok(());
         };
+        if !self.epics.read_seat_check_enabled() {
+            log::warn(&format!(
+                "  seat check @{label}: switched off (Robot:SeatCheck=Off) — the seat is \
+                 not checked and the arm will trust the sequence"
+            ));
+            return Ok(());
+        }
         let Some(camera) = self.epics.depth_camera() else {
             return Ok(());
         };
@@ -2538,8 +2545,10 @@ impl<'a> Sequencer<'a> {
         if reading.verdict != expect.verdict() {
             return Err(SequencerError(format!(
                 "seat check @{label}: the seat reads {} and {} — the camera sees \
-                 {:.1} mm where the seat is {:.1} mm ({:+.1} mm). Fix the seat, or set \
-                 seat_check.enabled to false to run without the check",
+                 {:.1} mm where the seat is {:.1} mm ({:+.1} mm). Fix the seat, or turn \
+                 Robot:SeatCheck off (GUI Advanced: Seat check) and trigger again — that \
+                 record is read at every gate, so it takes effect without a restart, \
+                 unlike seat_check.enabled in sequencer.yaml",
                 reading.verdict.label(),
                 expect.complaint(),
                 reading.median_m * 1000.0,

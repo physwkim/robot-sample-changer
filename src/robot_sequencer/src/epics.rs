@@ -153,6 +153,7 @@ pub struct Epics {
     calib_mode: CaChannel,
     loaded: CaChannel,
     map_source: Option<CaChannel>,
+    seat_check: Option<CaChannel>,
     jog_x: Option<CaChannel>,
     jog_y: Option<CaChannel>,
     jog_z: Option<CaChannel>,
@@ -527,6 +528,7 @@ impl Epics {
             calib_mode: required(&config.calib_mode_pv)?,
             loaded: required(&config.loaded_pv)?,
             map_source: optional(&config.map_source_pv),
+            seat_check: optional(&config.seat_check_pv),
             jog_x: optional(&config.jog_x_pv),
             jog_y: optional(&config.jog_y_pv),
             jog_z: optional(&config.jog_z_pv),
@@ -686,6 +688,19 @@ impl Epics {
             ));
             0
         }
+    }
+
+    /// The operator's runtime switch for the camera seat check.
+    ///
+    /// Every failure answers "on": a missing record, an IOC that did not
+    /// answer in time, a garbled value. Only an operator who put a 0 in
+    /// the record turns a safety check off; nothing else may.
+    pub fn read_seat_check_enabled(&self) -> bool {
+        self.seat_check
+            .as_ref()
+            .and_then(|ch| self.get_i32(ch, GET_TIMEOUT))
+            .unwrap_or(1)
+            != 0
     }
 
     pub fn read_stop(&self) -> i32 {
