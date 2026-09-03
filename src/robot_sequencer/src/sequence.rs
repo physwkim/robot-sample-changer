@@ -29,6 +29,8 @@ use crate::seatcheck::{HandEye, Verdict};
 use crate::waypoints::{WaypointData, persist_holder_trims, persist_stage_trims};
 
 const POLL: Duration = Duration::from_millis(100);
+/// `Robot:Status` at a trigger wait that follows a run that finished.
+const IDLE_STATUS: &str = "idle - waiting for a trigger";
 /// How often the hand-eye aiming hold asks the detector where the tag is.
 /// A detect costs one fresh camera frame; often enough to jog against,
 /// rare enough that the jog itself stays responsive.
@@ -380,6 +382,24 @@ pub struct Sequencer<'a> {
     /// so that no path can advance one without the other.
     state: DaemonState,
     beat: i32,
+    /// The line `Robot:Status` currently carries. Kept so that every
+    /// service pass can re-assert it, the way the state and the beat
+    /// are: an IOC restarted mid-wait comes back with the record at its
+    /// database default, and a daemon that only wrote on change would
+    /// leave "no daemon" standing over a daemon that is standing right
+    /// there.
+    status: String,
+    /// What `Robot:Status` says while the daemon stands at the trigger
+    /// wait: that it is waiting, or -- after a run that stopped -- why
+    /// it stopped.
+    ///
+    /// Kept rather than published at the failure and republished here,
+    /// because the trigger wait is where a stopped run is read: the
+    /// operator comes back to a still arm and asks the daemon what
+    /// happened. A status overwritten with "idle" on the way into that
+    /// wait would answer "nothing", which is the one answer that is
+    /// never true after a failure.
+    idle_status: String,
 }
 
 /// What a step about to run needs of the seat it is aimed at.
@@ -536,6 +556,8 @@ impl<'a> Sequencer<'a> {
             seat_check,
             state: DaemonState::Idle,
             beat: 0,
+            status: IDLE_STATUS.into(),
+            idle_status: IDLE_STATUS.into(),
         }
     }
 
@@ -545,6 +567,7 @@ impl<'a> Sequencer<'a> {
     pub fn run(&mut self) -> Result<(), SequencerError> {
         loop {
             self.set_state(DaemonState::Idle);
+            self.set_status(self.idle_status.clone());
             let start_from_step = self.wait_for_trigger(None);
             self.set_state(DaemonState::Running);
             self.sequence_count += 1;
@@ -561,6 +584,15 @@ impl<'a> Sequencer<'a> {
                 CalibMode::Recover => "Recover",
                 CalibMode::Normal => "Normal",
             };
+            let seat_name = if holder_number == 0 {
+                "stage".to_string()
+            } else {
+                format!("h{holder_number}")
+            };
+            self.set_status(format!(
+                "run #{}: {mode_name} {seat_name}",
+                self.sequence_count
+            ));
             log::info("========================================");
             log::info(&format!(
                 "Starting sequence #{} (from step {start_from_step}, holder {holder_number}, mode={mode_name})",
@@ -585,6 +617,7 @@ impl<'a> Sequencer<'a> {
                     self.sequence_count
                 ));
                 log::error("Nothing moved; CurrentStep and StartStep kept.");
+                self.idle_status = format!("not started: {e}");
                 continue;
             }
 
@@ -613,6 +646,7 @@ impl<'a> Sequencer<'a> {
                     width * 1000.0
                 ));
                 log::error("Nothing moved; CurrentStep and StartStep kept.");
+                self.idle_status = "not started: fingers shut on nothing".into();
                 continue;
             }
 
@@ -623,6 +657,7 @@ impl<'a> Sequencer<'a> {
                     log::error(&format!(
                         "Failed to reload waypoints, skipping sequence: {e}"
                     ));
+                    self.idle_status = "not started: waypoints unreadable".into();
                     continue;
                 }
             };
@@ -673,9 +708,15 @@ impl<'a> Sequencer<'a> {
                         "Arm stopped, gripper untouched, CurrentStep kept as the resume point. \
                          Set StartStep and trigger to resume, or CalibMode=4 to return to standby.",
                     );
+                    // The record holds 39 characters, so what an error
+                    // says first is what an operator gets: the failures
+                    // that reach here name the check or the move that
+                    // refused before they explain themselves.
+                    self.idle_status = format!("STOP: {e}");
                     continue;
                 }
             };
+            self.idle_status = IDLE_STATUS.into();
 
             log::info("========================================");
             match (calib_mode, outcome) {
@@ -1094,6 +1135,7 @@ impl<'a> Sequencer<'a> {
         // already in the fingers, from wherever the operator carried it,
         // so which seat the arm is over is not something the daemon
         // knows here.
+        self.set_status("seat probe: trigger to probe here");
         self.set_state(DaemonState::Hold);
         self.wait_for_trigger(None);
         self.set_state(DaemonState::Running);
@@ -2225,6 +2267,7 @@ impl<'a> Sequencer<'a> {
         log::info("  Use JogX/Y/Z + JogStep to move the TCP");
         log::info("  Set Trigger=1 to start the capture from where the arm is");
         log::info("========================================");
+        self.set_status("hand-eye: aim, then trigger");
         self.jog_hold(None);
         let mut next_probe = std::time::Instant::now();
         loop {
@@ -2511,6 +2554,7 @@ impl<'a> Sequencer<'a> {
         // The hold's StartStep read is discarded: the return phase keeps
         // the original trigger's start_from_step for its skip logic, as
         // the C++ did.
+        self.set_status(format!("hold @{}: trigger to return", seat.label()));
         self.set_state(DaemonState::Hold);
         let _ = self.wait_for_trigger(Some(seat));
         self.set_state(DaemonState::Running);
@@ -2848,6 +2892,7 @@ impl<'a> Sequencer<'a> {
         }
         wait_for_stop_clear(&self.epics);
         log::info(&format!("Step {step}: {name}"));
+        self.set_status(format!("step {step}: {name}"));
         true
     }
 
@@ -3053,6 +3098,7 @@ impl<'a> Sequencer<'a> {
         // as often a standby or a lift as a seat. Jogging works, an
         // apply has nowhere to go.
         self.jog_hold(None);
+        self.set_status(format!("paused at step {current_step} - PauseStep"));
         self.set_state(DaemonState::Paused);
         loop {
             // Only the literal 2 reads as Skip; 1, anything else, and a
@@ -3085,6 +3131,7 @@ impl<'a> Sequencer<'a> {
         // The arm stands at the stage standby through this wait, not at
         // a seat, so jogging is serviced and an apply is refused.
         self.jog_hold(None);
+        self.set_status("measuring - Wait=1 to continue");
         self.set_state(DaemonState::MeasurementWait);
         loop {
             match self.epics.read_wait() {
@@ -3156,6 +3203,7 @@ impl<'a> Sequencer<'a> {
     fn service_hold(&mut self) {
         self.beat = self.beat.wrapping_add(1);
         self.epics.publish_state(self.state, self.beat);
+        self.epics.publish_status(&self.status);
         self.poll_gripper_cmd();
         self.process_jog();
         self.process_jog_apply();
@@ -3169,6 +3217,20 @@ impl<'a> Sequencer<'a> {
         self.state = state;
         self.beat = self.beat.wrapping_add(1);
         self.epics.publish_state(state, self.beat);
+    }
+
+    /// The single owner of `Robot:Status`: the sentence a person reads
+    /// off the screen when the arm is not moving.
+    ///
+    /// Kept as well as published, because [`Sequencer::service_hold`]
+    /// re-asserts it on every pass. Nothing reads it back -- no control
+    /// is enabled from this record, which stays the job of `State` and
+    /// `Alive` -- so a line that is briefly behind costs a reader
+    /// nothing, and a line that is permanently wrong costs them the one
+    /// question they came to ask.
+    fn set_status(&mut self, line: impl Into<String>) {
+        self.status = line.into();
+        self.epics.publish_status(&self.status);
     }
 
     /// Runs one blocking piece of hardware work as `Running`, then

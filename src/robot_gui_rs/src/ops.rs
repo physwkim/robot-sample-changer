@@ -96,6 +96,10 @@ pub struct OpsPanel {
     /// subscription to one PV costs a channel and keeps both panels
     /// able to answer the question without asking the other.
     jog_target: Channel,
+    /// The daemon's one-line account of itself: the step it is on, the
+    /// wait it is holding in, or why the last run stopped. Prose, not a
+    /// gate -- nothing here is enabled or disabled from it.
+    status: Channel,
     wrench: Channel,
     null_state: Channel,
     null_iter: Channel,
@@ -188,6 +192,7 @@ impl OpsPanel {
             gripper: ch("Gripper")?,
             gripper_rbv: RsdmLabel::new(engine, &robot("Gripper_RBV"))?,
             jog_target: ch("Jog:Target")?,
+            status: ch("Status")?,
             // Served by ur-monitor-ioc off its own RTDE receive stream,
             // so reading it here costs the sequencer nothing.
             wrench: ch("UR:Receive:ActualTCPForce")?,
@@ -398,6 +403,16 @@ impl OpsPanel {
                     },
                     say,
                 );
+                ui.end_row();
+                // The daemon's own words. The row above says whether it
+                // is listening; this one says what it is doing, and
+                // after a run that stopped it is the only place on the
+                // screen that says why.
+                ui.label("Doing:");
+                match sval(&self.status).filter(|s| !s.is_empty()) {
+                    Some(line) => ui.label(egui::RichText::new(line).italics()),
+                    None => ui.label("-"),
+                };
                 ui.end_row();
                 ui.label("Step:");
                 match step {

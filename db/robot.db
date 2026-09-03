@@ -335,3 +335,21 @@ record(stringin, "Robot:Null:Msg")
     field(DESC, "Grip null result, 39 chars")
     field(VAL,  "")
 }
+
+# What the daemon is doing, in one line: the step it is standing on, the
+# wait it is holding in, or -- when a run stopped -- why it stopped. The
+# log already carries the full sentence; this is the part that has to
+# reach an operator who is looking at a screen and not at a terminal,
+# and the question it answers is the one asked of a robot that is not
+# moving: is it waiting for me, or did it give up?
+#
+# stringin like Robot:Null:Msg, so 39 characters: the daemon composes
+# lines to fit rather than letting a long error be cut mid-word.
+# Deliberately NOT in autosave/robot_state.req -- a status restored from
+# disk describes a daemon that is not running, which is the lie that
+# Robot:State exists to prevent.
+record(stringin, "Robot:Status")
+{
+    field(DESC, "What the daemon is doing, 39 chars")
+    field(VAL,  "no daemon")
+}

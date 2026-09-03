@@ -262,6 +262,12 @@ pub struct EpicsConfig {
     pub state_pv: String,
     #[serde(default = "default_alive_pv")]
     pub alive_pv: String,
+    /// The one-line "what is the daemon doing" record. Its own name
+    /// rather than a member of the state family: `State` and `Alive` are
+    /// read by the GUI to decide whether a control may be pressed, and
+    /// this one is never read by anything — it is prose for a person.
+    #[serde(default = "default_status_pv")]
+    pub status_pv: String,
 }
 
 fn default_map_source_pv() -> String {
@@ -286,6 +292,10 @@ fn default_state_pv() -> String {
 
 fn default_alive_pv() -> String {
     "Robot:Alive".into()
+}
+
+fn default_status_pv() -> String {
+    "Robot:Status".into()
 }
 
 /// The level-tool path constraint (see [`SequenceConfig::level_tool`]).

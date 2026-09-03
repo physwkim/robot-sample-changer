@@ -117,6 +117,10 @@ mm 환산 계수라 상수로 박지 않습니다. silx식 ImageView(측면 히�
 State의 **그립 널 결과**는 `Robot:Null:` PV를 그대로 읽습니다 — 상태,
 반복 번호, 누적 보정 세 축, 마지막 닫힘 렌치, 한 줄 메시지.
 
+Status의 **Doing** 줄이 `Robot:Status`입니다 — 데몬이 지금 하는 일,
+런이 멈췄으면 그 이유. 바로 위 Daemon 줄이 "듣고 있나"를 말하고 이
+줄이 "무엇을 하고 있나"를 말합니다.
+
 Status에 **TCP 렌치가 실시간으로** 뜹니다(Force N / Torque Nm,
 각 축 + 크기). 소스는 ur-monitor-ioc의 `Robot:UR:Receive:ActualTCPForce`
 — 그쪽 RTDE receive 스트림이라 시퀀서와 경합하지 않습니다. 프레임은
@@ -239,6 +243,7 @@ ws/
 | Robot:CurrentStep | longin | 현재 실행 중인 스텝 (0-30) |
 | Robot:State | longin | 데몬이 서 있는 루프 (0=Idle, 1=Running, 2=MeasWait, 3=Paused, 4=Hold) |
 | Robot:Alive | longin | 서비스 패스마다 +1 하는 하트비트 (Running 중에는 멈춤) |
+| Robot:Status | stringin | 데몬이 지금 하는 일 한 줄, 멈췄으면 그 이유 (39자) |
 | Robot:PauseStep | longin | 지정 스텝에서 일시정지 |
 | Robot:Gripper | bo | 그리퍼 명령 (0=Close, 1=Open) |
 | Robot:Gripper_RBV | bi | 그리퍼 상태 피드백 (0=Close, 1=Open) |
@@ -262,6 +267,32 @@ ws/
 | Robot:Null:DX/DY/DZ | ai | 누적 보정 (mm, 툴 x / 툴 y=깊이 / 툴 z; 깊이는 조향 안 하므로 항상 0) |
 | Robot:Null:Force | ai | 마지막 닫힘 렌치 크기 (N, 조향 축만 — 깊이 제외) |
 | Robot:Null:Msg | stringin | 결과 한 줄 (39자) |
+
+### Robot:Status — 왜 서 있는지
+
+`Robot:State`가 "어느 루프에 서 있나"를 숫자로 말한다면 이건 **문장**
+입니다. 평상시에는 지금 하는 일(`step 9: sample_holder_on_position`,
+`measuring - Wait=1 to continue`, `hold @holder 3: trigger to return`),
+런이 멈추면 **멈춘 이유**(`STOP: seat check @the stage: the seat r…`,
+`not started: fingers shut on nothing`)가 들어갑니다. 게이트가 아니라
+읽는 값입니다 — GUI 버튼은 여전히 `State`+`Alive`로만 열립니다.
+
+멈춘 이유는 **다음 트리거 대기에서도 그대로 남습니다**. 이유를 쓰고
+바로 `Idle`로 덮으면 "아무 일 없음"이 되는데, 실패 직후에 그건 유일하게
+틀린 답입니다. 그래서 데몬은 트리거 대기에 들어갈 때마다 자기가 들고
+있는 `idle_status`를 다시 씁니다 — 성공으로 끝났으면
+`idle - waiting for a trigger`, 실패로 끝났으면 그 이유.
+
+이 줄은 **서비스 패스마다 다시 씁니다** — `State`/`Alive`와 같은 규율
+입니다. 대기 중에 IOC를 재시작하면 레코드가 db 기본값("no daemon")으로
+돌아오는데, 바뀔 때만 쓰는 데몬이면 살아서 서 있는 데몬 위에 "no daemon"이
+그대로 남습니다. 쓰는 주인은 `set_status` 하나뿐입니다.
+
+`stringin`이라 39자입니다(`Robot:Null:Msg`와 같음). 에러 문장은 자르되
+**앞에서부터** 남으므로, 어떤 검사·어떤 이동이 거부했는지가 먼저 오도록
+메시지를 씁니다. 전문은 데몬 로그에 그대로 있습니다. autosave 대상이
+아닙니다 — 죽은 데몬의 상태를 복원해 보여주는 건 `Robot:State`가 막으려는
+바로 그 거짓말입니다.
 
 ### Jog와 Jog Apply
 

@@ -161,6 +161,7 @@ pub struct Epics {
     vision: Option<VisionChannels>,
     null: Option<NullChannels>,
     state: Option<StateChannels>,
+    status: Option<CaChannel>,
     jog_total: Option<JogChannels>,
     depth: Option<DepthChannels>,
 }
@@ -227,6 +228,22 @@ impl DaemonState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cut a `stringin` takes never splits a character, which is
+    /// what keeps the put valid UTF-8. The Korean line is the case that
+    /// matters: 39 bytes lands inside a three-byte character, so the
+    /// naive cut is the one that fails at the IOC and not here.
+    #[test]
+    fn a_status_line_is_cut_to_the_record_on_a_character_boundary() {
+        assert_eq!(clip_stringin("idle"), "idle");
+        let exactly = "x".repeat(39);
+        assert_eq!(clip_stringin(&exactly), exactly);
+        assert_eq!(clip_stringin(&"x".repeat(60)), exactly);
+        let korean = "그립 널이 시트를 찾지 못했습니다 그래서 멈췄습니다";
+        let cut = clip_stringin(korean);
+        assert!(cut.len() <= 39, "{} bytes", cut.len());
+        assert!(korean.starts_with(cut));
+    }
 
     /// Every mode is classified, and the three that are not gated are
     /// the three an operator reaches for when a run has already gone
@@ -363,6 +380,18 @@ fn state_channels(
         state: optional(state_pv)?,
         alive: optional(alive_pv)?,
     })
+}
+
+/// The 39-byte cut a `stringin` takes, on a character boundary.
+///
+/// The record is 40 bytes including the terminator, and a cut that
+/// lands inside a multi-byte character makes the put invalid UTF-8.
+fn clip_stringin(line: &str) -> &str {
+    let mut end = line.len().min(39);
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    &line[..end]
 }
 
 /// Connect the whole `Robot:Null:` family, or none of it.
@@ -536,6 +565,7 @@ impl Epics {
             vision,
             null: null_channels(&optional, &config.null_prefix_pv),
             state: state_channels(&optional, &config.state_pv, &config.alive_pv),
+            status: optional(&config.status_pv),
             jog_total: jog_channels(&optional, &config.jog_prefix_pv),
             depth,
             _client: client,
@@ -588,15 +618,31 @@ impl Epics {
         ] {
             ok &= self.put_f64(channel, value, GET_TIMEOUT);
         }
-        // `stringin` is 40 bytes including the terminator, and the cut
-        // has to land on a character boundary or the put is not UTF-8.
-        let mut end = report.message.len().min(39);
-        while !report.message.is_char_boundary(end) {
-            end -= 1;
-        }
-        ok &= self.put_str(&n.message, &report.message[..end], GET_TIMEOUT);
+        ok &= self.put_str(&n.message, clip_stringin(&report.message), GET_TIMEOUT);
         if !ok {
             log::warn("grip null status: at least one Robot:Null: put failed");
+        }
+    }
+
+    /// Publish the one-line "what is the daemon doing" status.
+    ///
+    /// Cut to fit rather than refused when it does not: this is the
+    /// record an operator reads when the arm is standing still, and a
+    /// line that is too long is still worth the part that fits. Like
+    /// the other reporting puts it is a no-op against a database that
+    /// predates the record, and a failure is logged and swallowed.
+    ///
+    /// Called on every service pass with the line the daemon is
+    /// currently standing behind, not only when that line changes, for
+    /// the same reason the state and the beat are: an IOC restarted
+    /// while the daemon waits comes back holding its database default,
+    /// and only a repeated write puts the truth back.
+    pub fn publish_status(&self, line: &str) {
+        let Some(channel) = &self.status else {
+            return;
+        };
+        if !self.put_str(channel, clip_stringin(line), GET_TIMEOUT) {
+            log::warn(&format!("status: put of '{line}' failed"));
         }
     }
 
