@@ -135,6 +135,7 @@ impl LegStandby {
 /// nothing that would. It narrows the window to the four gets, and
 /// leaves the last writer before the trigger owning all four rather
 /// than owning whichever field the daemon had not reached yet.
+#[derive(Debug)]
 struct RunRequest {
     start_step: i32,
     holder: i32,
@@ -142,6 +143,119 @@ struct RunRequest {
     /// The source seat for the two modes that fetch a puck; ignored by
     /// the rest.
     map_source: i32,
+}
+
+/// The errands a Channel Access client can ask for in one write.
+///
+/// Everything a run needs is already in four records, and a client that
+/// speaks Channel Access sets them itself -- but three of the four are
+/// the daemon's own vocabulary: which of eight calibration modes, and
+/// which step number of a 24-step script the errand happens to start
+/// at. `StartStep = 13` is not a thing anybody wants; taking the puck
+/// off the stage is. The command names the errand and the daemon
+/// supplies the numbers.
+///
+/// It expands into the same [`RunRequest`] a trigger produces and is
+/// read in the same place, so a command is not a second way to start a
+/// run -- it is the same way, written by name. The four records are
+/// then written back, because they are what the resume path, the
+/// autosave file and both GUIs read to say what is running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Command {
+    /// Rack holder -> stage, the whole mount.
+    Mount,
+    /// Stage -> rack holder, the errand at step 13.
+    Unmount,
+    /// A puck already in the fingers -> rack holder, the errand at
+    /// step 18.
+    Divert,
+    /// Rack holder -> rack holder, `CalibMode::HolderTransfer`.
+    Move,
+    /// Unlock a protective stop, resend the program, return to standby.
+    Recover,
+    /// Drive one seat's taught pose to where the grip loads nothing.
+    GripNull,
+}
+
+impl Command {
+    /// The record's value, or `None` for a code no command answers to.
+    /// The names match `db/robot.db`'s mbbo states.
+    fn from_code(code: i32) -> Option<Self> {
+        Some(match code {
+            1 => Self::Mount,
+            2 => Self::Unmount,
+            3 => Self::Divert,
+            4 => Self::Move,
+            5 => Self::Recover,
+            6 => Self::GripNull,
+            _ => return None,
+        })
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Mount => "Mount",
+            Self::Unmount => "Unmount",
+            Self::Divert => "Divert",
+            Self::Move => "Move",
+            Self::Recover => "Recover",
+            Self::GripNull => "Grip Null",
+        }
+    }
+
+    /// The four records this errand means, or the one line that says
+    /// why it means nothing.
+    ///
+    /// `arg` is the seat the errand works on and `arg2` the seat it
+    /// takes the puck from; `holder_now` is what `Robot:Holder` already
+    /// holds, which is what [`Command::Recover`] returns to -- it has no
+    /// seat of its own to name, it goes back to the standby of whatever
+    /// run stopped.
+    ///
+    /// Every refusal fits the 39-character status record, which is why
+    /// none of them quotes the value back: the client knows what it
+    /// wrote, and the log keeps the full line.
+    fn expand(self, arg: i32, arg2: i32, holder_now: i32) -> Result<RunRequest, String> {
+        let rack = |what: &str| {
+            (1..=10)
+                .contains(&arg)
+                .then_some(arg)
+                .ok_or_else(|| format!("Cmd {what}: seat must be 1-10"))
+        };
+        let run = |start_step, holder, calib_mode, map_source| RunRequest {
+            start_step,
+            holder,
+            calib_mode,
+            map_source,
+        };
+        Ok(match self {
+            Self::Mount => run(0, rack("Mount")?, CalibMode::Normal, 0),
+            Self::Unmount => run(13, rack("Unmount")?, CalibMode::Normal, 0),
+            Self::Divert => run(18, rack("Divert")?, CalibMode::Normal, 0),
+            Self::Move => {
+                let target = rack("Move")?;
+                if !(1..=10).contains(&arg2) {
+                    return Err("Cmd Move: source must be 1-10".into());
+                }
+                if arg2 == target {
+                    return Err("Cmd Move: source is the target".into());
+                }
+                run(0, target, CalibMode::HolderTransfer, arg2)
+            }
+            // The one errand that reads the stage as a seat, and so the
+            // one whose argument may be 0.
+            Self::GripNull => {
+                if !(0..=10).contains(&arg) {
+                    return Err("Cmd Grip Null: seat must be 0-10".into());
+                }
+                if !(0..=10).contains(&arg2) {
+                    return Err("Cmd Grip Null: source must be 0-10".into());
+                }
+                run(0, arg, CalibMode::GripNull, arg2)
+            }
+            Self::Recover => run(0, holder_now, CalibMode::Recover, 0),
+        })
+    }
 }
 
 /// What must be between the pads before a step of the script runs.
@@ -3346,8 +3460,17 @@ impl<'a> Sequencer<'a> {
         log::info("========================================");
         log::info("Waiting for EPICS trigger...");
         log::info("========================================");
+        // Only the idle wait expands a command. The other waits this
+        // opens stand inside a run whose parameters are already
+        // decided, and a Mount written into one of them is not a run
+        // anybody asked to start from there -- it is left to the next
+        // wait entry to drop and name, like every other one-shot.
+        let takes_commands = state == DaemonState::Idle;
         self.enter_wait(state, status, apply_to);
         loop {
+            if takes_commands && let Some(request) = self.take_command() {
+                return request;
+            }
             let value = self.epics.read_trigger();
             if value > 0 {
                 let request = RunRequest {
@@ -3371,6 +3494,66 @@ impl<'a> Sequencer<'a> {
             self.service_hold();
             std::thread::sleep(POLL);
         }
+    }
+
+    /// Takes a command if one is standing, expands it into the records
+    /// a run reads, and answers with the same [`RunRequest`] a trigger
+    /// would have produced.
+    ///
+    /// The record is cleared as it is read, before the expansion can
+    /// fail, so that a command nobody can carry out does not stand
+    /// there being refused once a poll for as long as the daemon waits.
+    /// A refusal writes the reason where a stopped run writes its own,
+    /// and the daemon goes back to waiting.
+    fn take_command(&mut self) -> Option<RunRequest> {
+        let code = self.epics.read_cmd();
+        if code == 0 {
+            return None;
+        }
+        let (arg, arg2) = self.epics.read_cmd_args();
+        self.epics.write_cmd(0);
+        let Some(command) = Command::from_code(code) else {
+            self.refuse_command(code, "Cmd: no such command".into());
+            return None;
+        };
+        match command.expand(arg, arg2, self.epics.read_holder()) {
+            Ok(request) => {
+                log::info(&format!(
+                    "Cmd {} ({arg}, {arg2}): CalibMode={:?} StartStep={} Holder={} \
+                     MapSource={}",
+                    command.name(),
+                    request.calib_mode,
+                    request.start_step,
+                    request.holder,
+                    request.map_source
+                ));
+                // Written back because they are the run's own state
+                // from here on: the resume path reads `StartStep` and
+                // `Holder`, autosave persists them across an IOC
+                // restart, and both GUIs read them to say what is
+                // running. A command that only lived in this variable
+                // would leave all three describing the run before it.
+                self.epics.write_start_step(request.start_step);
+                self.epics.write_holder(request.holder);
+                self.epics.write_calib_mode(request.calib_mode);
+                self.epics.write_map_source(request.map_source);
+                Some(request)
+            }
+            Err(why) => {
+                self.refuse_command(code, why);
+                None
+            }
+        }
+    }
+
+    /// Says why a command was not carried out, in the log with its
+    /// arguments and in `Robot:Status` in the 39 characters a client
+    /// gets. Kept as `idle_status` too, so the answer is still standing
+    /// when whoever wrote the command comes back to look.
+    fn refuse_command(&mut self, code: i32, why: String) {
+        log::error(&format!("Cmd {code} refused: {why}"));
+        self.idle_status = why.clone();
+        self.set_status(why);
     }
 
     /// Holds after step `current_step` while `PauseStep` names it.
@@ -3612,6 +3795,10 @@ impl<'a> Sequencer<'a> {
             dropped.push("Trigger");
         }
         let _ = self.epics.write_trigger(0);
+        if self.epics.read_cmd() != 0 {
+            dropped.push("Cmd");
+        }
+        let _ = self.epics.write_cmd(0);
         let _ = self.epics.write_wait(0);
         let (jx, jy, jz) = self.epics.read_jog_request();
         if jx != 0 || jy != 0 || jz != 0 {
@@ -4027,7 +4214,79 @@ mod tests {
         );
     }
 
-    /// The eight poses that put the tool inside a seat, named by the
+    /// Every command expands to the mode and the step an operator would
+    /// have set by hand. These numbers are the whole point of the
+    /// record -- a client asking for "unmount" must not have to know
+    /// that unmounting is `StartStep = 13` -- so they are pinned here
+    /// against the step script rather than left to the doc.
+    #[test]
+    fn a_command_expands_to_the_records_an_operator_would_have_set() {
+        let at = |c: Command, arg, arg2| c.expand(arg, arg2, 7).unwrap();
+        let mount = at(Command::Mount, 3, 0);
+        assert_eq!(mount.calib_mode, CalibMode::Normal);
+        assert_eq!((mount.start_step, mount.holder), (0, 3));
+        let unmount = at(Command::Unmount, 3, 0);
+        assert_eq!(
+            (unmount.start_step, unmount.holder),
+            (13, 3),
+            "off the stage"
+        );
+        let divert = at(Command::Divert, 5, 0);
+        assert_eq!((divert.start_step, divert.holder), (18, 5), "place only");
+        let moved = at(Command::Move, 7, 2);
+        assert_eq!(moved.calib_mode, CalibMode::HolderTransfer);
+        assert_eq!(
+            (moved.start_step, moved.holder, moved.map_source),
+            (0, 7, 2)
+        );
+        let null = at(Command::GripNull, 0, 4);
+        assert_eq!(null.calib_mode, CalibMode::GripNull);
+        assert_eq!((null.holder, null.map_source), (0, 4), "the stage, fetched");
+        // Recover has no seat of its own: it returns to the standby of
+        // whatever run stopped, which is the holder already in the
+        // record.
+        let recover = at(Command::Recover, 0, 0);
+        assert_eq!(recover.calib_mode, CalibMode::Recover);
+        assert_eq!((recover.start_step, recover.holder), (0, 7));
+    }
+
+    /// A bad argument is refused before anything is written, and the
+    /// reason fits the record a client reads it from -- 39 characters,
+    /// cut from the end.
+    #[test]
+    fn a_command_refuses_a_seat_its_errand_has_no_use_for() {
+        let bad = |c: Command, arg, arg2| c.expand(arg, arg2, 1).unwrap_err();
+        for c in [Command::Mount, Command::Unmount, Command::Divert] {
+            for arg in [0, 11, -1] {
+                let why = bad(c, arg, 0);
+                assert!(why.len() <= 39, "{why}");
+                assert!(why.contains(c.name()), "{why}");
+            }
+        }
+        assert_eq!(bad(Command::Move, 3, 3), "Cmd Move: source is the target");
+        assert_eq!(bad(Command::Move, 3, 0), "Cmd Move: source must be 1-10");
+        assert_eq!(
+            bad(Command::GripNull, 11, 0),
+            "Cmd Grip Null: seat must be 0-10"
+        );
+        // The stage is a seat a grip null works on, and the one command
+        // whose argument may be 0.
+        assert!(Command::GripNull.expand(0, 0, 1).is_ok());
+        assert!(Command::Mount.expand(0, 0, 1).is_err());
+    }
+
+    /// The codes are the database's mbbo states; nothing else answers.
+    #[test]
+    fn only_the_six_command_codes_name_a_command() {
+        for code in 1..=6 {
+            assert!(Command::from_code(code).is_some(), "{code}");
+        }
+        for code in [0, 7, 8, -1, 99] {
+            assert!(Command::from_code(code).is_none(), "{code}");
+        }
+    }
+
+    /// The eight poses that put the tool inside a seat, named by the    /// The eight poses that put the tool inside a seat, named by the
     /// step that moves to them rather than by the band they fall in.
     ///
     /// The above pose is where a closed gripper does its damage: it

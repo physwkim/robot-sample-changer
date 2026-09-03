@@ -233,6 +233,16 @@ pub struct EpicsConfig {
     /// reason.
     #[serde(default = "default_map_source_pv")]
     pub map_source_pv: String,
+    /// The one-write errand record a Channel Access client uses instead
+    /// of the four a trigger carries, and its two arguments. Defaulted
+    /// and optional for the same reason as `map_source_pv`: a database
+    /// that predates them leaves the daemon triggered the old way.
+    #[serde(default = "default_cmd_pv")]
+    pub cmd_pv: String,
+    #[serde(default = "default_cmd_arg_pv")]
+    pub cmd_arg_pv: String,
+    #[serde(default = "default_cmd_arg2_pv")]
+    pub cmd_arg2_pv: String,
     /// The operator's runtime switch for the camera seat check.
     /// Defaulted like `map_source_pv`, and optional in `Epics::connect`
     /// for the same reason: a config or a database that predates the
@@ -277,6 +287,18 @@ pub struct EpicsConfig {
 
 fn default_map_source_pv() -> String {
     "Robot:MapSource".into()
+}
+
+fn default_cmd_pv() -> String {
+    "Robot:Cmd".into()
+}
+
+fn default_cmd_arg_pv() -> String {
+    "Robot:CmdArg".into()
+}
+
+fn default_cmd_arg2_pv() -> String {
+    "Robot:CmdArg2".into()
 }
 
 fn default_null_prefix_pv() -> String {

@@ -274,6 +274,63 @@ ws/
 | Robot:Null:DX/DY/DZ | ai | 누적 보정 (mm, 툴 x / 툴 y=깊이 / 툴 z; 깊이는 조향 안 하므로 항상 0) |
 | Robot:Null:Force | ai | 마지막 닫힘 렌치 크기 (N, 조향 축만 — 깊이 제외) |
 | Robot:Null:Msg | stringin | 결과 한 줄 (39자) |
+| Robot:Cmd | mbbo | 한 번에 보내는 errand (0=None, 1=Mount, 2=Unmount, 3=Divert, 4=Move, 5=Recover, 6=Grip Null) |
+| Robot:CmdArg | longout | 명령이 다루는 시트 (홀더 1-10, 그립 널만 0=스테이지) |
+| Robot:CmdArg2 | longout | Move·Grip Null의 소스 홀더 |
+
+### Robot:Cmd — CA 클라이언트가 쓰는 한 줄 명령
+
+런에 필요한 건 이미 레코드 넷(`CalibMode`·`StartStep`·`Holder`·
+`MapSource`)에 다 있습니다. 문제는 그중 셋이 **데몬의 어휘**라는
+것입니다 — 여덟 개 모드 중 몇 번인지, 24스텝 스크립트의 몇 번째에서
+시작하는지. `StartStep=13`을 원하는 사람은 없습니다. 스테이지에서 퍽을
+빼는 걸 원할 뿐입니다. `Robot:Cmd`는 그 errand를 **이름으로** 받고
+데몬이 번호를 채웁니다.
+
+| 명령 | 확장 | 인자 |
+|------|------|------|
+| 1 Mount | mode 0, start 0, holder=Arg | Arg = 홀더 1-10 |
+| 2 Unmount | mode 0, start 13, holder=Arg | Arg = 돌려놓을 홀더 |
+| 3 Divert | mode 0, start 18, holder=Arg | 손에 든 퍽을 그 홀더에 |
+| 4 Move | mode 7, start 0, holder=Arg, source=Arg2 | 홀더 → 홀더 |
+| 5 Recover | mode 4, start 0 | 인자 없음 |
+| 6 Grip Null | mode 6, start 0, holder=Arg, source=Arg2 | Arg는 0(스테이지) 허용 |
+
+```bash
+caput Robot:CmdArg 3
+caput Robot:Cmd 1          # 홀더 3 마운트
+caget Robot:Status         # step 9: sample_holder_on_position
+```
+
+**트리거와 같은 자리, 같은 one-shot입니다.** 데몬은 idle 트리거 대기
+에서만 이 레코드를 읽고, 읽는 즉시 0으로 되돌립니다 — 한 번 쓰면 한
+번 돕니다. 두 번째 트리거를 기다리는 hold나 측정 대기에서 쓴 명령은
+**듣지 않습니다**: 그 대기는 이미 파라미터가 정해진 런 안에 서 있고,
+거기서 시작하는 Mount를 요청한 사람은 없습니다. 그 값은 다음 대기
+진입의 드레인이 버리면서 로그에 이름을 적습니다("Dropped Cmd …").
+
+확장 결과는 **네 레코드에 되씁니다**. 그게 런의 상태이기 때문입니다 —
+재개 경로가 `StartStep`·`Holder`를 읽고, autosave가 IOC 재시작 너머로
+그걸 나르고, GUI 둘이 그걸로 "무엇이 도는지"를 말합니다. 명령이 변수
+안에만 살면 그 셋이 전부 **이전 런**을 가리킨 채로 남습니다.
+
+`Recover`만 자기 시트가 없습니다 — 멈춘 런의 standby로 돌아가는 것이
+일이라 `Robot:Holder`에 이미 있는 값을 그대로 씁니다.
+
+인자가 틀리면 **아무것도 쓰지 않고** 거절하고, 이유가
+`Robot:Status`에 남습니다(39자: `Cmd Unmount: seat must be 1-10`,
+`Cmd Move: source is the target`). 전문은 로그입니다.
+
+autosave 대상이 **아닙니다** — 저장된 명령이 IOC 재시작으로 되살아나면
+아무도 안 본 사이에 팔이 움직입니다.
+
+레코드가 없는 구 `db/robot.db`로 뜬 IOC에서는 데몬이 명령을 아예 보지
+못하고(`optional` 채널) 기존 트리거 방식이 그대로 돕니다. **쓰려면 IOC
+재시작이 필요합니다.**
+
+측정 continue(`Robot:Wait=1`)와 정지(`Robot:Stop`)는 이미 레코드 하나
+짜리라 명령으로 감싸지 않았습니다. 티칭 모드(1·2·3·5)도 뺐습니다 —
+장비 앞에서 jog하며 하는 일이라 원격 한 줄로 시작할 것이 아닙니다.
 
 ### Robot:Status — 왜 서 있는지
 

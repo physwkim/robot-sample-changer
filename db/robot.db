@@ -58,6 +58,39 @@ record(longout, "Robot:MapSource")
     field(DRVH, "10")
     field(VAL,  "0")
 }
+record(mbbo, "Robot:Cmd")
+{
+    field(DESC, "One-write errand; daemon clears it")
+    field(ZRST, "None")
+    field(ONST, "Mount")
+    field(TWST, "Unmount")
+    field(THST, "Divert")
+    field(FRST, "Move")
+    field(FVST, "Recover")
+    field(SXST, "Grip Null")
+    field(ZRVL, "0")
+    field(ONVL, "1")
+    field(TWVL, "2")
+    field(THVL, "3")
+    field(FRVL, "4")
+    field(FVVL, "5")
+    field(SXVL, "6")
+    field(VAL,  "0")
+}
+record(longout, "Robot:CmdArg")
+{
+    field(DESC, "Cmd seat: holder 1-10, 0=stage")
+    field(DRVL, "0")
+    field(DRVH, "100")
+    field(VAL,  "0")
+}
+record(longout, "Robot:CmdArg2")
+{
+    field(DESC, "Cmd source seat for Move/Grip Null")
+    field(DRVL, "0")
+    field(DRVH, "100")
+    field(VAL,  "0")
+}
 record(bo, "Robot:Stop")
 {
     field(DESC, "Robot pause/stop request")

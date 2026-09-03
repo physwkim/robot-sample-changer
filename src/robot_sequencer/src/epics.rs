@@ -131,6 +131,11 @@ pub struct Epics {
     calib_mode: CaChannel,
     loaded: CaChannel,
     map_source: Option<CaChannel>,
+    /// The one-write errand a Channel Access client sends instead of
+    /// the four records a trigger carries, and its two arguments.
+    cmd: Option<CaChannel>,
+    cmd_arg: Option<CaChannel>,
+    cmd_arg2: Option<CaChannel>,
     seat_check: Option<CaChannel>,
     jog_x: Option<CaChannel>,
     jog_y: Option<CaChannel>,
@@ -560,6 +565,9 @@ impl Epics {
             calib_mode: required(&config.calib_mode_pv)?,
             loaded: required(&config.loaded_pv)?,
             map_source: optional(&config.map_source_pv),
+            cmd: optional(&config.cmd_pv),
+            cmd_arg: optional(&config.cmd_arg_pv),
+            cmd_arg2: optional(&config.cmd_arg2_pv),
             seat_check: optional(&config.seat_check_pv),
             jog_x: optional(&config.jog_x_pv),
             jog_y: optional(&config.jog_y_pv),
@@ -779,6 +787,61 @@ impl Epics {
             ));
             0
         }
+    }
+
+    /// The errand a client has asked for, `0` for none -- which is also
+    /// what a database without the record answers, so a daemon running
+    /// against an IOC that predates it simply never sees a command.
+    pub fn read_cmd(&self) -> i32 {
+        self.cmd
+            .as_ref()
+            .and_then(|ch| self.get_i32(ch, GET_TIMEOUT))
+            .unwrap_or(0)
+    }
+
+    /// The command's two arguments, `0` for a missing record or a
+    /// failed read. Which of them means what is the command's business.
+    pub fn read_cmd_args(&self) -> (i32, i32) {
+        let read = |ch: &Option<CaChannel>| {
+            ch.as_ref()
+                .and_then(|ch| self.get_i32(ch, GET_TIMEOUT))
+                .unwrap_or(0)
+        };
+        (read(&self.cmd_arg), read(&self.cmd_arg2))
+    }
+
+    /// Clears the command record. Called as the command is taken, the
+    /// way the trigger is: a client that writes it once gets one run.
+    pub fn write_cmd(&self, value: i32) -> bool {
+        self.cmd
+            .as_ref()
+            .is_some_and(|ch| self.put_i32(ch, value, GET_TIMEOUT))
+    }
+
+    pub fn write_holder(&self, value: i32) -> bool {
+        self.put_i32(&self.holder, value, GET_TIMEOUT)
+    }
+
+    pub fn write_map_source(&self, value: i32) -> bool {
+        self.map_source
+            .as_ref()
+            .is_some_and(|ch| self.put_i32(ch, value, GET_TIMEOUT))
+    }
+
+    /// The inverse of [`Epics::read_calib_mode`], for the one writer
+    /// there is: a command expanding into the records the run reads.
+    pub fn write_calib_mode(&self, mode: CalibMode) -> bool {
+        let code = match mode {
+            CalibMode::Normal => 0,
+            CalibMode::Holder => 1,
+            CalibMode::SampleHolder => 2,
+            CalibMode::HandEye => 3,
+            CalibMode::Recover => 4,
+            CalibMode::SeatProbe => 5,
+            CalibMode::GripNull => 6,
+            CalibMode::HolderTransfer => 7,
+        };
+        self.put_i32(&self.calib_mode, code, GET_TIMEOUT)
     }
 
     /// The operator's runtime switch for the camera seat check.
