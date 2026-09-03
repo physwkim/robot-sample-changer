@@ -120,6 +120,30 @@ impl LegStandby {
     }
 }
 
+/// Everything one trigger asks for, read together at the instant the
+/// trigger is consumed.
+///
+/// The four used to be read one at a time, spread across the whole
+/// start of a run: `StartStep` just before the trigger was reset,
+/// `Holder` and `CalibMode` just after it, and `MapSource` only once
+/// the mode that wanted it was already running, past a file reload and
+/// a seat check. Two people setting up their own run can interleave
+/// into a single one over a window that long -- this holder with that
+/// mode -- and neither of them asked for it.
+///
+/// Reading them together does not make the set atomic; CA offers
+/// nothing that would. It narrows the window to the four gets, and
+/// leaves the last writer before the trigger owning all four rather
+/// than owning whichever field the daemon had not reached yet.
+struct RunRequest {
+    start_step: i32,
+    holder: i32,
+    calib_mode: CalibMode,
+    /// The source seat for the two modes that fetch a puck; ignored by
+    /// the rest.
+    map_source: i32,
+}
+
 /// What a run's first leg does with the fingers, and so what has to be
 /// between them before it starts.
 ///
@@ -682,13 +706,15 @@ impl<'a> Sequencer<'a> {
     /// for.
     pub fn run(&mut self) -> Result<(), SequencerError> {
         loop {
-            let start_from_step =
-                self.wait_for_trigger(DaemonState::Idle, self.idle_status.clone(), None);
+            let RunRequest {
+                start_step: start_from_step,
+                holder: holder_number,
+                calib_mode,
+                map_source,
+            } = self.wait_for_trigger(DaemonState::Idle, self.idle_status.clone(), None);
             self.set_state(DaemonState::Running);
             self.sequence_count += 1;
 
-            let holder_number = self.epics.read_holder();
-            let calib_mode = self.epics.read_calib_mode();
             let mode_name = match calib_mode {
                 CalibMode::Holder => "Holder",
                 CalibMode::SampleHolder => "SampleHolder",
@@ -775,10 +801,16 @@ impl<'a> Sequencer<'a> {
                 match calib_mode {
                     // Reloads and recomputes once per iteration, since
                     // each iteration writes the trims the next one reads.
-                    CalibMode::GripNull => self.run_grip_null(holder_number, start_from_step),
-                    CalibMode::HolderTransfer => {
-                        self.run_holder_transfer(&waypoints, &base, holder_number, start_from_step)
+                    CalibMode::GripNull => {
+                        self.run_grip_null(holder_number, start_from_step, map_source)
                     }
+                    CalibMode::HolderTransfer => self.run_holder_transfer(
+                        &waypoints,
+                        &base,
+                        holder_number,
+                        start_from_step,
+                        map_source,
+                    ),
                     _ => self
                         .compute_run_waypoints(&waypoints, &base, holder_number)
                         .and_then(|run| match calib_mode {
@@ -1261,7 +1293,7 @@ impl<'a> Sequencer<'a> {
         // already in the fingers, from wherever the operator carried it,
         // so which seat the arm is over is not something the daemon
         // knows here.
-        self.wait_for_trigger(DaemonState::Hold, "seat probe: trigger to probe here", None);
+        let _ = self.wait_for_trigger(DaemonState::Hold, "seat probe: trigger to probe here", None);
         self.set_state(DaemonState::Running);
         let soft = self.seat_probe_here(self.config.probe.bore.seat_probe())?;
         log::info(
@@ -1456,7 +1488,12 @@ impl<'a> Sequencer<'a> {
     /// Always runs from the top: a resume would grip air, or release
     /// into a seat that is not empty, so a non-zero `StartStep` is
     /// refused rather than honored.
-    fn run_grip_null(&mut self, holder: i32, start: i32) -> Result<Outcome, SequencerError> {
+    fn run_grip_null(
+        &mut self,
+        holder: i32,
+        start: i32,
+        source: i32,
+    ) -> Result<Outcome, SequencerError> {
         let seat = match holder {
             0 => Seat::Stage,
             1..=10 => Seat::Holder(holder),
@@ -1475,7 +1512,7 @@ impl<'a> Sequencer<'a> {
             message: format!("{}: starting", seat.label()),
         };
         self.epics.publish_null(&report);
-        let result = self.grip_null_loop(seat, start, &mut report);
+        let result = self.grip_null_loop(seat, start, source, &mut report);
         // The single place a terminal state is stamped. Every exit from
         // the loop lands here, so `Running` cannot outlive the run.
         report.state = match &result {
@@ -1495,6 +1532,7 @@ impl<'a> Sequencer<'a> {
         &mut self,
         seat: Seat,
         start: i32,
+        source: i32,
         report: &mut NullReport,
     ) -> Result<Outcome, NullFailure> {
         if start != 0 {
@@ -1512,7 +1550,6 @@ impl<'a> Sequencer<'a> {
         // itself meaning "the one already seated here". A rack being
         // calibrated with one puck wants the fetch and the null on one
         // trigger, and the carry is mode 7's, unchanged.
-        let source = self.epics.read_map_source();
         if let Some(source) = seat.fetch_source(source) {
             if !(1..=10).contains(&source) {
                 return Err(NullFailure::new(
@@ -1894,6 +1931,7 @@ impl<'a> Sequencer<'a> {
         base: &BaseWaypoints,
         target: i32,
         start: i32,
+        source: i32,
     ) -> Result<Outcome, SequencerError> {
         if start != 0 {
             return Err(SequencerError(format!(
@@ -1902,7 +1940,6 @@ impl<'a> Sequencer<'a> {
                  fresh trigger instead)"
             )));
         }
-        let source = self.epics.read_map_source();
         if !(1..=10).contains(&source) || source == target {
             return Err(SequencerError(format!(
                 "holder transfer needs MapSource to name a holder 1-10 other \
@@ -3208,10 +3245,16 @@ impl<'a> Sequencer<'a> {
 
     // ---- PV wait loops -------------------------------------------------
 
-    /// Blocks until `Trigger` goes non-zero, resets it, and returns the
-    /// `StartStep` value. The loop services gripper commands and jogs
-    /// exactly like the C++ idle callbacks. RTDE output is paused for
-    /// the duration — the wait is unbounded and nobody reads the stream.
+    /// Blocks until `Trigger` goes non-zero, reads what the trigger
+    /// asks for, and resets it. The loop services gripper commands and
+    /// jogs exactly like the C++ idle callbacks. RTDE output is paused
+    /// for the duration — the wait is unbounded and nobody reads the
+    /// stream.
+    ///
+    /// The whole [`RunRequest`] is read here, before the reset, so that
+    /// one trigger carries one set of parameters. A hold's second
+    /// trigger reads the same four and uses none of them: the return
+    /// leg keeps the values the run started with.
     ///
     /// `apply_to` is the seat this wait stands at, and `None` at the
     /// idle wait: the arm is at the taught standby there, which no
@@ -3223,7 +3266,7 @@ impl<'a> Sequencer<'a> {
         state: DaemonState,
         status: impl Into<String>,
         apply_to: Option<Seat>,
-    ) -> i32 {
+    ) -> RunRequest {
         log::info("========================================");
         log::info("Waiting for EPICS trigger...");
         log::info("========================================");
@@ -3231,14 +3274,20 @@ impl<'a> Sequencer<'a> {
         loop {
             let value = self.epics.read_trigger();
             if value > 0 {
-                let start_step = self.epics.read_start_step();
+                let request = RunRequest {
+                    start_step: self.epics.read_start_step(),
+                    holder: self.epics.read_holder(),
+                    calib_mode: self.epics.read_calib_mode(),
+                    map_source: self.epics.read_map_source(),
+                };
                 log::info(&format!(
-                    "Trigger received! Trigger={value}, StartStep={start_step}"
+                    "Trigger received! Trigger={value}, StartStep={}",
+                    request.start_step
                 ));
                 if !self.epics.write_trigger(0) {
                     log::warn("Failed to reset trigger PV to 0, continuing anyway...");
                 }
-                return start_step;
+                return request;
             }
             if value < 0 {
                 log::warn("Error reading trigger PV, retrying...");
