@@ -275,7 +275,10 @@ Target은 hold가 서 있는 시트이지 `Robot:Holder`가 아닙니다 — 모
 ### Robot:Loaded PV
 
 측정 프로그램 연동용. Step 12 완료 후 measurement wait 시작 시 `Loaded=1`,
-wait 종료(1=continue, 2=skip) 시 `Loaded=0`.
+그리고 **wait 지점을 지나는 모든 경로에서** `Loaded=0` — continue,
+skip, 그리고 wait 자체가 없는 회수 errand(`StartStep=13`)까지. 회수
+errand가 0을 쓰는 이유는 그 1을 세운 마운트 런이 wait에서 끝났기
+때문입니다. 내리는 주인은 회수 leg 하나뿐입니다.
 
 ### Vision 미세 보정 (기본 off)
 

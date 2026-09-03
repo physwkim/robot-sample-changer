@@ -779,12 +779,16 @@ impl<'a> Sequencer<'a> {
             // delivered; the measurement program flips Wait to continue.
             self.epics.write_loaded(1);
             let wait_result = self.wait_for_measurement();
-            self.epics.write_loaded(0);
             if wait_result == WaitStatus::Skip {
                 log::info("Skip requested - skipping remaining steps (13-23)");
                 skip_remaining = true;
             }
         }
+        // Past the wait point Loaded is 0 on every path, this one
+        // included: a retrieval errand entering at step 13 holds no
+        // wait of its own, and finds the flag still 1 from the mount
+        // run that delivered the sample and then ended at the wait.
+        self.epics.write_loaded(0);
 
         if !skip_remaining {
             // The arm has stood at sh_standby since step 12, through the
