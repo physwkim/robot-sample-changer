@@ -231,6 +231,15 @@ pub struct EpicsConfig {
     /// not a configuration anyone wants.
     #[serde(default = "default_jog_prefix_pv")]
     pub jog_prefix_pv: String,
+    /// The daemon's own state record, and the heartbeat that says the
+    /// state is current. Two names rather than a prefix because they
+    /// are not a family: `State` is what the daemon is doing, `Alive`
+    /// is whether it is still doing it, and a client that has one
+    /// without the other can draw a control that does nothing.
+    #[serde(default = "default_state_pv")]
+    pub state_pv: String,
+    #[serde(default = "default_alive_pv")]
+    pub alive_pv: String,
 }
 
 fn default_map_source_pv() -> String {
@@ -243,6 +252,14 @@ fn default_null_prefix_pv() -> String {
 
 fn default_jog_prefix_pv() -> String {
     "Robot:Jog:".into()
+}
+
+fn default_state_pv() -> String {
+    "Robot:State".into()
+}
+
+fn default_alive_pv() -> String {
+    "Robot:Alive".into()
 }
 
 /// The level-tool path constraint (see [`SequenceConfig::level_tool`]).

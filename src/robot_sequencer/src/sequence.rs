@@ -16,7 +16,7 @@ use std::time::Duration;
 use cspace_core::geometry::{Isometry3, Vector3};
 
 use crate::config::{CentringConfig, Config, GripNullConfig, SeatProbe};
-use crate::epics::{CalibMode, Epics, NullReport, NullState, VisionKind, WaitStatus};
+use crate::epics::{CalibMode, DaemonState, Epics, NullReport, NullState, VisionKind, WaitStatus};
 use crate::error::SequencerError;
 use crate::gripper::Gripper;
 use crate::handeye;
@@ -351,6 +351,11 @@ pub struct Sequencer<'a> {
     /// The hand-eye solve the seat check projects through, when it is
     /// on. `None` disables every gate.
     seat_check: Option<HandEye>,
+    /// Which loop the daemon is in, and the beat that dates it. Written
+    /// only by [`Sequencer::set_state`] and [`Sequencer::service_hold`]
+    /// so that no path can advance one without the other.
+    state: DaemonState,
+    beat: i32,
 }
 
 /// What a step about to run needs of the seat it is aimed at.
@@ -505,6 +510,8 @@ impl<'a> Sequencer<'a> {
                 seat: None,
             },
             seat_check,
+            state: DaemonState::Idle,
+            beat: 0,
         }
     }
 
@@ -513,7 +520,9 @@ impl<'a> Sequencer<'a> {
     /// for.
     pub fn run(&mut self) -> Result<(), SequencerError> {
         loop {
+            self.set_state(DaemonState::Idle);
             let start_from_step = self.wait_for_trigger(None);
+            self.set_state(DaemonState::Running);
             self.sequence_count += 1;
 
             let holder_number = self.epics.read_holder();
@@ -1042,7 +1051,9 @@ impl<'a> Sequencer<'a> {
         // already in the fingers, from wherever the operator carried it,
         // so which seat the arm is over is not something the daemon
         // knows here.
+        self.set_state(DaemonState::Hold);
         self.wait_for_trigger(None);
+        self.set_state(DaemonState::Running);
         let soft = self.seat_probe_here(self.config.probe.bore.seat_probe())?;
         log::info(
             "Nothing was written. The arm is back at the pose the probe \
@@ -2436,7 +2447,9 @@ impl<'a> Sequencer<'a> {
         // The hold's StartStep read is discarded: the return phase keeps
         // the original trigger's start_from_step for its skip logic, as
         // the C++ did.
+        self.set_state(DaemonState::Hold);
         let _ = self.wait_for_trigger(Some(seat));
+        self.set_state(DaemonState::Running);
     }
 
     // ---- vision correction ---------------------------------------------
@@ -2939,9 +2952,7 @@ impl<'a> Sequencer<'a> {
             if value < 0 {
                 log::warn("Error reading trigger PV, retrying...");
             }
-            self.poll_gripper_cmd();
             self.service_hold();
-            self.gripper.update_rbv(&self.epics);
             std::thread::sleep(POLL);
         }
     }
@@ -2967,11 +2978,13 @@ impl<'a> Sequencer<'a> {
         // as often a standby or a lift as a seat. Jogging works, an
         // apply has nowhere to go.
         self.jog_hold(None);
+        self.set_state(DaemonState::Paused);
         loop {
             // Only the literal 2 reads as Skip; 1, anything else, and a
             // failed read all answer Continue, so a dropped CA read
             // cannot abort a run by itself.
             if self.epics.read_wait() == WaitStatus::Skip {
+                self.set_state(DaemonState::Running);
                 return Err(SequencerError(format!(
                     "run stopped by Wait=2 while paused at step {current_step}"
                 )));
@@ -2981,6 +2994,7 @@ impl<'a> Sequencer<'a> {
                 log::info(&format!(
                     "PauseStep changed to {pause_step}, resuming execution..."
                 ));
+                self.set_state(DaemonState::Running);
                 return Ok(());
             }
             self.service_hold();
@@ -2996,14 +3010,17 @@ impl<'a> Sequencer<'a> {
         // The arm stands at the stage standby through this wait, not at
         // a seat, so jogging is serviced and an apply is refused.
         self.jog_hold(None);
+        self.set_state(DaemonState::MeasurementWait);
         loop {
             match self.epics.read_wait() {
                 WaitStatus::Continue => {
                     log::info("Measurement complete, continuing...");
+                    self.set_state(DaemonState::Running);
                     return WaitStatus::Continue;
                 }
                 WaitStatus::Skip => {
                     log::info("Skip requested, aborting remaining steps...");
+                    self.set_state(DaemonState::Running);
                     return WaitStatus::Skip;
                 }
                 WaitStatus::Waiting => {
@@ -3041,22 +3058,60 @@ impl<'a> Sequencer<'a> {
             ));
             self.last_gripper_cmd = cmd;
             let open = cmd == 1;
-            self.gripper.command(open);
-            self.gripper.wait_reached(open, &self.epics);
+            self.while_moving(|s| {
+                s.gripper.command(open);
+                s.gripper.wait_reached(open, &s.epics);
+            });
         }
     }
 
-    /// What the daemon services while it is standing still: a jog, and
-    /// the apply that commits the jogs so far.
+    /// One service pass: everything the operator may ask of a daemon
+    /// that is standing still, and the beat that says it was asked.
     ///
-    /// Every wait loop calls this, so "does this hold service jogs" is
-    /// no longer a question each loop answers for itself. The states the
-    /// daemon can serve a jog from are exactly the ones where it is not
-    /// already moving, and an operator has to be able to move the arm in
-    /// whichever of them they find it in.
+    /// Every waiting loop calls this and nothing else, so "what works
+    /// while the daemon holds" is one list in one place. It used to be
+    /// per-loop, and the gripper was on the idle loop's list alone --
+    /// so Open and Close did nothing during a measurement wait or a
+    /// pause, with no way for the operator to tell that from a broken
+    /// gripper.
+    ///
+    /// The beat is bumped here rather than at each state change because
+    /// what a client needs to know is that the daemon is *reading* it
+    /// now, not that it once entered this state.
     fn service_hold(&mut self) {
+        self.beat = self.beat.wrapping_add(1);
+        self.epics.publish_state(self.state, self.beat);
+        self.poll_gripper_cmd();
         self.process_jog();
         self.process_jog_apply();
+        self.gripper.update_rbv(&self.epics);
+    }
+
+    /// The single owner of `Robot:State`: nothing else writes it, and
+    /// it is always written with the current beat so the pair cannot
+    /// disagree.
+    fn set_state(&mut self, state: DaemonState) {
+        self.state = state;
+        self.beat = self.beat.wrapping_add(1);
+        self.epics.publish_state(state, self.beat);
+    }
+
+    /// Runs one blocking piece of hardware work as `Running`, then
+    /// returns to the state it was standing in.
+    ///
+    /// `Running` means what it says everywhere: the daemon is working
+    /// and is not reading operator commands. A service pass that blocks
+    /// in the gripper or a jog is doing exactly that, and without this
+    /// the beat would simply stop while the state still claimed a hold
+    /// -- which is the shape a dead daemon has, so a client watching
+    /// the pair would have to call a jog a death. Bracketing here keeps
+    /// "no beat while `Running`" the only quiet the pair ever shows.
+    fn while_moving<R>(&mut self, work: impl FnOnce(&mut Self) -> R) -> R {
+        let standing = self.state;
+        self.set_state(DaemonState::Running);
+        let result = work(self);
+        self.set_state(standing);
+        result
     }
 
     /// Opens a wait: zeroes the accumulator, points it at the seat this
@@ -3109,9 +3164,10 @@ impl<'a> Sequencer<'a> {
             f64::from(jog_y) * step_mm,
             f64::from(jog_z) * step_mm,
         ];
-        let result = self
-            .motion
-            .jog(d[0], d[1], d[2], self.config.sequence.jog_velocity_scale);
+        let result = self.while_moving(|s| {
+            s.motion
+                .jog(d[0], d[1], d[2], s.config.sequence.jog_velocity_scale)
+        });
         match result {
             Ok(()) => {
                 for (total, step) in self.jog.mm.iter_mut().zip(d) {

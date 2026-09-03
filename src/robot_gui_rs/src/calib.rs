@@ -6,8 +6,13 @@ use std::path::PathBuf;
 use eframe::egui;
 use rsdm::{Channel, Engine, EngineError, PvValue};
 
+use crate::daemon::{DaemonWatch, HOLD};
 use crate::pvs::robot;
 use crate::yamledit::{self, Slot};
+
+/// The one red in this panel: a daemon that is not listening, and a
+/// table that would not load.
+const RED: egui::Color32 = egui::Color32::from_rgb(0xf4, 0x43, 0x36);
 
 const COLS: usize = 5; // X mm, Y mm, Z mm, Tilt X deg, Tilt Z deg
 const ROWS: usize = 12; // stage + the rack base + holders 1-10
@@ -98,6 +103,10 @@ pub struct CalibPanel {
     travel: [Channel; 3],
     apply_target: Channel,
     apply: Channel,
+    /// The gate on every button in this panel: the jog moves the arm
+    /// and Apply rewrites the taught file, and both are read only in
+    /// the daemon's service pass. See [`crate::daemon`].
+    daemon: DaemonWatch,
     step_mm: f64,
     yaml_path: PathBuf,
     cells: Cells,
@@ -273,6 +282,7 @@ impl CalibPanel {
             ],
             apply_target: engine.connect(&robot("Jog:Target"))?,
             apply: engine.connect(&robot("Jog:Apply"))?,
+            daemon: DaemonWatch::new(engine)?,
             step_mm: 1.0,
             yaml_path,
             cells: Default::default(),
@@ -342,18 +352,27 @@ impl CalibPanel {
                     .fixed_decimals(2),
             );
         });
-        egui::Grid::new("jog").show(ui, |ui| {
-            for (i, axis) in ["X", "Y", "Z"].iter().enumerate() {
-                ui.label(*axis);
-                for dir in [-1i64, 1] {
-                    let label = if dir < 0 { "−" } else { "+" };
-                    if ui.button(format!("{axis}{label}")).clicked() {
-                        self.jog_step.put(PvValue::Float(self.step_mm));
-                        self.jog[i].put(PvValue::Int(dir));
+        // The daemon reads `Robot:JogX/Y/Z` in its service pass, which
+        // runs only while it is standing in a wait. A press it never
+        // reads is not a jog that failed, it is a button that lied.
+        let live = self.daemon.servicing();
+        if !live {
+            ui.colored_label(RED, format!("({})", self.daemon.note()));
+        }
+        ui.add_enabled_ui(live, |ui| {
+            egui::Grid::new("jog").show(ui, |ui| {
+                for (i, axis) in ["X", "Y", "Z"].iter().enumerate() {
+                    ui.label(*axis);
+                    for dir in [-1i64, 1] {
+                        let label = if dir < 0 { "−" } else { "+" };
+                        if ui.button(format!("{axis}{label}")).clicked() {
+                            self.jog_step.put(PvValue::Float(self.step_mm));
+                            self.jog[i].put(PvValue::Int(dir));
+                        }
                     }
+                    ui.end_row();
                 }
-                ui.end_row();
-            }
+            });
         });
         axis_figure(ui);
         ui.small(
@@ -367,16 +386,18 @@ impl CalibPanel {
             (Some(x), Some(y), Some(z)) => ui.monospace(format!("{x:+7.3} {y:+7.3} {z:+7.3} mm")),
             _ => ui.label("-"),
         };
-        // The daemon publishes the seat it would trim, and only a
-        // calibration hold has one. Reading that rather than the mode
-        // keeps the button honest about the one thing that matters here:
-        // whether this press has somewhere to land.
+        // Apply lands only where the daemon is standing at a seat,
+        // which is exactly its hold state. `Jog:Target` names that seat
+        // but does not date it -- it keeps the last hold's name after
+        // the daemon is gone, and enabling from it offered Apply over a
+        // dead run, where the press writes nothing and says nothing.
+        let holding = self.daemon.is(HOLD);
         let target = sval(&self.apply_target).unwrap_or_default();
-        ui.add_enabled_ui(!target.is_empty(), |ui| {
-            let label = if target.is_empty() {
-                "Apply to seat trims (no seat here)".to_string()
-            } else {
-                format!("Apply to {target}")
+        ui.add_enabled_ui(holding, |ui| {
+            let label = match (holding, target.is_empty()) {
+                (true, false) => format!("Apply to {target}"),
+                (true, true) => "Apply to this seat".to_string(),
+                (false, _) => format!("Apply to seat trims ({})", self.daemon.note()),
             };
             if ui.button(label).clicked() {
                 self.apply.put(PvValue::Int(1));
@@ -391,7 +412,7 @@ impl CalibPanel {
     pub fn table_group(&mut self, ui: &mut egui::Ui) {
         ui.strong("Seat offsets and tilts (taught_waypoints.yaml)");
         if !self.have_table {
-            ui.colored_label(egui::Color32::from_rgb(0xf4, 0x43, 0x36), &self.note);
+            ui.colored_label(RED, &self.note);
             if ui.button("Retry load").clicked() {
                 self.reload();
             }

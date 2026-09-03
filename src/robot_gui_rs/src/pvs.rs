@@ -29,6 +29,20 @@ pub const MODE_NAMES: [&str; 8] = [
     "Holder Transfer",
 ];
 
+/// `Robot:State` labels, index == PV value. The record is a plain
+/// longin, like `Robot:Null:State`, so its labels live here next to
+/// `step_name` rather than in the database.
+pub fn state_name(state: i64) -> &'static str {
+    match state {
+        0 => "idle",
+        1 => "running",
+        2 => "measurement wait",
+        3 => "paused",
+        4 => "hold",
+        _ => "?",
+    }
+}
+
 /// What the sequencer does at each `Robot:CurrentStep` value.
 pub fn step_name(step: i64) -> &'static str {
     match step {

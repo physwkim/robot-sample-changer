@@ -159,6 +159,7 @@ pub struct Epics {
     jog_step: Option<CaChannel>,
     vision: Option<VisionChannels>,
     null: Option<NullChannels>,
+    state: Option<StateChannels>,
     jog_total: Option<JogChannels>,
     depth: Option<DepthChannels>,
 }
@@ -175,6 +176,51 @@ struct DepthChannels {
     data: CaChannel,
     counter: CaChannel,
     camera: DepthCamera,
+}
+
+/// The daemon's state record and its heartbeat. Both or neither: a
+/// state without a heartbeat is what `Robot:CurrentStep` already was --
+/// a reading that outlives the daemon that wrote it -- and a heartbeat
+/// without a state says only that something is alive.
+struct StateChannels {
+    state: CaChannel,
+    alive: CaChannel,
+}
+
+/// Which of the daemon's loops is running, published to `Robot:State`.
+/// The labels live in the GUI, next to `step_name`, so the record stays
+/// a plain longin.
+///
+/// The distinction the GUI needs is not "which step" but "who is
+/// listening to what": only `MeasurementWait` reads `Robot:Wait`, only
+/// `Paused` reads `Robot:PauseStep`, and every state except `Running`
+/// reads the gripper command. A control offered against any other
+/// reading is a button that does nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonState {
+    /// The trigger loop: no run in progress.
+    Idle,
+    /// Executing steps. Operator commands are not read here.
+    Running,
+    /// `wait_for_measurement`: Continue and Abort are live.
+    MeasurementWait,
+    /// `wait_for_pause_step_change`: only `PauseStep` and `Wait = 2`.
+    Paused,
+    /// A calibration or probe hold: jog, apply, and the trigger that
+    /// ends it.
+    Hold,
+}
+
+impl DaemonState {
+    fn code(self) -> i32 {
+        match self {
+            Self::Idle => 0,
+            Self::Running => 1,
+            Self::MeasurementWait => 2,
+            Self::Paused => 3,
+            Self::Hold => 4,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -200,6 +246,30 @@ mod tests {
         for mode in [CalibMode::Recover, CalibMode::HandEye, CalibMode::SeatProbe] {
             assert!(!mode.enters_a_seat(), "{mode:?} must stay ungated");
         }
+    }
+
+    /// The record's contract, in one place: the codes are dense from
+    /// zero, which is what lets the GUI label them by index, and the
+    /// last one is the `HOPR` written into `db/robot.db`. A state added
+    /// without touching either fails here rather than on the screen.
+    #[test]
+    fn the_state_codes_are_dense_and_end_at_the_records_hopr() {
+        let codes: Vec<i32> = [
+            DaemonState::Idle,
+            DaemonState::Running,
+            DaemonState::MeasurementWait,
+            DaemonState::Paused,
+            DaemonState::Hold,
+        ]
+        .iter()
+        .map(|s| s.code())
+        .collect();
+        assert_eq!(codes, vec![0, 1, 2, 3, 4], "dense from zero, in order");
+        assert_eq!(
+            *codes.last().unwrap(),
+            4,
+            "db/robot.db sets Robot:State HOPR to this"
+        );
     }
 }
 
@@ -279,6 +349,18 @@ fn jog_channels(optional: &dyn Fn(&str) -> Option<CaChannel>, prefix: &str) -> O
         ],
         target: optional(&format!("{prefix}Target"))?,
         apply: optional(&format!("{prefix}Apply"))?,
+    })
+}
+
+/// Connect the state record and its heartbeat, or neither.
+fn state_channels(
+    optional: &dyn Fn(&str) -> Option<CaChannel>,
+    state_pv: &str,
+    alive_pv: &str,
+) -> Option<StateChannels> {
+    Some(StateChannels {
+        state: optional(state_pv)?,
+        alive: optional(alive_pv)?,
     })
 }
 
@@ -451,6 +533,7 @@ impl Epics {
             jog_step: optional(&config.jog_step_pv),
             vision,
             null: null_channels(&optional, &config.null_prefix_pv),
+            state: state_channels(&optional, &config.state_pv, &config.alive_pv),
             jog_total: jog_channels(&optional, &config.jog_prefix_pv),
             depth,
             _client: client,
@@ -512,6 +595,28 @@ impl Epics {
         ok &= self.put_str(&n.message, &report.message[..end], GET_TIMEOUT);
         if !ok {
             log::warn("grip null status: at least one Robot:Null: put failed");
+        }
+    }
+
+    /// Publish the daemon's state and the beat that dates it.
+    ///
+    /// Written together on every service pass, never separately: a
+    /// state that is not re-stamped is a state a client cannot trust,
+    /// and that untrustworthy pair is the whole defect this record
+    /// exists to close. A no-op against a database that predates the
+    /// records, and a failed put is logged and swallowed like the grip
+    /// null's -- this reports the run, it does not gate it.
+    pub fn publish_state(&self, state: DaemonState, beat: i32) {
+        let Some(s) = &self.state else {
+            return;
+        };
+        let mut ok = self.put_i32(&s.state, state.code(), GET_TIMEOUT);
+        ok &= self.put_i32(&s.alive, beat, GET_TIMEOUT);
+        if !ok {
+            log::warn(&format!(
+                "daemon state: put of {state:?}/{beat} failed — the GUI will \
+                 show this daemon as not responding"
+            ));
         }
     }
 

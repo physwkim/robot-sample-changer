@@ -7,6 +7,7 @@ use eframe::egui;
 use rsdm::widgets::RsdmLabel;
 use rsdm::{Channel, Engine, EngineError, PvValue};
 
+use crate::daemon::{DaemonWatch, HOLD, MEASUREMENT_WAIT, Tone};
 use crate::pvs::{MODE_NAMES, robot, step_name};
 
 /// An action that writes PVs. Everything that starts the sequencer goes
@@ -96,6 +97,11 @@ pub struct OpsPanel {
     null_d: [Channel; 3],
     null_force: Channel,
     null_msg: Channel,
+    /// What the daemon says it is doing, and whether it is still
+    /// saying it. Every control that needs the daemon to be listening
+    /// is enabled from here and never from a run value -- see
+    /// [`crate::daemon`].
+    daemon: DaemonWatch,
 
     holder_sel: i64,
     null_holder: i64,
@@ -184,6 +190,7 @@ impl OpsPanel {
             null_d: [ch("Null:DX")?, ch("Null:DY")?, ch("Null:DZ")?],
             null_force: ch("Null:Force")?,
             null_msg: ch("Null:Msg")?,
+            daemon: DaemonWatch::new(engine)?,
             holder_sel: 1,
             null_holder: 1,
             null_source: 0,
@@ -375,6 +382,17 @@ impl OpsPanel {
                     ui.colored_label(RED, "DISCONNECTED");
                 }
                 ui.end_row();
+                ui.label("Daemon:");
+                let (say, tone) = self.daemon.status();
+                ui.colored_label(
+                    match tone {
+                        Tone::Good => GREEN,
+                        Tone::Busy => AMBER,
+                        Tone::Bad => RED,
+                    },
+                    say,
+                );
+                ui.end_row();
                 ui.label("Step:");
                 match step {
                     Some(s) => ui.label(format!("{s}  {}", step_name(s))),
@@ -488,8 +506,13 @@ impl OpsPanel {
     /// The stage errand, and the controls that interrupt whatever is
     /// running.
     pub fn sample_group(&mut self, ui: &mut egui::Ui) {
-        let step = ival(&self.current_step).unwrap_or(0);
-        let waiting = step == 12;
+        // The daemon saying it is in `wait_for_measurement` and
+        // reading `Robot:Wait` this instant. The old test was
+        // `CurrentStep == 12`, which is also true of a daemon that died
+        // at step 12, of an IOC that restored 12 from autosave, and of
+        // a carry that merely passed through it -- in all of which
+        // Continue wrote a PV nobody was reading.
+        let waiting = self.daemon.is(MEASUREMENT_WAIT);
         let paused = ival(&self.stop).unwrap_or(0) != 0;
         ui.vertical(|ui| {
             ui.strong("Sample");
@@ -508,7 +531,7 @@ impl OpsPanel {
             if waiting {
                 ui.strong("Measurement wait:");
             } else {
-                ui.label("Measurement wait: (at step 12)");
+                ui.label(format!("Measurement wait: ({})", self.daemon.note()));
             }
             ui.add_enabled_ui(waiting, |ui| {
                 ui.horizontal(|ui| {
@@ -643,16 +666,26 @@ impl OpsPanel {
     }
 
     pub fn gripper_group(&mut self, ui: &mut egui::Ui) {
+        // The daemon reads `Robot:Gripper` in its service pass, which
+        // does not run while a step is moving the arm. Greying the
+        // buttons there says so; they used to accept the press and
+        // leave the operator watching a gripper that never moved.
+        let live = self.daemon.servicing();
         ui.vertical(|ui| {
             ui.strong("Gripper");
-            ui.horizontal(|ui| {
-                if ui.button("Open").clicked() {
-                    self.gripper.put(PvValue::Int(1));
-                }
-                if ui.button("Close").clicked() {
-                    self.gripper.put(PvValue::Int(0));
-                }
+            ui.add_enabled_ui(live, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("Open").clicked() {
+                        self.gripper.put(PvValue::Int(1));
+                    }
+                    if ui.button("Close").clicked() {
+                        self.gripper.put(PvValue::Int(0));
+                    }
+                });
             });
+            if !live {
+                ui.label(format!("({})", self.daemon.note()));
+            }
         });
     }
 
@@ -674,12 +707,15 @@ impl OpsPanel {
     /// Starting a hold still goes through `request`, because that does
     /// start a sequence.
     ///
-    /// `Jog:Target` is also what enables the button. Without that gate a
-    /// press with no hold standing would not end anything -- it would
-    /// trigger a fresh run of whatever mode was left in `CalibMode`.
+    /// What enables the button is the daemon saying it is standing in
+    /// that hold, not `Jog:Target` -- the seat name is left over from
+    /// the last hold and outlives the daemon that stood there, so it
+    /// would offer the button over a dead run, where the press starts a
+    /// fresh one of whatever mode was left in `CalibMode` instead of
+    /// ending anything. `Jog:Target` still names the seat in the label.
     pub fn calib_hold_group(&mut self, ui: &mut egui::Ui) {
         let target = sval(&self.jog_target).unwrap_or_default();
-        let holding = !target.is_empty();
+        let holding = self.daemon.is(HOLD);
         ui.vertical(|ui| {
             ui.strong("Calibration hold");
             ui.horizontal_top(|ui| {
@@ -716,11 +752,14 @@ impl OpsPanel {
                 });
                 ui.separator();
                 ui.vertical(|ui| {
-                    if holding {
-                        ui.colored_label(GREEN, format!("Holding at {target} — jog, then Apply"));
-                    } else {
-                        ui.label("No hold standing.");
-                    }
+                    match (holding, target.is_empty()) {
+                        (true, false) => ui
+                            .colored_label(GREEN, format!("Holding at {target} — jog, then Apply")),
+                        (true, true) => ui.colored_label(GREEN, "Holding — jog, then Apply"),
+                        (false, _) => {
+                            ui.label(format!("No hold standing ({}).", self.daemon.note()))
+                        }
+                    };
                     ui.add_enabled_ui(holding, |ui| {
                         if ui.button("Return the puck and end the hold").clicked() {
                             self.trigger.put(PvValue::Int(1));

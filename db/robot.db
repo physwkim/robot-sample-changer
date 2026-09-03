@@ -237,6 +237,38 @@ record(ao, "Robot:Vision:Tilt")
     field(EGU,  "deg")
 }
 
+# What the daemon is doing, and the proof that it still is.
+#
+# `State` names the loop the daemon is in; `Alive` counts up once per
+# service pass through that loop. A client needs both: `CurrentStep`
+# survives the daemon's death (autosave restores it, and it is the
+# resume-after-crash marker), so "the step says 12" cannot tell a live
+# measurement wait from a dead one, and a control offered on that
+# reading does nothing when pressed. State plus a moving Alive can.
+#
+# Alive means "servicing operator commands right now", not "the process
+# exists": it stops advancing while the daemon works, which is exactly
+# when Continue, the gripper and a jog are not being read. So that the
+# quiet is never ambiguous, the daemon publishes State=1 (Run) around
+# every blocking piece of work -- steps, but also the jog and the
+# gripper command inside a service pass. The rule a client reads: quiet
+# while Run is expected, quiet in a standing state is a dead daemon.
+# Longin like Robot:Null:State -- the labels live in the GUI, next to
+# step_name(). Deliberately NOT in autosave/robot_state.req: a restored
+# state is the very lie this record exists to prevent.
+record(longin, "Robot:State")
+{
+    field(DESC, "0=Idle 1=Run 2=MeasWait 3=Paused 4=Hold")
+    field(VAL,  "0")
+    field(HOPR, "4")
+    field(LOPR, "0")
+}
+record(longin, "Robot:Alive")
+{
+    field(DESC, "Daemon heartbeat, +1 per service pass")
+    field(VAL,  "0")
+}
+
 # Grip null (CalibMode=6) progress and result. The daemon owns every one
 # of these; nothing else writes them. State is a plain longin rather than
 # an mbbi so the labels live with the GUI, next to step_name().

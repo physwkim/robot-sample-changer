@@ -91,9 +91,11 @@ Rust RsDM GUI (`src/robot_gui_rs`, 독립 cargo workspace) — rsdm/rsplot을
 집어 그 시트 위(모드 1) 또는 스테이지 위(모드 2)에 세웁니다 — Apply가
 설 자리가 있는 hold가 이 둘뿐이라 표의 Holder 행과 Stage 행이 각각
 여기서 나옵니다. hold를 끝내는 건 `Wait`이 아니라 **두 번째 Trigger**
-이고(`calibration_hold`가 `wait_for_trigger`), 버튼은 `Robot:Jog:Target`이
-비어 있지 않을 때만 눌립니다 — 안 그러면 hold를 끝내는 게 아니라
-`CalibMode`에 남아 있던 모드로 새 런을 띄웁니다. Teach만 라이브 상태가 아니라 티칭 파일을 편집하므로 갈랐고,
+이고(`calibration_hold`가 `wait_for_trigger`), 버튼은 데몬이 hold에 서
+있다고 말할 때만(`State=4` + 살아 있는 `Alive`) 눌립니다 — 안 그러면
+hold를 끝내는 게 아니라 `CalibMode`에 남아 있던 모드로 새 런을 띄웁니다.
+`Jog:Target`은 시트 이름을 라벨에 쓸 뿐 게이트가 아닙니다(그 값은 데몬
+보다 오래 살아남습니다 — "Robot:State / Robot:Alive" 절). Teach만 라이브 상태가 아니라 티칭 파일을 편집하므로 갈랐고,
 스크롤 위치도 탭마다 따로 답니다. 테이블은 편집 셀만 텍스트 편집으로
 저장하므로(데몬의 트림 persist와 같은 규율) 동시 쓰기에 안전합니다.
 
@@ -216,6 +218,8 @@ ws/
 | Robot:MapSource | longout | 그립 널(6)·홀더 간 이동(7)의 소스 홀더 (0=제자리 퍽, 1-10) |
 | Robot:Stop | bo | 일시정지 요청 (0=Run, 1=Pause) |
 | Robot:CurrentStep | longin | 현재 실행 중인 스텝 (0-30) |
+| Robot:State | longin | 데몬이 서 있는 루프 (0=Idle, 1=Running, 2=MeasWait, 3=Paused, 4=Hold) |
+| Robot:Alive | longin | 서비스 패스마다 +1 하는 하트비트 (Running 중에는 멈춤) |
 | Robot:PauseStep | longin | 지정 스텝에서 일시정지 |
 | Robot:Gripper | bo | 그리퍼 명령 (0=Close, 1=Open) |
 | Robot:Gripper_RBV | bi | 그리퍼 상태 피드백 (0=Close, 1=Open) |
@@ -271,6 +275,39 @@ Target은 hold가 서 있는 시트이지 `Robot:Holder`가 아닙니다 — 모
 나머지 대기에서는 Target이 비어 있고 Apply는 거부됩니다. 트림은 시트의
 `on_position`을 움직이는 값이라 standby에서 jog한 양은 그 측정이
 아닙니다.
+
+### Robot:State / Robot:Alive — GUI 버튼의 유일한 게이트
+
+데몬은 **서비스 패스**(`service_hold`)에서만 운전자 명령을 읽습니다 —
+`Robot:Gripper`, jog, `Jog:Apply`, `Wait`, 두 번째 `Trigger`. 이 패스는
+멈춰 서 있는 루프(`wait_for_trigger` / `wait_for_measurement` /
+`wait_for_pause_step_change`)에서만 돌고, 팔이 움직이는 동안에는 돌지
+않습니다. 그래서 GUI의 컨트롤은 **`State`(어느 루프인지) + `Alive`(아직
+그 말을 하고 있는지) 둘로만** 열립니다. `Alive`가 2초(서비스 패스 20회)
+멈추면 데몬이 안 듣는 것으로 보고 해당 컨트롤을 회색 처리합니다.
+
+`State=1`(Running)은 "일하는 중, 명령 안 읽음"이고 그동안 `Alive`는
+멈춥니다 — 정상입니다. 그래서 데몬은 **막히는 일 앞뒤로 Running을
+찍습니다**(`while_moving`): 스텝 실행뿐 아니라 서비스 패스 안의 jog
+모션과 그리퍼 명령도 포함. 덕분에 "Running이면 조용한 게 정상, 서 있는
+상태(Idle/MeasWait/Paused/Hold)인데 조용하면 죽은 것"이 유일한 규칙이
+되고, GUI는 jog 한 번에 빨간 NOT RESPONDING을 띄우지 않습니다(노랑
+"running — no commands read").
+
+두 레코드는 **autosave 대상이 아닙니다**(`robot_state.req`). 그게 요점
+입니다 — `CurrentStep`·`Loaded`·`Jog:Target`은 재개용 마커라 데몬보다
+오래 살아남고, IOC가 autosave에서 복원까지 합니다. 그 값으로 버튼을
+열면 죽은 런의 잔해 위에서 버튼이 눌립니다:
+
+- `CurrentStep == 12`로 연 Continue → 아무도 안 읽는 `Wait`에 씀
+- `Jog:Target`으로 연 hold 종료 버튼 → hold를 끝내는 게 아니라
+  `CalibMode`에 남은 모드로 **새 런을 띄움**
+- 스텝 실행 중 그리퍼 Open/Close → 눌리지만 움직이지 않음
+
+규칙: **데몬이 지금 그 상태를 서비스하고 있다고 말할 때만 컨트롤을
+연다.** 런 값은 라벨(어느 시트인지)에만 쓰고 게이트에는 쓰지 않습니다.
+`Robot:State`를 쓰는 주인은 `set_state` 하나뿐이고, 항상 현재 beat와
+같이 씁니다.
 
 ### Robot:Loaded PV
 

@@ -9,6 +9,7 @@
 
 mod calib;
 mod camera;
+mod daemon;
 mod ops;
 mod pvs;
 mod yamledit;
