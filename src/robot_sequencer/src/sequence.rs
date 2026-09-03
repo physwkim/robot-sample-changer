@@ -622,7 +622,9 @@ impl<'a> Sequencer<'a> {
                             CalibMode::HandEye => self.run_handeye(),
                             CalibMode::SeatProbe => self.run_seat_probe(),
                             CalibMode::Recover => self.run_recover(&run),
-                            CalibMode::Normal => self.run_normal(&run, start_from_step),
+                            CalibMode::Normal => {
+                                self.run_normal(&run, start_from_step, holder_number)
+                            }
                             CalibMode::GripNull | CalibMode::HolderTransfer => {
                                 unreachable!("dispatched above")
                             }
@@ -739,11 +741,22 @@ impl<'a> Sequencer<'a> {
     /// skipped it the arm is somewhere else, so no measurement is taken.
     /// Calibration modes get no hooks: they exist to measure the taught
     /// error, which a correction would mask.
-    fn run_normal(&mut self, w: &RunWaypoints, start: i32) -> Result<Outcome, SequencerError> {
+    fn run_normal(
+        &mut self,
+        w: &RunWaypoints,
+        start: i32,
+        holder: i32,
+    ) -> Result<Outcome, SequencerError> {
         self.resume_approach(start, w)?;
         self.hand(0, "open_hand", true, start)?;
         self.arm(1, "holder_standby", &w.standby, start)?;
-        self.seat_gate(start <= 2, &w.standby, &w.on_pos, Expect::Occupied, "rack")?;
+        self.seat_gate(
+            start <= 2,
+            &w.standby,
+            &w.on_pos,
+            Expect::Occupied,
+            Seat::Holder(holder),
+        )?;
 
         let d_pick =
             self.vision_correction(start <= 2, &w.standby, VisionKind::PickAlign, "pick@rack")?;
@@ -762,7 +775,7 @@ impl<'a> Sequencer<'a> {
             &w.sh_standby,
             &w.sh_on_pos,
             Expect::Empty,
-            "stage",
+            Seat::Stage,
         )?;
 
         let d_slot = self.vision_correction(
@@ -811,7 +824,7 @@ impl<'a> Sequencer<'a> {
                 &w.sh_standby,
                 &w.sh_on_pos,
                 Expect::Occupied,
-                "stage",
+                Seat::Stage,
             )?;
             let d_pick2 = self.vision_correction(
                 start <= 13,
@@ -833,7 +846,13 @@ impl<'a> Sequencer<'a> {
             )?;
             self.cartesian(17, "sample_holder_standby_2nd", &w.sh_standby, start)?;
             self.arm(18, "holder_standby_return", &w.standby, start)?;
-            self.seat_gate(start <= 19, &w.standby, &w.on_pos, Expect::Empty, "rack")?;
+            self.seat_gate(
+                start <= 19,
+                &w.standby,
+                &w.on_pos,
+                Expect::Empty,
+                Seat::Holder(holder),
+            )?;
 
             let d_slot2 = self.vision_correction(
                 start <= 19,
@@ -1755,7 +1774,7 @@ impl<'a> Sequencer<'a> {
             &w_s.standby,
             &w_s.on_pos,
             Expect::Occupied,
-            &format!("holder {source}"),
+            Seat::Holder(source),
         )?;
         self.cartesian(2, "holder_above", &w_s.above, 0)?;
         self.cartesian(3, "holder_on_position", &w_s.on_pos, 0)?;
@@ -1771,7 +1790,7 @@ impl<'a> Sequencer<'a> {
             &w_t.standby,
             &w_t.on_pos,
             Expect::Empty,
-            &format!("holder {target}"),
+            Seat::Holder(target),
         )?;
         self.cartesian(19, "holder_above_final", &w_t.above, 0)?;
         self.cartesian(20, "holder_on_position_final", &w_t.on_pos, 0)?;
@@ -2492,8 +2511,9 @@ impl<'a> Sequencer<'a> {
         observe_from: &JointMap,
         seat: &JointMap,
         expect: Expect,
-        label: &str,
+        which: Seat,
     ) -> Result<(), SequencerError> {
+        let label = which.label();
         let (Some(eye), true) = (&self.seat_check, run) else {
             return Ok(());
         };
