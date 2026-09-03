@@ -3234,6 +3234,29 @@ impl<'a> Sequencer<'a> {
                 settled * 1000.0
             )));
         }
+        // The open's own failure, which had no check at all: only the
+        // close verified that the fingers did what they were told. An
+        // open that did not take leaves them narrow, and the steps after
+        // step 0 take that width down into a seat the gate has just
+        // confirmed has a puck in it -- pads first, onto the puck. At a
+        // release it means the puck is still gripped, so the retreat
+        // would drag it out of the seat the run is about to record as
+        // filled.
+        //
+        // Not phrased as advice: what to do differs by which open this
+        // was. Reactivating the Hand-E is a daemon restart, which at a
+        // release would open the fingers on a puck the arm is holding
+        // over a seat.
+        if open && let Some(Fingers::Empty(w) | Fingers::Holding(w)) = self.gripper.fingers() {
+            return Err(SequencerError(format!(
+                "{name}: the fingers never opened ({:.1} mm, open is {:.1} mm) — \
+                 the command did not take. A Hand-E that has lost activation \
+                 answers position queries and ignores motion commands; a program \
+                 resend power-cycles the tool",
+                w * 1000.0,
+                self.gripper.open_position() * 1000.0
+            )));
+        }
         log::info("  -> Completed");
         self.step_epilogue(step)?;
         Ok(wrench)

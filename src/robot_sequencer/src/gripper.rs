@@ -284,6 +284,12 @@ impl Gripper {
         self.reach_tolerance
     }
 
+    /// The width an open commands, for a message that has to say what
+    /// the fingers failed to reach.
+    pub fn open_position(&self) -> f64 {
+        self.open_position
+    }
+
     /// What the fingers are on, or `None` when the width cannot say.
     ///
     /// One question asked once. It used to be two predicates with two
