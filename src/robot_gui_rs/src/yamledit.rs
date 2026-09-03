@@ -8,7 +8,7 @@
 //! trim persist, which writes this file too.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_yaml::Value;
 
@@ -159,6 +159,21 @@ fn set_list_entry(text: &str, key: &str, index: usize, value: f64) -> Result<Str
     Ok(out.join("\n") + "\n")
 }
 
+/// Where a write is staged before the rename that commits it: this
+/// file's name plus this process's id.
+///
+/// The name has to be the writer's own. The daemon rewrites trims from
+/// a grip null or a jog apply, the GUI's Teach page rewrites the same
+/// file from the same editor, and both stage under the file's own
+/// directory so the rename is atomic. With one shared name they
+/// truncate each other's staging file, verify text the other wrote, or
+/// rename a half-written one over the original. Only the staging is
+/// private; the rename is still the commit, and both writers re-read
+/// the file before editing it, so the later one wins whole.
+fn staging_name(path: &Path) -> PathBuf {
+    path.with_extension(format!("yaml.new.{}", std::process::id()))
+}
+
 /// Writes the given absolute values into their slots. The whole batch
 /// lands atomically or not at all.
 pub fn apply_edits(path: &Path, edits: &[(Slot, f64)]) -> Result<(), String> {
@@ -174,7 +189,7 @@ pub fn apply_edits(path: &Path, edits: &[(Slot, f64)]) -> Result<(), String> {
             Slot::List(key, index) => set_list_entry(&text, key, *index, value)?,
         };
     }
-    let tmp = path.with_extension("yaml.new");
+    let tmp = staging_name(path);
     std::fs::write(&tmp, &text).map_err(|e| format!("write {}: {e}", tmp.display()))?;
     let reread = load(&tmp).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);

@@ -349,7 +349,12 @@ def _apply_edits_textually(path, slots):
             text = _set_scalar_line(text, key, value)
         else:
             text = _set_list_entry(text, key, index, value)
-    tmp = path + '.new'
+    # This writer's own staging name. The daemon and the RsDM GUI edit
+    # the same file through the same tmp-then-rename, and one shared
+    # name lets two writers truncate each other's staging file, verify
+    # text the other wrote, or rename a half-written one over the
+    # original. The rename is still the commit.
+    tmp = f'{path}.new.{os.getpid()}'
     with open(tmp, 'w') as f:
         f.write(text)
     try:

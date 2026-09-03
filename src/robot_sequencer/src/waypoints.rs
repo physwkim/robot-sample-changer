@@ -6,7 +6,7 @@
 //! had (`ros__parameters` at root, then root itself). Reloaded before
 //! every sequence, so operators can re-teach between runs.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_yaml::Value;
 
@@ -265,6 +265,21 @@ impl SlotRef {
     }
 }
 
+/// Where a write is staged before the rename that commits it: this
+/// file's name plus this process's id.
+///
+/// The name has to be the writer's own. The daemon rewrites trims from
+/// a grip null or a jog apply, the GUI's Teach page rewrites the same
+/// file from the same editor, and both stage under the file's own
+/// directory so the rename is atomic. With one shared name they
+/// truncate each other's staging file, verify text the other wrote, or
+/// rename a half-written one over the original. Only the staging is
+/// private; the rename is still the commit, and both writers re-read
+/// the file before editing it, so the later one wins whole.
+fn staging_name(path: &Path) -> PathBuf {
+    path.with_extension(format!("yaml.new.{}", std::process::id()))
+}
+
 /// Adds measured deltas (metres) to one seat's three trim slots in the
 /// taught-waypoints file, editing the text in place so the comments and
 /// every untouched line survive (unlike a parse-and-dump). The edited
@@ -295,7 +310,7 @@ fn persist_trims(
     if checks.is_empty() {
         return Ok(report);
     }
-    let tmp = path.with_extension("yaml.new");
+    let tmp = staging_name(path);
     std::fs::write(&tmp, &text)
         .map_err(|e| SequencerError(format!("cannot write {}: {e}", tmp.display())))?;
     let reread = WaypointData::load(&tmp).inspect_err(|_| {
