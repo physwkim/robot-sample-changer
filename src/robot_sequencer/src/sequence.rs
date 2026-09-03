@@ -639,7 +639,7 @@ impl<'a> Sequencer<'a> {
             // neither, and the next steps drive them into a seat that
             // may well have a puck in it. Two ordinary things leave them
             // there — a `StartStep` resume skips the open that would
-            // have prepared them (the return-from-stage entry at step 7
+            // have prepared them (the return-from-stage entry at step 13
             // skips step 0), and the GUI's manual Close does it outright.
             //
             // Refused before the run's first motion rather than repaired:

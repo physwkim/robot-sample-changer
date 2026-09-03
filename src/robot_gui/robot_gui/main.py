@@ -205,17 +205,16 @@ class RobotControlMainWindow(qt.QMainWindow):
         eh = self.epics_handler
         eh.set_holder(holder_num)
         eh.set_calib_mode(0)
-        # From wherever the arm is, step 7 plans a collision-checked move
-        # to stage standby; the daemon then waits at step 12 — press
-        # Continue there to retrieve. (The daemon resets Wait to 0 at
-        # every run start, so pre-setting 1 here would be lost.)
-        eh.set_start_step(7)
+        # Step 13 is the first step of the retrieval leg, and the daemon
+        # plans its way to stage standby before running it. Entering at 7
+        # would re-run the place leg — descend on the seat, open on
+        # nothing — and then wait for a measurement that is already over.
+        eh.set_start_step(13)
         eh.set_pause_step(0)
         eh.set_wait(0)
         eh.trigger_sequence()
         self.status_bar.showMessage(
-            f"Going to the stage — press Continue at the wait to retrieve "
-            f"the sample to holder {holder_num}"
+            f"Retrieving the sample from the stage back to holder {holder_num}..."
         )
 
     def _map_holder(self, holder_num, source):
