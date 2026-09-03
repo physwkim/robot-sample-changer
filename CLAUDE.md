@@ -494,6 +494,18 @@ Normal 런은 스텝 7에서 정지합니다(그게 맞습니다). 치우는 건
 holder"**가 이 값을 씁니다. 새 홀더가 비었는지는 스텝 18의
 `seat_check`가 다시 봅니다.
 
+그 자리에서 Mount(`StartStep=0`)를 누르면 **거절합니다**. 런이 시작할
+때 데몬은 첫 다리가 집기인지 나르기인지 보고(`EntryLeg::for_run`) 핑거
+폭이 그와 맞는지 확인합니다 — 집기인데 뭘 물고 있으면 스텝 0의 열기가
+선 자리에서 퍽을 떨구고(스텝 0을 건너뛴 재개라면 문 채로 시트에
+내려갑니다), 나르기인데 비어 있으면 빈 손을 시트에 넣고 그 시트를
+"참"으로 기록합니다. 폭 셋은 열림 25 mm, 문 퍽 3.9 mm, 빈 닫힘
+0.7 mm이고 경계는 `min_grip_position`(2 mm)과 `open_position -
+reach_tolerance`(23.5 mm)입니다. 거절은 `Robot:Status`에 남고, 아무것도
+움직이지 않으며 `CurrentStep`·`StartStep`도 그대로입니다. 시뮬레이션
+그리퍼는 명령한 폭에 정확히 서므로 이 검사를 하지 않습니다(URSim
+리허설은 예전대로).
+
 **끄는 스위치: `Robot:SeatCheck`** (GUI Advanced의 "Seat check"
 체크박스). `sequencer.yaml`의 `seat_check.enabled`는 검사가 존재
 하는지를 정하고(핸드아이 파일을 읽습니다), 이 레코드는 그게 도는지를

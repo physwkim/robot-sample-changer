@@ -110,6 +110,36 @@ impl Settle {
     }
 }
 
+/// What is between the pads, by width alone.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Fingers {
+    /// At the gripper's own hard stop: nothing can be between them.
+    Open(f64),
+    /// Shut past the grip threshold: on each other, not on an object.
+    Empty(f64),
+    /// Stopped somewhere in between, which is what an object does.
+    Holding(f64),
+}
+
+/// The width test itself, kept apart from the gripper the way [`Settle`]
+/// is kept apart from the sleeping: the real backend cannot be built in
+/// a test, and these three answers are what a run is now refused on.
+///
+/// `shut` is `None` when no grip threshold is configured, which leaves
+/// empty and holding indistinguishable — the only honest answer there
+/// is that the width does not say.
+fn classify(width: f64, open_from: f64, shut: Option<f64>) -> Option<Fingers> {
+    if width > open_from {
+        return Some(Fingers::Open(width));
+    }
+    let shut = shut?;
+    Some(if width < shut {
+        Fingers::Empty(width)
+    } else {
+        Fingers::Holding(width)
+    })
+}
+
 pub struct Gripper {
     backend: Backend,
     open_position: f64,
@@ -254,21 +284,40 @@ impl Gripper {
         self.reach_tolerance
     }
 
+    /// What the fingers are on, or `None` when the width cannot say.
+    ///
+    /// One question asked once. It used to be two predicates with two
+    /// guards — "shut on nothing" and "never left open" — and no name
+    /// for the third answer, a puck between the pads, which is the one
+    /// a run has to know before it opens them or drives them into a
+    /// seat.
+    ///
+    /// `None` where the width is not evidence: the simulated backend
+    /// reaches every command exactly, so a held puck and an empty close
+    /// are the same number there. The threshold's absence costs only
+    /// the two shut answers; the hard stop needs no threshold.
+    pub fn fingers(&self) -> Option<Fingers> {
+        if matches!(self.backend, Backend::Simulated { .. }) {
+            return None;
+        }
+        classify(
+            self.position(),
+            self.open_position - self.reach_tolerance,
+            (self.min_grip_position > 0.0).then_some(self.min_grip_position),
+        )
+    }
+
     /// `Some(settled_m)` when the fingers are shut narrower than
     /// `min_grip_position`, i.e. on each other rather than on a puck.
     ///
     /// A width test, not a history: a close step asks it about the close
-    /// it just made, and the run gate asks it about fingers a manual
-    /// Close or a skipped open left shut. Only meaningful on the real
-    /// gripper — the simulated backend reaches the commanded position
-    /// exactly, so it always answers `None` — and only when the
-    /// threshold is configured.
+    /// it just made, and the run's entry gate asks it about fingers a
+    /// manual Close or a skipped open left shut.
     pub fn empty_close(&self) -> Option<f64> {
-        if matches!(self.backend, Backend::Simulated { .. }) || self.min_grip_position <= 0.0 {
-            return None;
+        match self.fingers() {
+            Some(Fingers::Empty(width)) => Some(width),
+            _ => None,
         }
-        let settled = self.position();
-        (settled < self.min_grip_position).then_some(settled)
     }
 
     /// After a close: `Some(settled_m)` when the fingers never left the
@@ -277,14 +326,12 @@ impl Gripper {
     /// every external-control program resend) still answers position
     /// queries but ignores motion commands, so the close "settles" at
     /// open width. No object is anywhere near the open width, so a close
-    /// that ends there executed nothing. Real backend only, as with
-    /// `empty_close`.
+    /// that ends there executed nothing.
     pub fn dead_close(&self) -> Option<f64> {
-        if matches!(self.backend, Backend::Simulated { .. }) {
-            return None;
+        match self.fingers() {
+            Some(Fingers::Open(width)) => Some(width),
+            _ => None,
         }
-        let settled = self.position();
-        (settled > self.open_position - self.reach_tolerance).then_some(settled)
     }
 
     /// Port of the C++ `wait_gripper_reached`: block until the fingers
@@ -515,5 +562,29 @@ mod tests {
     fn a_simulated_close_is_never_reported_empty() {
         let gr = gripped_at(0.0);
         assert_eq!(gr.empty_close(), None);
+    }
+
+    /// One case per boundary of the width test, in the rig's own
+    /// numbers: the hard stop at 25 mm, a held puck at 3.9, the pads
+    /// meeting on nothing at 0.7, and the 2 mm threshold between the
+    /// last two.
+    #[test]
+    fn the_width_test_splits_open_holding_and_empty_at_its_boundaries() {
+        let f = |w| classify(w, 0.025 - 0.0015, Some(0.002));
+        assert_eq!(f(0.025), Some(Fingers::Open(0.025)));
+        assert_eq!(f(0.0236), Some(Fingers::Open(0.0236)));
+        assert_eq!(f(0.0235), Some(Fingers::Holding(0.0235)));
+        assert_eq!(f(0.0039), Some(Fingers::Holding(0.0039)));
+        assert_eq!(f(0.002), Some(Fingers::Holding(0.002)));
+        assert_eq!(f(0.0019), Some(Fingers::Empty(0.0019)));
+        assert_eq!(f(0.0007), Some(Fingers::Empty(0.0007)));
+    }
+
+    /// Without a threshold the hard stop is still readable, and the two
+    /// shut answers must not be guessed at.
+    #[test]
+    fn without_a_grip_threshold_only_the_open_answer_survives() {
+        assert_eq!(classify(0.025, 0.0235, None), Some(Fingers::Open(0.025)));
+        assert_eq!(classify(0.0039, 0.0235, None), None);
     }
 }

@@ -75,28 +75,6 @@ pub enum CalibMode {
     HolderTransfer,
 }
 
-impl CalibMode {
-    /// Whether this mode drives the fingers into a seat.
-    ///
-    /// The two that do not are the two an operator reaches for when a
-    /// run has already gone wrong, and gating them on the gripper would
-    /// take away the way out: [`CalibMode::Recover`] returns to standby
-    /// without entering anything and deliberately leaves the fingers as
-    /// it found them, and [`CalibMode::HandEye`] rotates the camera in
-    /// place. [`CalibMode::SeatProbe`] probes the seat the arm is
-    /// already standing in rather than driving into one.
-    pub fn enters_a_seat(self) -> bool {
-        match self {
-            Self::Normal
-            | Self::Holder
-            | Self::SampleHolder
-            | Self::GripNull
-            | Self::HolderTransfer => true,
-            Self::Recover | Self::HandEye | Self::SeatProbe => false,
-        }
-    }
-}
-
 /// `Robot:Vision:Kind` request codes (mbbo).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VisionKind {
@@ -267,27 +245,6 @@ mod tests {
         let cut = clip_stringin(korean);
         assert!(cut.len() <= 39, "{} bytes", cut.len());
         assert!(korean.starts_with(cut));
-    }
-
-    /// Every mode is classified, and the three that are not gated are
-    /// the three an operator reaches for when a run has already gone
-    /// wrong or when nothing is being carried. A mode added without
-    /// deciding fails to compile in `enters_a_seat`; a mode reclassified
-    /// by accident fails here.
-    #[test]
-    fn the_modes_that_drive_into_a_seat_are_the_ones_the_gripper_gate_covers() {
-        for mode in [
-            CalibMode::Normal,
-            CalibMode::Holder,
-            CalibMode::SampleHolder,
-            CalibMode::GripNull,
-            CalibMode::HolderTransfer,
-        ] {
-            assert!(mode.enters_a_seat(), "{mode:?} must be gated");
-        }
-        for mode in [CalibMode::Recover, CalibMode::HandEye, CalibMode::SeatProbe] {
-            assert!(!mode.enters_a_seat(), "{mode:?} must stay ungated");
-        }
     }
 
     /// The record's contract, in one place: the codes are dense from
