@@ -168,6 +168,25 @@ robot_ioc 말고도 있습니다(d435i-ioc 등). 브로드캐스트 search는 �
 데몬이 죽습니다. `NAME_SERVERS`는 TCP로 특정 서버에 직접 질의해서 로컬
 고정과 정상 동작을 둘 다 얻습니다.
 
+### 스테이지를 옮겼을 때
+
+세 곳이 같이 움직여야 합니다 — 시트 트림, 충돌 씬, 시트 체크 창.
+
+1. **트림** — `sample_holder_on_position_{x,y,z}_offset`. jog + Apply로
+   씁니다(툴 프레임 mm).
+2. **충돌 씬** — `config/sequencer.yaml`의 `scene.objects` 40개가 전부
+   같은 `position`을 쓰는 스테이지 한 덩어리입니다. 트림 변화량을
+   **모델 좌표로 돌려서** 그만큼 더합니다:
+   `seat_scan config/sequencer.yaml stage 1 <dx,dy,dz mm>`가 그 환산을
+   찍습니다. 2026-09-03의 (−8.4246, −1.5, +4.4842) mm는 모델 좌표로
+   [−0.00431, −0.00849, +0.00162] m였습니다. 트림은 한 점이 어디로
+   갔는지만 말하므로 **스테이지가 돌아갔다면 rpy는 트림으로 알 수
+   없습니다**.
+3. **시트 체크 창** — `stage_window_bias_mm`. 위 절 참조.
+
+씬과 창은 둘 다 `sequencer.yaml`이라 **데몬 재시작**이 필요합니다
+(트림은 트리거마다 다시 읽습니다).
+
 ## 충돌/크래시 후 재개 (resume-after-crash)
 
 상태는 PV에 보존. 데몬만 죽으면 IOC가 PV(CurrentStep/Holder/CalibMode/Loaded)

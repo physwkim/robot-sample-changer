@@ -21,9 +21,9 @@
     # puck's own axis is wrist3_rotation_offset, not a tilt.
     holder_on_position_tilt_z_deg: 0.0
     holder_rack_z_offset: -0.0003
-    sample_holder_on_position_x_offset: -0.002785
-    sample_holder_on_position_y_offset: -0.0005
-    sample_holder_on_position_z_offset: 0.000171
+    sample_holder_on_position_x_offset: -0.0112096
+    sample_holder_on_position_y_offset: -0.002
+    sample_holder_on_position_z_offset: 0.0046552
     # Per-holder trims, holder N at index N-1 -- holder 1 included, so
     # trimming it moves it and nothing else.
     holder_multi_x_offsets: [-0.0002067, 9.18e-5, 0.0003947, 0.001, 0.0007379, 0.0012567, 0.0011608, 0.0012759, 0.0016, 0.0019997]
