@@ -152,6 +152,18 @@ impl Seat {
         mm.map(|v| v / 1000.0)
     }
 
+    /// Which holder a `MapSource` value fetches from for this seat, or
+    /// `None` when it names the puck already seated here -- 0, or this
+    /// seat's own number. The stage has no number of its own, so it is
+    /// a destination only and every holder is a fetch to it.
+    ///
+    /// Out of range is returned rather than filtered: the caller
+    /// refuses it by name, and a silent `None` would run the null on
+    /// whatever is in the seat instead.
+    fn fetch_source(self, map_source: i32) -> Option<i32> {
+        (map_source != 0 && self != Self::Holder(map_source)).then_some(map_source)
+    }
+
     fn persist(
         self,
         path: &std::path::Path,
@@ -1260,13 +1272,20 @@ impl<'a> Sequencer<'a> {
     /// which is why they are recorded here as measured rather than
     /// derived.
     ///
-    /// `MapSource` may name another holder to fetch the puck from, so a
+    /// `MapSource` may name a rack holder to fetch the puck from, so a
     /// rack with one puck in it can be walked holder by holder on one
-    /// trigger each; 0, or the target itself, uses the puck already
-    /// seated there. The puck is left in the target when the loop ends,
-    /// which is where the next fetch expects to find it. **A named
-    /// source does not check that the target seat is empty** — the same
-    /// caveat mode 7 carries, for the same reason.
+    /// trigger each, and the stage can be nulled without a Normal run
+    /// to put a puck on it first; 0, or the target itself, uses the
+    /// puck already seated there. The puck is left in the target when
+    /// the loop ends, which is where the next fetch expects to find it
+    /// -- after a stage null it stands on the stage, for a Return leg
+    /// to take back. Whether that target seat was empty is
+    /// `seat_check`'s to answer, on the same gate mode 7 carries, and
+    /// nobody's when it is off.
+    ///
+    /// The source is always a rack holder: `MapSource = 0` is spoken
+    /// for by "the puck already seated here", so the stage has no
+    /// number left to be named by and can only be a destination.
     ///
     /// Always runs from the top: a resume would grip air, or release
     /// into a seat that is not empty, so a non-zero `StartStep` is
@@ -1323,52 +1342,31 @@ impl<'a> Sequencer<'a> {
             ));
         }
         let g = self.config.grip_null.clone();
-        // `MapSource` names where the puck comes from, 0 or the target
+        // `MapSource` names where the puck comes from, 0 or the seat
         // itself meaning "the one already seated here". A rack being
         // calibrated with one puck wants the fetch and the null on one
         // trigger, and the carry is mode 7's, unchanged.
         let source = self.epics.read_map_source();
-        let target = match seat {
-            Seat::Holder(h) => h,
-            // The carry is rack to rack; a puck reaches the stage only
-            // by the Normal sequence's own leg, which is a different
-            // run with a different meaning. So the stage nulls whatever
-            // is already seated in it.
-            Seat::Stage => {
-                if source != 0 {
-                    return Err(NullFailure::new(
-                        format!("refused: MapSource {source} cannot feed the stage"),
-                        format!(
-                            "grip null: MapSource is {source}, but the fetch carries \
-                             rack to rack; put the puck on the stage with a Normal \
-                             run and set MapSource to 0"
-                        ),
-                    ));
-                }
-                0
-            }
-        };
-        let fetched = source != 0 && source != target;
-        if fetched {
+        if let Some(source) = seat.fetch_source(source) {
             if !(1..=10).contains(&source) {
                 return Err(NullFailure::new(
                     format!("refused: MapSource {source} is not a holder"),
                     format!(
-                        "grip null: MapSource is {source}; it must name a holder \
-                         1-10, or 0 for the puck already in {}",
+                        "grip null: MapSource is {source}; it must name a rack \
+                         holder 1-10, or 0 for the puck already in {}",
                         seat.label()
                     ),
                 ));
             }
             log::info(&format!(
-                ">>> GRIP NULL MODE: fetching holder {source}'s puck into holder \
-                 {target} first <<<"
+                ">>> GRIP NULL MODE: fetching holder {source}'s puck into {} first <<<",
+                seat.label()
             ));
             report.message = format!("fetching the puck from holder {source}");
             self.epics.publish_null(report);
             let wd = WaypointData::load(&self.config.sequence.waypoints_yaml)?;
             let base = self.compute_base_waypoints(&wd)?;
-            self.carry_puck(&wd, &base, source, target)?;
+            self.carry_puck(&wd, &base, source, seat)?;
         }
         log::info(&format!(
             ">>> GRIP NULL MODE: {}, up to {} iterations <<<",
@@ -1404,17 +1402,7 @@ impl<'a> Sequencer<'a> {
             // to pick the puck with.
             let wd = WaypointData::load(&self.config.sequence.waypoints_yaml)?;
             let base = self.compute_base_waypoints(&wd)?;
-            let (standby, above, on_pos) = match seat {
-                Seat::Stage => (
-                    base.sample_holder_standby.clone(),
-                    base.sample_holder_above.clone(),
-                    base.sample_holder_on.clone(),
-                ),
-                Seat::Holder(h) => {
-                    let run = self.compute_run_waypoints(&wd, &base, h)?;
-                    (run.standby, run.above, run.on_pos)
-                }
-            };
+            let (standby, above, on_pos) = self.seat_waypoints(&wd, &base, seat)?;
             log::info(&format!(
                 "--- grip null iteration {iteration} of {} ---",
                 g.max_iterations
@@ -1758,26 +1746,51 @@ impl<'a> Sequencer<'a> {
         log::info(&format!(
             ">>> HOLDER TRANSFER MODE: holder {source} -> holder {target} <<<"
         ));
-        self.carry_puck(wd, base, source, target)?;
+        self.carry_puck(wd, base, source, Seat::Holder(target))?;
         Ok(Outcome::Ran)
     }
 
-    /// Pick at `source`, place at `target`, no stage leg and nothing
-    /// measured.
+    /// Pick at holder `source`, place at `target`, nothing measured.
     ///
     /// Shared so that [`Sequencer::run_holder_transfer`] and a grip null
     /// given a source holder move a puck the same way. They differ in
     /// what happens afterwards, not in the carry, and two copies of a
     /// route through an open rack is one copy too many.
+    ///
+    /// The source is a rack holder because `MapSource` cannot name the
+    /// stage; the destination is either seat, so a grip null at the
+    /// stage can fetch its own puck instead of requiring a Normal run
+    /// to have left one there.
     fn carry_puck(
         &mut self,
         wd: &WaypointData,
         base: &BaseWaypoints,
         source: i32,
-        target: i32,
+        target: Seat,
     ) -> Result<(), SequencerError> {
         let w_s = self.compute_run_waypoints(wd, base, source)?;
-        let w_t = self.compute_run_waypoints(wd, base, target)?;
+        let (t_standby, t_above, t_on) = self.seat_waypoints(wd, base, target)?;
+        // The place leg is the Normal run's own, both in poses and in
+        // numbering -- 7-12 to the stage, 18-23 to a rack seat -- so
+        // `CurrentStep` and `PauseStep` mean here what they mean there.
+        let place: [(i32, &str); 6] = match target {
+            Seat::Stage => [
+                (7, "sample_holder_standby"),
+                (8, "sample_holder_above"),
+                (9, "sample_holder_on_position"),
+                (10, "open_gripper"),
+                (11, "sample_holder_above_return"),
+                (12, "sample_holder_standby_return"),
+            ],
+            Seat::Holder(_) => [
+                (18, "holder_standby_return"),
+                (19, "holder_above_final"),
+                (20, "holder_on_position_final"),
+                (21, "open_gripper_final"),
+                (22, "holder_above_final_return"),
+                (23, "holder_standby_final"),
+            ],
+        };
 
         self.hand(0, "open_hand", true, 0)?;
         self.arm(1, "holder_standby", &w_s.standby, 0)?;
@@ -1793,23 +1806,43 @@ impl<'a> Sequencer<'a> {
         self.hand(4, "close_gripper", false, 0)?;
         self.cartesian(5, "holder_above_return", &w_s.above, 0)?;
         self.cartesian(6, "holder_retreat", &w_s.retreat, 0)?;
-        // The one move the stage leg used to make from its own standby.
-        self.arm(18, "holder_standby_return", &w_t.standby, 0)?;
+        // Planned from the source retreat rather than from a standby:
+        // to the stage this is Normal's own step 7, and to a rack seat
+        // it is the step 18 the stage leg used to make from sh_standby.
+        self.arm(place[0].0, place[0].1, &t_standby, 0)?;
         // The one thing this mode could never tell an operator before
         // it dropped a second puck into an occupied well.
-        self.seat_gate(
-            true,
-            &w_t.standby,
-            &w_t.on_pos,
-            Expect::Empty,
-            Seat::Holder(target),
-        )?;
-        self.cartesian(19, "holder_above_final", &w_t.above, 0)?;
-        self.cartesian(20, "holder_on_position_final", &w_t.on_pos, 0)?;
-        self.hand(21, "open_gripper_final", true, 0)?;
-        self.cartesian(22, "holder_above_final_return", &w_t.above, 0)?;
-        self.cartesian(23, "holder_standby_final", &w_t.standby, 0)?;
+        self.seat_gate(true, &t_standby, &t_on, Expect::Empty, target)?;
+        self.cartesian(place[1].0, place[1].1, &t_above, 0)?;
+        self.cartesian(place[2].0, place[2].1, &t_on, 0)?;
+        self.hand(place[3].0, place[3].1, true, 0)?;
+        self.cartesian(place[4].0, place[4].1, &t_above, 0)?;
+        self.cartesian(place[5].0, place[5].1, &t_standby, 0)?;
         Ok(())
+    }
+
+    /// The three poses a seat is worked from: where the arm stands to
+    /// plan into it, the approach above it, and the seat itself.
+    ///
+    /// One mapping from [`Seat`] to poses, so the carry and the null
+    /// loop cannot drift into disagreeing about where the stage is.
+    fn seat_waypoints(
+        &self,
+        wd: &WaypointData,
+        base: &BaseWaypoints,
+        seat: Seat,
+    ) -> Result<(JointMap, JointMap, JointMap), SequencerError> {
+        Ok(match seat {
+            Seat::Stage => (
+                base.sample_holder_standby.clone(),
+                base.sample_holder_above.clone(),
+                base.sample_holder_on.clone(),
+            ),
+            Seat::Holder(h) => {
+                let run = self.compute_run_waypoints(wd, base, h)?;
+                (run.standby, run.above, run.on_pos)
+            }
+        })
     }
 
     /// Probes at every configured height and always brings the arm back
@@ -3494,6 +3527,33 @@ mod tests {
         assert_eq!(
             NULL_AXES[1], "tool y (depth)",
             "the disabled slot is the one the doc argues about"
+        );
+    }
+
+    /// Where the puck comes from is one rule at both seats: `MapSource`
+    /// 0, and the seat's own number, are the puck already sitting there;
+    /// anything else is a fetch, the stage included. The stage has no
+    /// number of its own, which is what makes every holder a fetch to it
+    /// and nothing a fetch from it.
+    #[test]
+    fn a_seat_fetches_from_any_holder_but_its_own() {
+        assert_eq!(Seat::Stage.fetch_source(0), None, "the puck already on it");
+        assert_eq!(
+            Seat::Stage.fetch_source(3),
+            Some(3),
+            "no holder is the stage, so every one of them is a carry"
+        );
+        assert_eq!(Seat::Holder(3).fetch_source(0), None);
+        assert_eq!(
+            Seat::Holder(3).fetch_source(3),
+            None,
+            "its own number means the same as 0"
+        );
+        assert_eq!(Seat::Holder(3).fetch_source(4), Some(4));
+        assert_eq!(
+            Seat::Stage.fetch_source(11),
+            Some(11),
+            "out of range stays visible: the caller refuses it by name"
         );
     }
 

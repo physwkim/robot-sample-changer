@@ -126,11 +126,11 @@ fn run() -> Result<(), SequencerError> {
         config.grip_null.settled_n, config.grip_null.max_iterations
     ));
     log::info(&format!(
-        "      {} fetches the puck from another holder first, 0 uses this one's;",
+        "      {} fetches the puck from a rack holder first, 0 uses the seat's own;",
         config.epics.map_source_pv
     ));
     log::info(&format!(
-        "      {}=0 nulls the stage instead of a rack seat)",
+        "      {}=0 nulls the stage instead of a rack seat, fetch included)",
         config.epics.holder_pv
     ));
     log::info("    7=Holder transfer (carry the puck straight to the target seat;");

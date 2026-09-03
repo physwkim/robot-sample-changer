@@ -245,9 +245,8 @@ impl OpsPanel {
             Action::GripNull { target, source } => {
                 put(&self.holder, target);
                 // 0 means the puck already seated in the target; anything
-                // else is fetched first, on the same trigger. The stage
-                // can only be the former: the fetch carries rack to rack.
-                let source = if target == 0 { 0 } else { source };
+                // else is a rack holder the daemon fetches from first, on
+                // the same trigger, the stage included.
                 put(&self.map_source, if source == target { 0 } else { source });
                 put(&self.calib_mode, 6);
                 // Grip null refuses mid-sequence resumes.
@@ -264,8 +263,9 @@ impl OpsPanel {
                     )
                 } else {
                     format!(
-                        "Fetching holder {source}'s puck into holder {target}, then nulling \
-                         there — the puck is left in holder {target}"
+                        "Fetching holder {source}'s puck into {seat}, then nulling \
+                         there — the puck is left in {seat}",
+                        seat = seat_name(target)
                     )
                 };
             }
@@ -574,13 +574,10 @@ impl OpsPanel {
         ui.vertical(|ui| {
             ui.strong("Grip null");
             ui.label("Close on the puck, write the trims the wrench asks for.");
-            let stage = self.null_holder == 0;
-            // Changing the seat can leave the source pointing at the new
-            // target, or at a rack holder while the seat is the stage.
-            // Both mean "the puck already there", and the second one the
-            // daemon refuses outright, so settle it here rather than at
-            // the trigger.
-            if stage || self.null_source == self.null_holder {
+            // Changing the seat can leave the source pointing at the
+            // new target, which means "the puck already there" — say it
+            // in those words here rather than at the trigger.
+            if self.null_source == self.null_holder {
                 self.null_source = 0;
             }
             fields(ui, "gripnull-fields", |ui| {
@@ -597,10 +594,10 @@ impl OpsPanel {
                     });
                 ui.end_row();
                 ui.label("Puck from:");
-                // The fetch is rack to rack, so the stage nulls whatever
-                // is already sitting in it. The target is left out of the
-                // list because picking it means the same as picking
-                // "already there".
+                // A rack holder or "already there": `MapSource` has no
+                // number for the stage, so the stage is a destination
+                // only. The target is left out of the list because
+                // picking it means the same as picking "already there".
                 let target = self.null_holder;
                 let mut source = self.null_source;
                 let named = |n: i64| {
@@ -610,27 +607,23 @@ impl OpsPanel {
                         seat_name(n)
                     }
                 };
-                ui.add_enabled_ui(!stage, |ui| {
-                    egui::ComboBox::from_id_salt("gripnull-source")
-                        .selected_text(named(source))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut source, 0, named(0));
-                            for n in 1..=10i64 {
-                                if n != target {
-                                    ui.selectable_value(&mut source, n, seat_name(n));
-                                }
+                egui::ComboBox::from_id_salt("gripnull-source")
+                    .selected_text(named(source))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut source, 0, named(0));
+                        for n in 1..=10i64 {
+                            if n != target {
+                                ui.selectable_value(&mut source, n, seat_name(n));
                             }
-                        });
-                });
+                        }
+                    });
                 self.null_source = source;
                 ui.end_row();
             });
-            ui.label(if stage {
-                "(the stage nulls the puck a Normal run left on it)"
-            } else if self.null_source == 0 {
+            ui.label(if self.null_source == 0 {
                 "(nulls the puck already seated there)"
             } else {
-                "(fetched first; the target seat must be empty)"
+                "(fetched first; the target seat must be empty, and keeps the puck)"
             });
             if ui.button("Null grip").clicked() {
                 self.request(Action::GripNull {
