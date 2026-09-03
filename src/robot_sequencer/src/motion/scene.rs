@@ -158,6 +158,64 @@ fn sync_scene_state(
     Ok(())
 }
 
+/// Why the planner would refuse this state, or `None` when it would
+/// not: joint limits first, then collision with the scene and itself,
+/// named by contact pair.
+///
+/// `rrt_connect` reports both as "start or goal state is itself
+/// invalid", which names neither which end nor why, and reads like a
+/// collision even when a joint is simply out of its limit. Every
+/// planned move runs this on both ends first so the log says which.
+/// The joint values ride along because the pose is the one thing the
+/// operator cannot read back afterwards -- the daemon does not publish
+/// it, and a monitoring IOC that is down takes it with it.
+pub(crate) fn state_validity_note(
+    model: &Model,
+    assets: &[SceneAsset],
+    allow_collisions_with: &[String],
+    state: &RobotState<'_>,
+) -> Result<Option<String>, SequencerError> {
+    let q = state
+        .joint_group_positions(&model.group)
+        .map_err(|e| SequencerError(format!("validity: state positions: {e}")))?;
+    let at = format!(
+        "at [{}]",
+        q.iter()
+            .map(|v| format!("{v:.4}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let in_bounds = state
+        .satisfies_bounds_group(&model.group, 0.0)
+        .map_err(|e| SequencerError(format!("validity: bounds: {e}")))?;
+    if !in_bounds {
+        return Ok(Some(format!("outside the joint limits {at}")));
+    }
+    let (mut scene, env) = scene_with_assets(model, assets, allow_collisions_with);
+    sync_scene_state(&mut scene, &model.group, state)?;
+    let request = CollisionRequest {
+        contacts: true,
+        max_contacts: usize::MAX,
+        max_contacts_per_pair: 1,
+        ..CollisionRequest::default()
+    };
+    let result = scene.check_collision(&env, &request);
+    if !result.collision {
+        return Ok(None);
+    }
+    let pairs: Vec<String> = result
+        .contacts
+        .as_ref()
+        .map(|d| {
+            d.by_pair
+                .keys()
+                .map(|(a, b)| format!("{a} ~ {b}"))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(Some(format!("in collision ({}) {at}", pairs.join(", "))))
+}
+
 /// Index of the first state that adds a collision (self or scene world,
 /// ACM applied) the path did not start with, or `None` when no state
 /// does. Used by the jog gate to truncate an interpolated path; see the
@@ -333,6 +391,69 @@ mod tests {
             .into_iter()
             .collect();
         (model, joints)
+    }
+
+    /// The two standby poses must be collision-free in the very scene
+    /// `rrt_connect` validates against, because they are the only poses
+    /// a planned step is allowed to start from or end at: step 1 plans
+    /// to `holder_standby` and step 7 plans from wherever the arm is to
+    /// `sample_holder_standby`.
+    ///
+    /// The seat poses are not, and that is by design rather than an
+    /// oversight to fix here: measured 2026-09-03, `holder1_on_position`
+    /// reads as `robotiq_hande_{left,right}_finger ~ stage1` and
+    /// `sample_holder_on_position` as `robotiq_hande_{link,left_finger,
+    /// right_finger} ~ stage13`. The stage and rack meshes are a convex
+    /// decomposition, so a seat's recess fills in and a pose standing
+    /// legally inside it reads as inside the part. That is why every
+    /// step that enters a seat is Cartesian and interpolated, never
+    /// planned -- and why a run resumed with `StartStep` at a planned
+    /// step fails outright when the arm is standing in a seat: the
+    /// planner rejects the start before anything moves.
+    #[test]
+    fn the_standby_poses_a_planned_step_uses_are_collision_free() {
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/sequencer.yaml"
+        ));
+        let config = Config::load(path).expect("load config");
+        let model = Model::load(&config).expect("load model");
+        let waypoints = WaypointData::load(&config.sequence.waypoints_yaml).expect("waypoints");
+        let assets = load_scene_assets(&config).expect("load scene assets");
+
+        for (label, taught) in [
+            ("holder1_standby", &waypoints.holder1_standby),
+            ("sample_holder_standby", &waypoints.sample_holder_standby),
+        ] {
+            let joints: JointMap = WaypointData::arm_joints(taught).into_iter().collect();
+            let (mut scene, env) =
+                scene_with_assets(&model, &assets, &config.scene.allow_collisions_with);
+            let state = model.state_with_joints(&joints).expect("taught state");
+            sync_scene_state(&mut scene, &model.group, &state).expect("sync the scene state");
+            let request = CollisionRequest {
+                contacts: true,
+                max_contacts: usize::MAX,
+                max_contacts_per_pair: 1,
+                ..CollisionRequest::default()
+            };
+            let result = scene.check_collision(&env, &request);
+            let pairs: Vec<String> = result
+                .contacts
+                .as_ref()
+                .map(|d| {
+                    d.by_pair
+                        .keys()
+                        .map(|(a, b)| format!("{a} ~ {b}"))
+                        .collect()
+                })
+                .unwrap_or_default();
+            assert!(
+                !result.collision,
+                "{label} collides in the planning scene ({}), so no planned step \
+                 can start from or end at it",
+                pairs.join(", ")
+            );
+        }
     }
 
     /// Every taught pose the joint-space steps plan to must satisfy the

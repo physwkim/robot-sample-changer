@@ -28,7 +28,7 @@ pub(crate) use probe::ProbeLimits;
 pub(crate) use scene::LevelToolConstraint;
 pub(crate) use scene::{
     SceneAsset, first_new_collision_index, load_scene_assets, scene_with_assets,
-    shortcut_keep_indices,
+    shortcut_keep_indices, state_validity_note,
 };
 
 use std::net::TcpStream;
@@ -438,15 +438,38 @@ impl<'m> Motion<'m> {
             .transpose()
             .map_err(|e| SequencerError(format!("{label}: level-tool constraint: {e}")))?;
 
+        // The planner reports every reason either end is unusable as one
+        // sentence, "start or goal state is itself invalid", which names
+        // neither which end nor why. Both ends are therefore classified
+        // here first, and this is the only place that does it -- a
+        // planned move that failed for a reason this does not name is a
+        // gap in this check, not one more thing for a caller to guess.
+        let mut start_state = self.model.state_with_joints(&q_to_map(&start))?;
+        start_state.update();
+        for (which, state) in [("start", &start_state), ("goal", &*goal_state.update())] {
+            if let Some(why) = state_validity_note(
+                self.model,
+                &self.scene_assets,
+                &self.allow_collisions_with,
+                state,
+            )? {
+                return Err(SequencerError(format!(
+                    "{label}: the {which} state is {why}, so no plan can be \
+                     made. A pose standing in a seat reads as inside the \
+                     convex stage parts, which is why seat entry is \
+                     Cartesian and never planned; jog out of it (the jog \
+                     exempts contacts its start already has) or freedrive \
+                     the arm clear, then trigger CalibMode=4 to recover."
+                )));
+            }
+        }
+
         // A start that already violates the path constraint has no solution
-        // under it, and the planner says so as "start or goal state is
-        // itself invalid" — which names neither which of the two nor why,
-        // and reads like a collision. Only `satisfied` is quoted here: the
-        // result's `distance` sums the deviation about all three world axes
-        // including the one this constraint leaves free, so it is not the
-        // tilt and must not be printed as one.
+        // under it, and the planner says so the same way. Only `satisfied`
+        // is quoted here: the result's `distance` sums the deviation about
+        // all three world axes including the one this constraint leaves
+        // free, so it is not the tilt and must not be printed as one.
         if let Some(set) = &path_constraints {
-            let mut start_state = self.model.state_with_joints(&q_to_map(&start))?;
             if !set.decide(&start_state.update()).satisfied {
                 return Err(SequencerError(format!(
                     "{label}: the arm's current pose does not satisfy the \
