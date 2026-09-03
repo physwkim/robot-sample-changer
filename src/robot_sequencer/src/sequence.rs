@@ -4027,6 +4027,34 @@ mod tests {
         );
     }
 
+    /// The eight poses that put the tool inside a seat, named by the
+    /// step that moves to them rather than by the band they fall in.
+    ///
+    /// The above pose is where a closed gripper does its damage: it
+    /// sits directly over the puck, so the pads arrive on top of it and
+    /// the descent that follows presses them down. Reaching it needs
+    /// the fingers at the hard stop, not merely off each other -- a
+    /// half-shut empty gripper reads as `Holding`, and `Free` refuses
+    /// that as well as `Empty`.
+    #[test]
+    fn every_step_that_enters_a_seat_says_which_hand_it_needs() {
+        let n = |step| Hands::before_step(CalibMode::Normal, step);
+        for step in [2, 3, 13, 14] {
+            assert_eq!(n(step), Some(Hands::Free), "step {step} goes in to pick");
+        }
+        for step in [5, 8, 9, 16, 19, 20] {
+            assert_eq!(n(step), Some(Hands::Full), "step {step} carries the puck");
+        }
+        for step in [11, 22] {
+            assert_eq!(n(step), Some(Hands::Free), "step {step} retreats empty");
+        }
+        assert!(Hands::Free.refuses(Fingers::Empty(0.0007)).is_some());
+        assert!(
+            Hands::Free.refuses(Fingers::Holding(0.010)).is_some(),
+            "half shut on nothing is still not open"
+        );
+    }
+
     /// The four pairings, of which three used to run. Empty is refused
     /// either way -- it is neither what an empty hand opens on nor what
     /// a full one puts down.
