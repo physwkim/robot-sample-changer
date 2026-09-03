@@ -217,17 +217,17 @@ impl OpsPanel {
             Action::Return(h) => {
                 put(&self.holder, h);
                 put(&self.calib_mode, 0);
-                // From wherever the arm is, step 7 plans a collision-
-                // checked move to stage standby; the daemon then waits at
-                // step 12 — Continue there retrieves the sample.
-                put(&self.start_step, 7);
+                // Step 13 is the first step of the retrieval leg, and
+                // the daemon plans its way to stage standby before
+                // running it. Entering at 7 instead would re-run the
+                // place leg — descend on the seat, open on nothing —
+                // and then wait for a measurement that is already over.
+                put(&self.start_step, 13);
                 put(&self.pause_step, 0);
                 self.pause_step_input = 0;
                 put(&self.wait, 0);
                 put(&self.trigger, 1);
-                self.note = format!(
-                    "Going to the stage — press Continue at the wait to retrieve to holder {h}"
-                );
+                self.note = format!("Retrieving the sample from the stage back to holder {h}...");
             }
             Action::GripNull { target, source } => {
                 put(&self.holder, target);

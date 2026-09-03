@@ -90,6 +90,32 @@ struct RunWaypoints {
     sh_on_pos: JointMap,
 }
 
+/// The standby a leg of the step script begins at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegStandby {
+    Rack,
+    Stage,
+}
+
+impl LegStandby {
+    /// Which standby a run resumed at `start` must be brought to, or
+    /// `None` when the step it starts at is itself a planned move to one
+    /// (0 and 1 open and go to the rack standby, 7 and 18 plan to the
+    /// stage and rack standbys) and so needs no approach of its own.
+    ///
+    /// The ranges are the legs of the script: 2-6 pick at the rack, 8-12
+    /// place at the stage, 13-17 pick at the stage, 19-23 place at the
+    /// rack. The two stage legs share a standby, so they share a range.
+    fn for_resume(start: i32) -> Option<Self> {
+        match start {
+            2..=6 => Some(Self::Rack),
+            8..=17 => Some(Self::Stage),
+            19..=23 => Some(Self::Rack),
+            _ => None,
+        }
+    }
+}
+
 /// Which seat a grip null is working on: `Robot:Holder = 0` is the
 /// stage bore, 1-10 the rack wells.
 ///
@@ -677,12 +703,13 @@ impl<'a> Sequencer<'a> {
     /// Calibration modes get no hooks: they exist to measure the taught
     /// error, which a correction would mask.
     fn run_normal(&mut self, w: &RunWaypoints, start: i32) -> Result<Outcome, SequencerError> {
+        self.resume_approach(start, w)?;
         self.hand(0, "open_hand", true, start)?;
         self.arm(1, "holder_standby", &w.standby, start)?;
-        self.seat_gate(start <= 1, &w.standby, &w.on_pos, Expect::Occupied, "rack")?;
+        self.seat_gate(start <= 2, &w.standby, &w.on_pos, Expect::Occupied, "rack")?;
 
         let d_pick =
-            self.vision_correction(start <= 1, &w.standby, VisionKind::PickAlign, "pick@rack")?;
+            self.vision_correction(start <= 2, &w.standby, VisionKind::PickAlign, "pick@rack")?;
         let above_c = self.corrected(&w.above, d_pick, "holder_above+vision")?;
         let on_c = self.corrected(&w.on_pos, d_pick, "holder_on_position+vision")?;
         self.cartesian(2, "holder_above", &above_c, start)?;
@@ -694,7 +721,7 @@ impl<'a> Sequencer<'a> {
         self.cartesian(6, "holder_retreat", &w.retreat, start)?;
         self.arm(7, "sample_holder_standby", &w.sh_standby, start)?;
         self.seat_gate(
-            start <= 7,
+            start <= 8,
             &w.sh_standby,
             &w.sh_on_pos,
             Expect::Empty,
@@ -702,7 +729,7 @@ impl<'a> Sequencer<'a> {
         )?;
 
         let d_slot = self.vision_correction(
-            start <= 7,
+            start <= 8,
             &w.sh_standby,
             VisionKind::PlaceAlign,
             "place@sample_holder",
@@ -739,14 +766,14 @@ impl<'a> Sequencer<'a> {
             // that it also covers a sample lifted off the stage while
             // the beamline had it.
             self.seat_gate(
-                start <= 12,
+                start <= 13,
                 &w.sh_standby,
                 &w.sh_on_pos,
                 Expect::Occupied,
                 "stage",
             )?;
             let d_pick2 = self.vision_correction(
-                start <= 12,
+                start <= 13,
                 &w.sh_standby,
                 VisionKind::PickAlign,
                 "pick@sample_holder",
@@ -765,10 +792,10 @@ impl<'a> Sequencer<'a> {
             )?;
             self.cartesian(17, "sample_holder_standby_2nd", &w.sh_standby, start)?;
             self.arm(18, "holder_standby_return", &w.standby, start)?;
-            self.seat_gate(start <= 18, &w.standby, &w.on_pos, Expect::Empty, "rack")?;
+            self.seat_gate(start <= 19, &w.standby, &w.on_pos, Expect::Empty, "rack")?;
 
             let d_slot2 = self.vision_correction(
-                start <= 18,
+                start <= 19,
                 &w.standby,
                 VisionKind::PlaceAlign,
                 "place@rack",
@@ -841,6 +868,7 @@ impl<'a> Sequencer<'a> {
         holder: i32,
     ) -> Result<Outcome, SequencerError> {
         log::info(">>> HOLDER CALIBRATION MODE: Steps 0-5, wait, 20-23 <<<");
+        self.resume_approach(start, w)?;
         self.hand(0, "open_hand", true, start)?;
         self.arm(1, "holder_standby", &w.standby, start)?;
         self.cartesian(2, "holder_above", &w.above, start)?;
@@ -869,6 +897,7 @@ impl<'a> Sequencer<'a> {
         start: i32,
     ) -> Result<Outcome, SequencerError> {
         log::info(">>> SAMPLE HOLDER CALIBRATION MODE: Steps 0-8, wait, 16-23 <<<");
+        self.resume_approach(start, w)?;
         self.hand(0, "open_hand", true, start)?;
         self.arm(1, "holder_standby", &w.standby, start)?;
         self.cartesian(2, "holder_above", &w.above, start)?;
@@ -2652,6 +2681,40 @@ impl<'a> Sequencer<'a> {
             )));
         }
         Ok(shifted)
+    }
+
+    /// Brings the arm to the standby the resumed leg begins at, before
+    /// the leg's first Cartesian step runs.
+    ///
+    /// `StartStep` says which step to run and nothing about where the
+    /// arm is. Inside a leg every step is Cartesian and aims at the pose
+    /// the step before it left, so entering a leg in the middle points a
+    /// straight line at a seat from wherever the arm happens to stand.
+    /// Each leg begins at a standby pose, and the standbys are the poses
+    /// a plan can reach -- the seat poses themselves read as inside the
+    /// convex stage parts ([`state_validity_note`]), which is why seat
+    /// entry is Cartesian in the first place.
+    ///
+    /// Free in a run that does not resume: `start` 0 asks for nothing,
+    /// and `move_planned` skips a move the arm is already at, so a leg
+    /// resumed from its own standby costs one `already at goal` line.
+    fn resume_approach(&mut self, start: i32, w: &RunWaypoints) -> Result<(), SequencerError> {
+        let Some(leg) = LegStandby::for_resume(start) else {
+            return Ok(());
+        };
+        let (goal, label) = match leg {
+            LegStandby::Rack => (&w.standby, "resume_approach: holder standby"),
+            LegStandby::Stage => (&w.sh_standby, "resume_approach: stage standby"),
+        };
+        log::info(&format!(
+            "Resuming at step {start}: planning to the leg's standby first"
+        ));
+        self.motion.move_planned(
+            goal,
+            self.config.sequence.velocity_scale,
+            self.config.sequence.acceleration_scale,
+            label,
+        )
     }
 
     // ---- step executors ------------------------------------------------
