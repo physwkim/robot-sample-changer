@@ -268,6 +268,11 @@ pub struct EpicsConfig {
     /// this one is never read by anything — it is prose for a person.
     #[serde(default = "default_status_pv")]
     pub status_pv: String,
+    /// Prefix of the per-seat occupancy records — `Stage`, `H1`..`H10`.
+    /// One prefix for the same reason as `null_prefix_pv`: eleven names
+    /// that `db/robot.db` adds and removes together.
+    #[serde(default = "default_seat_prefix_pv")]
+    pub seat_prefix_pv: String,
 }
 
 fn default_map_source_pv() -> String {
@@ -296,6 +301,10 @@ fn default_alive_pv() -> String {
 
 fn default_status_pv() -> String {
     "Robot:Status".into()
+}
+
+fn default_seat_prefix_pv() -> String {
+    "Robot:Seat:".into()
 }
 
 /// The level-tool path constraint (see [`SequenceConfig::level_tool`]).

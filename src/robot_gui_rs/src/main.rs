@@ -68,6 +68,8 @@ const GAP: f32 = 8.0;
 /// a clean rectangle. A `ui.group` on its own shrinks to its content,
 /// which is what left the panel looking like scattered boxes.
 const H_STATE: f32 = 248.0;
+/// The seat strip: one row of chips and its legend.
+const H_SEATS: f32 = 72.0;
 const H_RUN: f32 = 216.0;
 const H_MANUAL: f32 = 140.0;
 const H_HOLD: f32 = 132.0;
@@ -173,6 +175,9 @@ impl RobotGui {
             card(ui, egui::vec2(two, H_STATE), |ui| {
                 self.ops.null_status_group(ui)
             });
+        });
+        ui.horizontal_top(|ui| {
+            card(ui, egui::vec2(two, H_SEATS), |ui| self.ops.seats_group(ui));
         });
 
         ui.add_space(GAP);

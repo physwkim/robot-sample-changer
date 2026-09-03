@@ -85,7 +85,7 @@ Rust RsDM GUI (`src/robot_gui_rs`, 독립 cargo workspace) — rsdm/rsplot을
 빌드: `cd src/robot_gui_rs && cargo build --release`.
 
 `2_Robot_GUI.desktop` → `launch_robot_gui.sh` → `robot-gui <waypoints.yaml>`.
-탭 둘입니다 — **Operate**(State: 상태 + 그립 널 결과 / Run: 마운트·그립
+탭 둘입니다 — **Operate**(State: 상태 + 그립 널 결과 + 시트 / Run: 마운트·그립
 널·퍽 이동·그리퍼·Advanced)와 **Teach**(캘리브레이션 hold, jog + 누적·apply,
 오프셋·틸트 테이블). Teach 맨 위 **Calibration hold**가 홀더 N의 퍽을
 집어 그 시트 위(모드 1) 또는 스테이지 위(모드 2)에 세웁니다 — Apply가
@@ -119,7 +119,11 @@ State의 **그립 널 결과**는 `Robot:Null:` PV를 그대로 읽습니다 —
 
 Status의 **Doing** 줄이 `Robot:Status`입니다 — 데몬이 지금 하는 일,
 런이 멈췄으면 그 이유. 바로 위 Daemon 줄이 "듣고 있나"를 말하고 이
-줄이 "무엇을 하고 있나"를 말합니다.
+줄이 "무엇을 하고 있나"를 말합니다. 그 아래 **Seats** 카드는
+`Robot:Seat:*` 열한 개를 칩으로 그립니다 — 초록 = 퍽, 회색 = 빔,
+어두움 = 아직 아무도 안 봄(레코드가 없어도 같은 어두움이고, 툴팁이
+IOC 재시작을 지목합니다). 칩 아래 `last check —` 줄이 `Robot:Seat:Msg`
+입니다.
 
 Status에 **TCP 렌치가 실시간으로** 뜹니다(Force N / Torque Nm,
 각 축 + 크기). 소스는 ur-monitor-ioc의 `Robot:UR:Receive:ActualTCPForce`
@@ -244,6 +248,9 @@ ws/
 | Robot:State | longin | 데몬이 서 있는 루프 (0=Idle, 1=Running, 2=MeasWait, 3=Paused, 4=Hold) |
 | Robot:Alive | longin | 서비스 패스마다 +1 하는 하트비트 (Running 중에는 멈춤) |
 | Robot:Status | stringin | 데몬이 지금 하는 일 한 줄, 멈췄으면 그 이유 (39자) |
+| Robot:Seat:Stage | longin | 스테이지에 퍽이 있는지 (0=모름, 1=빔, 2=참) |
+| Robot:Seat:H1..H10 | longin | 홀더 1-10에 퍽이 있는지 (0=모름, 1=빔, 2=참) |
+| Robot:Seat:Msg | stringin | 마지막 시트 검사 한 줄 (39자) |
 | Robot:PauseStep | longin | 지정 스텝에서 일시정지 |
 | Robot:Gripper | bo | 그리퍼 명령 (0=Close, 1=Open) |
 | Robot:Gripper_RBV | bi | 그리퍼 상태 피드백 (0=Close, 1=Open) |
@@ -293,6 +300,31 @@ ws/
 메시지를 씁니다. 전문은 데몬 로그에 그대로 있습니다. autosave 대상이
 아닙니다 — 죽은 데몬의 상태를 복원해 보여주는 건 `Robot:State`가 막으려는
 바로 그 거짓말입니다.
+
+### Robot:Seat:* — 퍽이 어디 있나
+
+시트 11개(스테이지 + 홀더 1-10)마다 longin 하나: 0=모름, 1=빔, 2=참.
+**둘 다 관측이고 추측은 없습니다** —
+
+- `seat_check` 게이트가 시트에 들어가기 전에 읽은 판정. 스텝이 기대한
+  값과 달라 런이 멈추는 경우에도 **본 대로** 씁니다(그 시트가 바로
+  운전자가 봐야 할 시트라서).
+- 시퀀스 자신이 아는 것: 퍽을 들어올린 시트는 빔(스텝 5·16), 놓은
+  시트는 참(스텝 10·21). 재개로 **건너뛴 스텝은 쓰지 않습니다** — 그
+  런이 하지 않은 일이라서. 홀더 간 이동(모드 7)과 그립 널의 가져오기도
+  같은 두 지점에서 씁니다.
+
+`Robot:Seat:Msg`는 그 판정 **뒤에 있는 읽음**입니다 —
+`holder 3: occupied -4.5mm 71%`. 판정이 안 나오는 경우도 여기로 나갑니다
+(`check switched off`, `no camera IOC`, `no depth frame`,
+`not in the frame`, `unreadable, 7% valid`).
+지금까지 데몬 터미널에만 있던 줄이고, 멈춘 팔 앞에 선 사람은 거기를
+보고 있지 않습니다.
+
+아무도 가보지 않은 시트는 0(모름)으로 남습니다. 팔이 랙을 한 바퀴 돌며
+채우지 않고, 티칭 맵에서 지어낸 값은 정확히 이 레코드를 쓸모없게 만드는
+그 낡은 값입니다. autosave도 같은 이유로 안 합니다 — IOC 재시작 뒤에는
+아무도 안 본 게 맞고, 복원된 "참"은 그 사이 손으로 옮긴 퍽을 못 봅니다.
 
 ### Jog와 Jog Apply
 

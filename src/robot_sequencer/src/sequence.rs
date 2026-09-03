@@ -16,7 +16,9 @@ use std::time::Duration;
 use cspace_core::geometry::{Isometry3, Vector3};
 
 use crate::config::{CentringConfig, Config, GripNullConfig, SeatCheckConfig, SeatProbe};
-use crate::epics::{CalibMode, DaemonState, Epics, NullReport, NullState, VisionKind, WaitStatus};
+use crate::epics::{
+    CalibMode, DaemonState, Epics, NullReport, NullState, Occupancy, VisionKind, WaitStatus,
+};
 use crate::error::SequencerError;
 use crate::gripper::Gripper;
 use crate::handeye;
@@ -140,6 +142,16 @@ impl Seat {
         match self {
             Self::Stage => "the stage".into(),
             Self::Holder(h) => format!("holder {h}"),
+        }
+    }
+
+    /// How `Epics::publish_seat` names this seat: `None` is the stage,
+    /// `Some(h)` a rack well, which is the numbering `Robot:Holder`
+    /// already uses.
+    fn pv(self) -> Option<i32> {
+        match self {
+            Self::Stage => None,
+            Self::Holder(h) => Some(h),
         }
     }
 
@@ -831,6 +843,14 @@ impl<'a> Sequencer<'a> {
         self.cartesian(3, "holder_on_position", &on_c, start)?;
         self.hand(4, "close_gripper", false, start)?;
         self.cartesian(5, "holder_above_return", &above_c, start)?;
+        // The lift, not the close, is what empties a well: a run that
+        // stops between them leaves the puck in the seat with the
+        // fingers around it. Guarded on the step having run, since a
+        // resume that skipped it did not empty anything.
+        if start <= 5 {
+            self.epics
+                .publish_seat(Seat::Holder(holder).pv(), Occupancy::Empty);
+        }
         let d_grip =
             self.vision_correction(start <= 5, &above_c, VisionKind::GripOffset, "grip@rack")?;
         self.cartesian(6, "holder_retreat", &w.retreat, start)?;
@@ -856,6 +876,10 @@ impl<'a> Sequencer<'a> {
         self.cartesian(8, "sample_holder_above", &sh_above_c, start)?;
         self.cartesian(9, "sample_holder_on_position", &sh_on_c, start)?;
         self.hand(10, "open_gripper", true, start)?;
+        if start <= 10 {
+            self.epics
+                .publish_seat(Seat::Stage.pv(), Occupancy::Occupied);
+        }
         self.cartesian(11, "sample_holder_above_return", &sh_above_c, start)?;
         self.cartesian(12, "sample_holder_standby_return", &w.sh_standby, start)?;
         self.vision_seating_check(start <= 12, "seating@sample_holder")?;
@@ -903,6 +927,9 @@ impl<'a> Sequencer<'a> {
             self.cartesian(14, "sample_holder_on_position_2nd", &sh_on2_c, start)?;
             self.hand(15, "close_gripper_2nd", false, start)?;
             self.cartesian(16, "sample_holder_above_2nd_return", &sh_above2_c, start)?;
+            if start <= 16 {
+                self.epics.publish_seat(Seat::Stage.pv(), Occupancy::Empty);
+            }
             let d_grip2 = self.vision_correction(
                 start <= 16,
                 &sh_above2_c,
@@ -931,6 +958,10 @@ impl<'a> Sequencer<'a> {
             self.cartesian(19, "holder_above_final", &above_f_c, start)?;
             self.cartesian(20, "holder_on_position_final", &on_f_c, start)?;
             self.hand(21, "open_gripper_final", true, start)?;
+            if start <= 21 {
+                self.epics
+                    .publish_seat(Seat::Holder(holder).pv(), Occupancy::Occupied);
+            }
             self.cartesian(22, "holder_above_final_return", &above_f_c, start)?;
             self.cartesian(23, "holder_standby_final", &w.standby, start)?;
             self.vision_seating_check(start <= 23, "seating@rack")?;
@@ -1847,6 +1878,8 @@ impl<'a> Sequencer<'a> {
         self.cartesian(3, "holder_on_position", &w_s.on_pos, 0)?;
         self.hand(4, "close_gripper", false, 0)?;
         self.cartesian(5, "holder_above_return", &w_s.above, 0)?;
+        self.epics
+            .publish_seat(Seat::Holder(source).pv(), Occupancy::Empty);
         self.cartesian(6, "holder_retreat", &w_s.retreat, 0)?;
         // Planned from the source retreat rather than from a standby:
         // to the stage this is Normal's own step 7, and to a rack seat
@@ -1858,6 +1891,7 @@ impl<'a> Sequencer<'a> {
         self.cartesian(place[1].0, place[1].1, &t_above, 0)?;
         self.cartesian(place[2].0, place[2].1, &t_on, 0)?;
         self.hand(place[3].0, place[3].1, true, 0)?;
+        self.epics.publish_seat(target.pv(), Occupancy::Occupied);
         self.cartesian(place[4].0, place[4].1, &t_above, 0)?;
         self.cartesian(place[5].0, place[5].1, &t_standby, 0)?;
         Ok(())
@@ -2611,14 +2645,20 @@ impl<'a> Sequencer<'a> {
                 "  seat check @{label}: switched off (Robot:SeatCheck=Off) — the seat is \
                  not checked and the arm will trust the sequence"
             ));
+            self.epics
+                .publish_seat_message(&format!("{label}: check switched off"));
             return Ok(());
         }
         let Some(camera) = self.epics.depth_camera() else {
+            self.epics
+                .publish_seat_message(&format!("{label}: no camera IOC"));
             return Ok(());
         };
         let timeout = Duration::from_secs_f64(self.config.seat_check.timeout);
         // `depth_frame` has already said why on this path.
         let Some(frame) = self.epics.depth_frame(timeout) else {
+            self.epics
+                .publish_seat_message(&format!("{label}: no depth frame"));
             return Ok(());
         };
         let base_t_ee = self.model.fk(observe_from)?;
@@ -2629,12 +2669,18 @@ impl<'a> Sequencer<'a> {
                 "  seat check @{label}: the seat does not project into the frame from \
                  here — not checked"
             ));
+            self.epics
+                .publish_seat_message(&format!("{label}: not in the frame"));
             return Ok(());
         };
         if reading.verdict == Verdict::Unreadable {
             log::warn(&format!(
                 "  seat check @{label}: unreadable, only {:.0}% of the window carried a \
                  range — continuing without it",
+                reading.valid_fraction * 100.0
+            ));
+            self.epics.publish_seat_message(&format!(
+                "{label}: unreadable, {:.0}% valid",
                 reading.valid_fraction * 100.0
             ));
             return Ok(());
@@ -2652,6 +2698,27 @@ impl<'a> Sequencer<'a> {
             reading.window.r0,
             reading.window.r1
         ));
+        // The same line the log just wrote, cut to what the record
+        // holds: which seat, what it read, and how much of the window
+        // carried a range to read it from.
+        self.epics.publish_seat_message(&format!(
+            "{label}: {} {:+.1}mm {:.0}%",
+            reading.verdict.label(),
+            reading.delta_m * 1000.0,
+            reading.valid_fraction * 100.0
+        ));
+        // What the camera just saw, whether or not it is what the step
+        // wanted: the record says where the pucks are, and a seat that
+        // stopped a run is exactly the one an operator needs to see.
+        // `Unreadable` has already returned above; there is no opinion
+        // to publish on that path.
+        if let Some(seen) = match reading.verdict {
+            Verdict::Occupied => Some(Occupancy::Occupied),
+            Verdict::Empty => Some(Occupancy::Empty),
+            Verdict::Unreadable => None,
+        } {
+            self.epics.publish_seat(which.pv(), seen);
+        }
         if reading.verdict != expect.verdict() {
             return Err(SequencerError(format!(
                 "seat check @{label}: the seat reads {} and {} — the camera sees \

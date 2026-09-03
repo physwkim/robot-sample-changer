@@ -43,6 +43,20 @@ pub fn state_name(state: i64) -> &'static str {
     }
 }
 
+/// `Robot:Seat:*` labels, index == PV value. Plain longins like
+/// `Robot:State`, so the labels live here rather than in the database.
+///
+/// Zero is the state the records come up in and never one the daemon
+/// writes: it says nothing has looked at that seat, which only the
+/// database is in a position to claim.
+pub fn seat_state_name(value: i64) -> &'static str {
+    match value {
+        1 => "empty",
+        2 => "occupied",
+        _ => "nothing has looked there since the IOC started",
+    }
+}
+
 /// What the sequencer does at each `Robot:CurrentStep` value.
 pub fn step_name(step: i64) -> &'static str {
     match step {

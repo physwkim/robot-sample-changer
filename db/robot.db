@@ -353,3 +353,87 @@ record(stringin, "Robot:Status")
     field(DESC, "What the daemon is doing, 39 chars")
     field(VAL,  "no daemon")
 }
+
+# Where the pucks are, as far as the daemon knows: 0=Unknown, 1=Empty,
+# 2=Occupied, one record per seat (Stage plus the ten rack holders).
+#
+# Two things write them and both are observations, not guesses: the
+# camera seat check, which reads the seat it is about to enter, and the
+# sequence itself, which knows a seat is empty once it has lifted a puck
+# out of it and full once it has released one into it. A seat nothing
+# has visited stays Unknown -- the arm does not tour the rack to fill
+# this in, and a value invented from a taught map would be exactly the
+# stale reading that makes the record worse than nothing.
+#
+# longin like Robot:State, and for the same reason: the labels live in
+# the GUI. Deliberately NOT autosaved -- after an IOC restart nobody has
+# looked, and Unknown says that where a restored Occupied would claim a
+# puck that a hand may have moved in the meantime.
+record(longin, "Robot:Seat:Stage")
+{
+    field(DESC, "Stage seat 0=Unk 1=Empty 2=Occupied")
+    field(VAL,  "0")
+}
+record(longin, "Robot:Seat:H1")
+{
+    field(DESC, "Holder 1 0=Unk 1=Empty 2=Occupied")
+    field(VAL,  "0")
+}
+record(longin, "Robot:Seat:H2")
+{
+    field(DESC, "Holder 2 0=Unk 1=Empty 2=Occupied")
+    field(VAL,  "0")
+}
+record(longin, "Robot:Seat:H3")
+{
+    field(DESC, "Holder 3 0=Unk 1=Empty 2=Occupied")
+    field(VAL,  "0")
+}
+record(longin, "Robot:Seat:H4")
+{
+    field(DESC, "Holder 4 0=Unk 1=Empty 2=Occupied")
+    field(VAL,  "0")
+}
+record(longin, "Robot:Seat:H5")
+{
+    field(DESC, "Holder 5 0=Unk 1=Empty 2=Occupied")
+    field(VAL,  "0")
+}
+record(longin, "Robot:Seat:H6")
+{
+    field(DESC, "Holder 6 0=Unk 1=Empty 2=Occupied")
+    field(VAL,  "0")
+}
+record(longin, "Robot:Seat:H7")
+{
+    field(DESC, "Holder 7 0=Unk 1=Empty 2=Occupied")
+    field(VAL,  "0")
+}
+record(longin, "Robot:Seat:H8")
+{
+    field(DESC, "Holder 8 0=Unk 1=Empty 2=Occupied")
+    field(VAL,  "0")
+}
+record(longin, "Robot:Seat:H9")
+{
+    field(DESC, "Holder 9 0=Unk 1=Empty 2=Occupied")
+    field(VAL,  "0")
+}
+record(longin, "Robot:Seat:H10")
+{
+    field(DESC, "Holder 10 0=Unk 1=Empty 2=Occupied")
+    field(VAL,  "0")
+}
+
+# The last thing the seat check said, in one line: which seat, what it
+# read, how far that was from the seat's own range and how much of the
+# window carried one. The verdict alone is in Robot:Seat:* above; this
+# is the reading behind it, including the answers that are not a
+# verdict -- the check switched off, the seat outside the frame, too few
+# pixels to say. Those used to live only in the daemon's terminal, which
+# is not where the person looking at a stopped arm is.
+record(stringin, "Robot:Seat:Msg")
+{
+    field(DESC, "Last seat check reading, 39 chars")
+    field(VAL,  "")
+}

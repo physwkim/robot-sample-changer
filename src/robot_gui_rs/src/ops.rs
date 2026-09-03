@@ -8,7 +8,7 @@ use rsdm::widgets::RsdmLabel;
 use rsdm::{Channel, Engine, EngineError, PvValue};
 
 use crate::daemon::{DaemonWatch, HOLD, MEASUREMENT_WAIT, Tone};
-use crate::pvs::{MODE_NAMES, robot, step_name};
+use crate::pvs::{MODE_NAMES, robot, seat_state_name, step_name};
 
 /// An action that writes PVs. Everything that starts the sequencer goes
 /// through here so the busy confirmation cannot be bypassed.
@@ -100,6 +100,14 @@ pub struct OpsPanel {
     /// wait it is holding in, or why the last run stopped. Prose, not a
     /// gate -- nothing here is enabled or disabled from it.
     status: Channel,
+    /// Where the pucks are, `seats[0]` the stage and `seats[h]` holder
+    /// `h`, as the daemon last saw them (0=unknown, 1=empty,
+    /// 2=occupied).
+    seats: [Channel; 11],
+    /// The seat check's own last line: the reading behind a verdict, or
+    /// why there is no verdict -- switched off, out of frame, too few
+    /// pixels. Until now that only existed in the daemon's terminal.
+    seat_msg: Channel,
     wrench: Channel,
     null_state: Channel,
     null_iter: Channel,
@@ -143,6 +151,11 @@ fn sval(ch: &Channel) -> Option<String> {
 const GREEN: egui::Color32 = egui::Color32::from_rgb(0x4c, 0xaf, 0x50);
 const RED: egui::Color32 = egui::Color32::from_rgb(0xf4, 0x43, 0x36);
 const AMBER: egui::Color32 = egui::Color32::from_rgb(0xff, 0xb3, 0x00);
+/// The seat chips' two quiet backgrounds and the text on the dark one:
+/// a seat that has been looked at and is empty, and one that has not.
+const GRAY: egui::Color32 = egui::Color32::from_gray(0x55);
+const DARK: egui::Color32 = egui::Color32::from_gray(0x28);
+const DIM: egui::Color32 = egui::Color32::from_gray(0x88);
 
 /// Width of every card's label column. Set here rather than left to the
 /// content so the fields line up from one card to the next, not just
@@ -193,6 +206,20 @@ impl OpsPanel {
             gripper_rbv: RsdmLabel::new(engine, &robot("Gripper_RBV"))?,
             jog_target: ch("Jog:Target")?,
             status: ch("Status")?,
+            seats: [
+                ch("Seat:Stage")?,
+                ch("Seat:H1")?,
+                ch("Seat:H2")?,
+                ch("Seat:H3")?,
+                ch("Seat:H4")?,
+                ch("Seat:H5")?,
+                ch("Seat:H6")?,
+                ch("Seat:H7")?,
+                ch("Seat:H8")?,
+                ch("Seat:H9")?,
+                ch("Seat:H10")?,
+            ],
+            seat_msg: ch("Seat:Msg")?,
             // Served by ur-monitor-ioc off its own RTDE receive stream,
             // so reading it here costs the sequencer nothing.
             wrench: ch("UR:Receive:ActualTCPForce")?,
@@ -472,6 +499,61 @@ impl OpsPanel {
         ui.vertical(|ui| {
             ui.strong("Status");
             self.status_grid(ui);
+        });
+    }
+
+    /// Where the pucks are, as far as anything has looked.
+    ///
+    /// Two things fill this in and both are observations: the camera
+    /// seat check reading the seat the arm is about to enter, and the
+    /// sequence itself, which knows a well is empty once it has lifted
+    /// a puck out of it and full once it has released one into it. A
+    /// seat nothing has visited since the IOC came up reads as not
+    /// looked at, and says so rather than guessing from a taught map.
+    pub fn seats_group(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            ui.strong("Seats");
+            ui.horizontal_wrapped(|ui| {
+                for (index, channel) in self.seats.iter().enumerate() {
+                    let name = if index == 0 {
+                        "stage".to_string()
+                    } else {
+                        format!("{index}")
+                    };
+                    let live = channel.state().connected;
+                    let value = ival(channel).unwrap_or(0);
+                    let (fg, bg) = match value {
+                        2 if live => (egui::Color32::BLACK, GREEN),
+                        1 if live => (egui::Color32::WHITE, GRAY),
+                        _ => (DIM, DARK),
+                    };
+                    let tip = if live {
+                        seat_state_name(value)
+                    } else {
+                        "no Robot:Seat: record — restart the IOC"
+                    };
+                    ui.label(
+                        egui::RichText::new(format!(" {name} "))
+                            .monospace()
+                            .color(fg)
+                            .background_color(bg),
+                    )
+                    .on_hover_text(tip);
+                }
+            });
+            ui.label(
+                egui::RichText::new(
+                    "green = puck, grey = empty, dark = nothing has looked there yet",
+                )
+                .small(),
+            );
+            // The reading behind the chips, including the answers that
+            // never become a chip: the check switched off, the seat out
+            // of frame, too few pixels to say either way.
+            match sval(&self.seat_msg).filter(|s| !s.is_empty()) {
+                Some(line) => ui.label(egui::RichText::new(format!("last check — {line}")).small()),
+                None => ui.label(egui::RichText::new("last check — none yet").small()),
+            };
         });
     }
 

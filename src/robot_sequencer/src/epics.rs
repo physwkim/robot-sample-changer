@@ -162,6 +162,7 @@ pub struct Epics {
     null: Option<NullChannels>,
     state: Option<StateChannels>,
     status: Option<CaChannel>,
+    seats: Option<SeatChannels>,
     jog_total: Option<JogChannels>,
     depth: Option<DepthChannels>,
 }
@@ -187,6 +188,29 @@ struct DepthChannels {
 struct StateChannels {
     state: CaChannel,
     alive: CaChannel,
+}
+
+/// Where the pucks are: one record per seat, the stage and the ten rack
+/// holders, indexed here the way `Robot:Holder` numbers them.
+struct SeatChannels {
+    stage: CaChannel,
+    /// `holders[i]` is holder `i + 1`.
+    holders: [CaChannel; 10],
+    /// The reading behind the verdicts: what the check last saw, and
+    /// the answers that are not a verdict at all.
+    message: CaChannel,
+}
+
+/// What a seat holds, as published to `Robot:Seat:*`.
+///
+/// Unknown (the records' power-on 0) is deliberately absent: it means
+/// "nobody has looked since the IOC started", which is a statement only
+/// the database can make. The daemon publishes what it has seen, so a
+/// write of Unknown would be a claim it is not in a position to make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Occupancy {
+    Empty = 1,
+    Occupied = 2,
 }
 
 /// Which of the daemon's loops is running, published to `Robot:State`.
@@ -394,6 +418,28 @@ fn clip_stringin(line: &str) -> &str {
     &line[..end]
 }
 
+/// Connect the whole `Robot:Seat:` family, or none of it.
+///
+/// The stage record is probed first and its absence ends the attempt,
+/// so a database that predates the family costs one connect timeout
+/// instead of eleven. They are written into `db/robot.db` together,
+/// so one probe answers for all of them.
+fn seat_channels(
+    optional: &dyn Fn(&str) -> Option<CaChannel>,
+    prefix: &str,
+) -> Option<SeatChannels> {
+    let stage = optional(&format!("{prefix}Stage"))?;
+    let mut holders = Vec::with_capacity(10);
+    for holder in 1..=10 {
+        holders.push(optional(&format!("{prefix}H{holder}"))?);
+    }
+    Some(SeatChannels {
+        stage,
+        holders: holders.try_into().ok()?,
+        message: optional(&format!("{prefix}Msg"))?,
+    })
+}
+
 /// Connect the whole `Robot:Null:` family, or none of it.
 fn null_channels(
     optional: &dyn Fn(&str) -> Option<CaChannel>,
@@ -566,6 +612,7 @@ impl Epics {
             null: null_channels(&optional, &config.null_prefix_pv),
             state: state_channels(&optional, &config.state_pv, &config.alive_pv),
             status: optional(&config.status_pv),
+            seats: seat_channels(&optional, &config.seat_prefix_pv),
             jog_total: jog_channels(&optional, &config.jog_prefix_pv),
             depth,
             _client: client,
@@ -643,6 +690,47 @@ impl Epics {
         };
         if !self.put_str(channel, clip_stringin(line), GET_TIMEOUT) {
             log::warn(&format!("status: put of '{line}' failed"));
+        }
+    }
+
+    /// Publish the seat check's own last line -- the reading behind a
+    /// verdict, or the reason there is no verdict to publish.
+    pub fn publish_seat_message(&self, line: &str) {
+        let Some(seats) = &self.seats else {
+            return;
+        };
+        if !self.put_str(&seats.message, clip_stringin(line), GET_TIMEOUT) {
+            log::warn(&format!("seat status: put of '{line}' failed"));
+        }
+    }
+
+    /// Publish what one seat holds. `holder` is `None` for the stage and
+    /// `Some(1..=10)` for a rack well -- the numbering `Robot:Holder`
+    /// uses, so the caller has one mapping to keep straight and not two.
+    ///
+    /// A holder outside 1-10 is dropped with a warning rather than
+    /// clamped: the records name specific wells, and writing the wrong
+    /// one is worse than writing none.
+    pub fn publish_seat(&self, holder: Option<i32>, occupancy: Occupancy) {
+        let Some(seats) = &self.seats else {
+            return;
+        };
+        let channel = match holder {
+            None => &seats.stage,
+            Some(h) if (1..=10).contains(&h) => &seats.holders[(h - 1) as usize],
+            Some(h) => {
+                log::warn(&format!("seat status: holder {h} is not a rack well 1-10"));
+                return;
+            }
+        };
+        if !self.put_i32(channel, occupancy as i32, GET_TIMEOUT) {
+            log::warn(&format!(
+                "seat status: put of {occupancy:?} for {} failed",
+                match holder {
+                    None => "the stage".to_string(),
+                    Some(h) => format!("holder {h}"),
+                }
+            ));
         }
     }
 
