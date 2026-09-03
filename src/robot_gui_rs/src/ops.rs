@@ -376,7 +376,17 @@ impl OpsPanel {
     /// A trigger while `CurrentStep > 0` either interleaves with a live
     /// run or restarts an interrupted one — never silent. Recover always
     /// confirms: it moves the arm.
+    ///
+    /// Nothing is sent unless the daemon is standing at the idle wait.
+    /// Everything here starts a run, the idle wait is where a run
+    /// starts, and the daemon drops a trigger written anywhere else when
+    /// its next wait opens. The buttons are greyed for the same reason;
+    /// this is the check that a button added later cannot walk past.
     fn request(&mut self, action: Action) {
+        if let Some(why) = self.daemon.not_ready_for_a_run() {
+            self.note = format!("Not sent — {why}");
+            return;
+        }
         let busy = ival(&self.current_step).unwrap_or(0) > 0;
         if busy || matches!(action, Action::Recover) {
             self.pending = Some(action);
@@ -637,6 +647,9 @@ impl OpsPanel {
         // a carry that merely passed through it -- in all of which
         // Continue wrote a PV nobody was reading.
         let waiting = self.daemon.is(MEASUREMENT_WAIT);
+        // Why a run cannot be started this instant, if it cannot. The
+        // three buttons below and Recover all begin one.
+        let blocked = self.daemon.not_ready_for_a_run();
         let paused = ival(&self.stop).unwrap_or(0) != 0;
         ui.vertical(|ui| {
             ui.strong("Sample");
@@ -645,27 +658,33 @@ impl OpsPanel {
                 ui.add(egui::DragValue::new(&mut self.holder_sel).range(1..=10));
                 ui.end_row();
             });
-            if ui.button("Mount on stage").clicked() {
-                self.request(Action::Mount(self.holder_sel));
-            }
-            if ui.button("Return from stage").clicked() {
-                self.request(Action::Return(self.holder_sel));
-            }
-            // The way out of a seat check that stopped the run holding
-            // the puck -- the stage occupied before step 8, or the
-            // holder it came from occupied before step 19. Both leave
-            // the arm at a standby with the puck in the fingers, and
-            // both are answered by placing it somewhere else.
-            if ui
-                .button("Put carried puck in holder")
-                .on_hover_text(
-                    "For a run stopped because the seat it was about to fill is \
-                     occupied: places the puck the arm is holding into the holder \
-                     above, skipping the pick.",
-                )
-                .clicked()
-            {
-                self.request(Action::Divert(self.holder_sel));
+            ui.add_enabled_ui(blocked.is_none(), |ui| {
+                if ui.button("Mount on stage").clicked() {
+                    self.request(Action::Mount(self.holder_sel));
+                }
+                if ui.button("Return from stage").clicked() {
+                    self.request(Action::Return(self.holder_sel));
+                }
+                // The way out of a seat check that stopped the run
+                // holding the puck -- the stage occupied before step 8,
+                // or the holder it came from occupied before step 19.
+                // Both leave the arm at a standby with the puck in the
+                // fingers, and both are answered by placing it
+                // somewhere else.
+                if ui
+                    .button("Put carried puck in holder")
+                    .on_hover_text(
+                        "For a run stopped because the seat it was about to fill is \
+                         occupied: places the puck the arm is holding into the holder \
+                         above, skipping the pick.",
+                    )
+                    .clicked()
+                {
+                    self.request(Action::Divert(self.holder_sel));
+                }
+            });
+            if let Some(why) = &blocked {
+                ui.label(format!("({why})"));
             }
             ui.add_space(4.0);
             if waiting {
@@ -697,7 +716,10 @@ impl OpsPanel {
                     self.stop.put(PvValue::Int(1));
                     self.note = "Pause requested — stops after the current step".into();
                 }
-                if ui.button("Recover").clicked() {
+                if ui
+                    .add_enabled(blocked.is_none(), egui::Button::new("Recover"))
+                    .clicked()
+                {
                     self.request(Action::Recover);
                 }
             });
@@ -759,11 +781,18 @@ impl OpsPanel {
             } else {
                 "(fetched first; the target seat must be empty, and keeps the puck)"
             });
-            if ui.button("Null grip").clicked() {
+            let blocked = self.daemon.not_ready_for_a_run();
+            if ui
+                .add_enabled(blocked.is_none(), egui::Button::new("Null grip"))
+                .clicked()
+            {
                 self.request(Action::GripNull {
                     target: self.null_holder,
                     source: self.null_source,
                 });
+            }
+            if let Some(why) = &blocked {
+                ui.label(format!("({why})"));
             }
         });
     }
@@ -781,13 +810,14 @@ impl OpsPanel {
                 ui.end_row();
             });
             let same = self.xfer_src == self.xfer_target;
-            ui.label(if same {
-                "(pick two different holders)"
-            } else {
-                "(the seat is not probed)"
+            let blocked = self.daemon.not_ready_for_a_run();
+            ui.label(match (&blocked, same) {
+                (_, true) => "(pick two different holders)".to_string(),
+                (None, false) => "(the seat is not probed)".to_string(),
+                (Some(why), false) => format!("({why})"),
             });
             if ui
-                .add_enabled(!same, egui::Button::new("Move puck"))
+                .add_enabled(blocked.is_none() && !same, egui::Button::new("Move puck"))
                 .clicked()
             {
                 self.request(Action::Transfer {
@@ -849,6 +879,10 @@ impl OpsPanel {
     pub fn calib_hold_group(&mut self, ui: &mut egui::Ui) {
         let target = sval(&self.jog_target).unwrap_or_default();
         let holding = self.daemon.is(HOLD);
+        // Starting a hold is starting a run; ending one is the second
+        // trigger of the run already standing there, which is why only
+        // the left half of this card is gated on the idle wait.
+        let startable = self.daemon.not_ready_for_a_run();
         ui.vertical(|ui| {
             ui.strong("Calibration hold");
             ui.horizontal_top(|ui| {
@@ -862,26 +896,31 @@ impl OpsPanel {
                     // one: mode 1 and mode 2 differ only in where they stand
                     // afterwards. "Hold at holder N" read as though the field
                     // chose a source the stage button was free to ignore.
-                    ui.horizontal(|ui| {
-                        if ui
-                            .button(format!("Pick {}, hold there", self.hold_holder))
-                            .clicked()
-                        {
-                            self.request(Action::Hold {
-                                holder: self.hold_holder,
-                                at_stage: false,
-                            });
-                        }
-                        if ui
-                            .button(format!("Pick {}, hold at stage", self.hold_holder))
-                            .clicked()
-                        {
-                            self.request(Action::Hold {
-                                holder: self.hold_holder,
-                                at_stage: true,
-                            });
-                        }
+                    ui.add_enabled_ui(startable.is_none(), |ui| {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button(format!("Pick {}, hold there", self.hold_holder))
+                                .clicked()
+                            {
+                                self.request(Action::Hold {
+                                    holder: self.hold_holder,
+                                    at_stage: false,
+                                });
+                            }
+                            if ui
+                                .button(format!("Pick {}, hold at stage", self.hold_holder))
+                                .clicked()
+                            {
+                                self.request(Action::Hold {
+                                    holder: self.hold_holder,
+                                    at_stage: true,
+                                });
+                            }
+                        });
                     });
+                    if let Some(why) = &startable {
+                        ui.label(format!("({why})"));
+                    }
                 });
                 ui.separator();
                 ui.vertical(|ui| {
@@ -926,11 +965,18 @@ impl OpsPanel {
                 ui.label("Start step:");
                 ui.horizontal(|ui| {
                     ui.add(egui::DragValue::new(&mut self.adv_start).range(0..=23));
-                    if ui.button("Trigger").clicked() {
+                    let blocked = self.daemon.not_ready_for_a_run();
+                    if ui
+                        .add_enabled(blocked.is_none(), egui::Button::new("Trigger"))
+                        .clicked()
+                    {
                         self.request(Action::Advanced {
                             mode: self.adv_mode as i64,
                             start: self.adv_start,
                         });
+                    }
+                    if let Some(why) = &blocked {
+                        ui.label(format!("({why})"));
                     }
                 });
                 ui.end_row();

@@ -682,9 +682,8 @@ impl<'a> Sequencer<'a> {
     /// for.
     pub fn run(&mut self) -> Result<(), SequencerError> {
         loop {
-            self.set_state(DaemonState::Idle);
-            self.set_status(self.idle_status.clone());
-            let start_from_step = self.wait_for_trigger(None);
+            let start_from_step =
+                self.wait_for_trigger(DaemonState::Idle, self.idle_status.clone(), None);
             self.set_state(DaemonState::Running);
             self.sequence_count += 1;
 
@@ -715,8 +714,6 @@ impl<'a> Sequencer<'a> {
                 self.sequence_count
             ));
             log::info("========================================");
-
-            self.epics.write_wait(0);
 
             // A protective stop, pendant stop, or freedrive ends the
             // external-control program, and nothing moves until it is
@@ -987,9 +984,6 @@ impl<'a> Sequencer<'a> {
 
         let mut skip_remaining = false;
         if start <= 12 {
-            // Loaded=1 while the beamline measures the sample the arm just
-            // delivered; the measurement program flips Wait to continue.
-            self.epics.write_loaded(1);
             let wait_result = self.wait_for_measurement();
             if wait_result == WaitStatus::Skip {
                 log::info("Skip requested - skipping remaining steps (13-23)");
@@ -1267,9 +1261,7 @@ impl<'a> Sequencer<'a> {
         // already in the fingers, from wherever the operator carried it,
         // so which seat the arm is over is not something the daemon
         // knows here.
-        self.set_status("seat probe: trigger to probe here");
-        self.set_state(DaemonState::Hold);
-        self.wait_for_trigger(None);
+        self.wait_for_trigger(DaemonState::Hold, "seat probe: trigger to probe here", None);
         self.set_state(DaemonState::Running);
         let soft = self.seat_probe_here(self.config.probe.bore.seat_probe())?;
         log::info(
@@ -2402,13 +2394,11 @@ impl<'a> Sequencer<'a> {
         log::info("  Use JogX/Y/Z + JogStep to move the TCP");
         log::info("  Set Trigger=1 to start the capture from where the arm is");
         log::info("========================================");
-        self.set_status("hand-eye: aim, then trigger");
         // The same Hold every other jog-serving wait publishes. Without
         // it this loop reads the operator's jogs while `Robot:State`
         // still says Running, which is the GUI's word for "reads no
         // commands" -- so the jog buttons it services were greyed out.
-        self.set_state(DaemonState::Hold);
-        self.jog_hold(None);
+        self.enter_wait(DaemonState::Hold, "hand-eye: aim, then trigger", None);
         let mut next_probe = std::time::Instant::now();
         loop {
             if self.epics.read_trigger() > 0 {
@@ -2695,9 +2685,11 @@ impl<'a> Sequencer<'a> {
         // The hold's StartStep read is discarded: the return phase keeps
         // the original trigger's start_from_step for its skip logic, as
         // the C++ did.
-        self.set_status(format!("hold @{}: trigger to return", seat.label()));
-        self.set_state(DaemonState::Hold);
-        let _ = self.wait_for_trigger(Some(seat));
+        let _ = self.wait_for_trigger(
+            DaemonState::Hold,
+            format!("hold @{}: trigger to return", seat.label()),
+            Some(seat),
+        );
         self.set_state(DaemonState::Running);
     }
 
@@ -3226,11 +3218,16 @@ impl<'a> Sequencer<'a> {
     /// seat's trims move. Jogging from it is still serviced and still
     /// safe — every run opens by planning back to that same standby, so
     /// a jog at idle is undone by the next trigger.
-    fn wait_for_trigger(&mut self, apply_to: Option<Seat>) -> i32 {
+    fn wait_for_trigger(
+        &mut self,
+        state: DaemonState,
+        status: impl Into<String>,
+        apply_to: Option<Seat>,
+    ) -> i32 {
         log::info("========================================");
         log::info("Waiting for EPICS trigger...");
         log::info("========================================");
-        self.jog_hold(apply_to);
+        self.enter_wait(state, status, apply_to);
         loop {
             let value = self.epics.read_trigger();
             if value > 0 {
@@ -3271,9 +3268,11 @@ impl<'a> Sequencer<'a> {
         // No seat: the pause lands wherever `PauseStep` names, which is
         // as often a standby or a lift as a seat. Jogging works, an
         // apply has nowhere to go.
-        self.jog_hold(None);
-        self.set_status(format!("paused at step {current_step} - PauseStep"));
-        self.set_state(DaemonState::Paused);
+        self.enter_wait(
+            DaemonState::Paused,
+            format!("paused at step {current_step} - PauseStep"),
+            None,
+        );
         loop {
             // Only the literal 2 reads as Skip; 1, anything else, and a
             // failed read all answer Continue, so a dropped CA read
@@ -3304,9 +3303,18 @@ impl<'a> Sequencer<'a> {
         log::info("========================================");
         // The arm stands at the stage standby through this wait, not at
         // a seat, so jogging is serviced and an apply is refused.
-        self.jog_hold(None);
-        self.set_status("measuring - Wait=1 to continue");
-        self.set_state(DaemonState::MeasurementWait);
+        self.enter_wait(
+            DaemonState::MeasurementWait,
+            "measuring - Wait=1 to continue",
+            None,
+        );
+        // Loaded=1 while the beamline measures the sample the arm just
+        // delivered; the measurement program flips Wait to continue.
+        // Raised here rather than by the caller because it is the
+        // invitation to write `Wait`, and an invitation issued before
+        // the drain names a window in which the answer is cleared as
+        // stale.
+        self.epics.write_loaded(1);
         loop {
             match self.epics.read_wait() {
                 WaitStatus::Continue => {
@@ -3425,24 +3433,82 @@ impl<'a> Sequencer<'a> {
         result
     }
 
-    /// Opens a wait: zeroes the accumulator, points it at the seat this
-    /// wait stands at, and drops any apply request that arrived while
-    /// the arm was moving — a press made mid-trajectory is not a request
-    /// about the pose the arm ends at, and latching it would write the
-    /// next hold's target.
+    /// Opens a wait: drops the one-shot commands left over from the
+    /// moving that got here, points the jog accumulator at the seat this
+    /// wait stands at, and only then says the daemon is standing in it.
     ///
-    /// Zeroing here is what makes the total a trim. A hold begins at a
-    /// pose the daemon commanded, so "jogged since this hold opened" is
-    /// the displacement from that pose and nothing else; a total carried
-    /// in from an earlier wait would count jogs that the taught move in
-    /// between has already undone. This is the only zeroing point apart
-    /// from an apply consuming the total, so no step needs to remember
-    /// to clear it.
-    fn jog_hold(&mut self, seat: Option<Seat>) {
+    /// The order is the point. Everything a client may press is cleared
+    /// before `Robot:State` and `Robot:Status` invite the press, so a
+    /// command this wait acts on can only have been written while it was
+    /// standing. Every wait opens through here, which is what makes that
+    /// one sentence true of all of them instead of of the ones that
+    /// remembered.
+    ///
+    /// Zeroing the accumulator is what makes the total a trim. A hold
+    /// begins at a pose the daemon commanded, so "jogged since this hold
+    /// opened" is the displacement from that pose and nothing else; a
+    /// total carried in from an earlier wait would count jogs that the
+    /// taught move in between has already undone. This is the only
+    /// zeroing point apart from an apply consuming the total, so no step
+    /// needs to remember to clear it.
+    fn enter_wait(&mut self, state: DaemonState, status: impl Into<String>, seat: Option<Seat>) {
+        self.drain_commands();
         self.jog.mm = [0.0; 3];
         self.jog.seat = seat;
-        let _ = self.epics.take_jog_apply();
         self.publish_jog();
+        self.set_status(status);
+        self.set_state(state);
+    }
+
+    /// Drops every one-shot operator command still standing in the
+    /// records, so that only a press made while this wait is open can
+    /// act on it.
+    ///
+    /// The records outlive the moment they were written. The daemon
+    /// reads them in [`Sequencer::service_hold`], which does not run
+    /// while the arm moves, so a press made mid-trajectory sat latched
+    /// and was obeyed by whichever wait opened next -- in a context
+    /// nobody chose. `Trigger` is the worst of them: the moving run ends
+    /// by resetting `StartStep` to 0, so the trigger left behind used to
+    /// start a whole mount where a divert was asked for.
+    ///
+    /// The levels are deliberately left alone. `Stop`, `PauseStep` and
+    /// `SeatCheck` say what the operator wants to be true from now on
+    /// rather than "do this once", and clearing one here would be the
+    /// daemon answering a request by cancelling it.
+    ///
+    /// What it actually dropped is named in the log. On a rig with more
+    /// than one operator, "your press was thrown away" is not something
+    /// to leave silent -- the press had no effect either way, and the
+    /// only difference a line makes is whether anyone can tell.
+    fn drain_commands(&mut self) {
+        let mut dropped: Vec<&str> = Vec::new();
+        if self.epics.read_trigger() > 0 {
+            dropped.push("Trigger");
+        }
+        let _ = self.epics.write_trigger(0);
+        let _ = self.epics.write_wait(0);
+        let (jx, jy, jz) = self.epics.read_jog_request();
+        if jx != 0 || jy != 0 || jz != 0 {
+            dropped.push("a jog");
+        }
+        if self.epics.take_jog_apply() {
+            dropped.push("Jog:Apply");
+        }
+        // Executed on change rather than on value, so the baseline is
+        // the latch and re-reading it is the same drop as a write of 0.
+        let cmd = self.epics.read_gripper_cmd();
+        if cmd >= 0 && self.last_gripper_cmd >= 0 && cmd != self.last_gripper_cmd {
+            dropped.push("Gripper");
+        }
+        self.last_gripper_cmd = cmd;
+        if !dropped.is_empty() {
+            log::warn(&format!(
+                "Dropped {} written while the arm was moving. Press again now \
+                 that the daemon is standing here.",
+                dropped.join(", ")
+            ));
+        }
     }
 
     /// Clears the accumulator after an apply has written it, so a second

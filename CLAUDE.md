@@ -392,6 +392,33 @@ Target은 hold가 서 있는 시트이지 `Robot:Holder`가 아닙니다 — 모
 `Robot:State`를 쓰는 주인은 `set_state` 하나뿐이고, 항상 현재 beat와
 같이 씁니다.
 
+대기는 **열릴 때 명령 레코드를 비웁니다**(`enter_wait` →
+`drain_commands`). `Trigger`·`Wait`·`JogX/Y/Z`·`Jog:Apply`·`Gripper`
+다섯은 "한 번 하라"는 명령이라, 팔이 움직이는 동안 쓰인 값이 레코드에
+남아 있으면 **다음에 열리는 아무 대기나** 그걸 집어 실행합니다 — 아무도
+그 맥락을 고르지 않았습니다. 제일 나쁜 건 `Trigger`입니다: 돌던 런은
+끝나면서 `StartStep`을 0으로 되돌리므로, 남아 있던 트리거는 divert를
+요청한 자리에서 **마운트 한 판을 새로 띄웁니다**. 비우는 것은 상태를
+발행하기 **전**입니다 — 비우고 나서 "여기 서 있다"고 말해야 그 말을
+보고 누른 것만 읽힙니다(`Loaded=1`도 같은 이유로 measurement wait 안,
+비운 뒤에 섭니다).
+
+버린 것은 **로그에 이름을 적습니다**("Dropped Trigger, Gripper written
+while the arm was moving"). 사람이 둘인 장비에서 "당신이 누른 건
+버려졌다"를 말없이 넘길 이유가 없습니다.
+
+레벨은 건드리지 않습니다 — `Stop`·`PauseStep`·`SeatCheck`는 "지금부터
+이렇게 두라"는 값이지 한 번 하라가 아니라서, 대기가 지우면 요청을
+취소하는 셈이 됩니다.
+
+GUI도 같은 규칙입니다: **런을 시작하는** 버튼(Mount·Return·퍽
+옮기기·그립 널·hold 시작·Advanced·Recover)은 데몬이 **idle 대기에 서
+있을 때만** 눌리고, 회색일 때는 옆에 이유가 붙습니다. hold를 끝내는 두
+번째 Trigger는 그 hold가 서 있을 때만 눌리므로 그대로입니다. 구 Python
+GUI도 `Robot:State`/`Alive`를 읽어 같은 자리에서 거절합니다 — 다만 그
+레코드가 없는 구 IOC db에서는 예전처럼 그냥 보냅니다(없는 라벨 때문에
+폴백 GUI를 못 쓰게 만들 이유가 없습니다).
+
 ### Robot:Loaded PV
 
 측정 프로그램 연동용. Step 12 완료 후 measurement wait 시작 시 `Loaded=1`,

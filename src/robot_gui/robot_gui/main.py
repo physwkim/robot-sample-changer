@@ -171,6 +171,27 @@ class RobotControlMainWindow(qt.QMainWindow):
     def _on_loaded_changed(self, loaded):
         self.control_panel.status_display.set_loaded(loaded)
 
+    def _ready_or_say(self, action):
+        """Whether the daemon can take a new run right now, saying so
+        when it cannot. True = go.
+
+        The daemon reads Robot:Trigger at the idle wait and drops what
+        it finds in the record when any other wait opens, so a press
+        made while it is moving is not queued — it is discarded. This
+        says that instead of leaving the operator watching an arm that
+        never answers.
+        """
+        why = self.epics_handler.not_ready_for_a_run()
+        if why is None:
+            return True
+        qt.QMessageBox.information(
+            self, "Not sent",
+            f"{action} was not sent: {why}.\n\n"
+            "The daemon drops a trigger written while it is busy, so "
+            "nothing would happen. Try again once it is idle.",
+        )
+        return False
+
     def _confirm_if_busy(self, action):
         """A trigger while CurrentStep > 0 either interleaves with a live
         run or restarts an interrupted one — never silent. True = go."""
@@ -188,7 +209,8 @@ class RobotControlMainWindow(qt.QMainWindow):
         return answer == qt.QMessageBox.Yes
 
     def _mount(self, holder_num):
-        if not self._confirm_if_busy(f"Mount holder {holder_num}"):
+        action = f"Mount holder {holder_num}"
+        if not self._ready_or_say(action) or not self._confirm_if_busy(action):
             return
         eh = self.epics_handler
         eh.set_holder(holder_num)
@@ -200,7 +222,8 @@ class RobotControlMainWindow(qt.QMainWindow):
         self.status_bar.showMessage(f"Mounting holder {holder_num} on the stage...")
 
     def _return(self, holder_num):
-        if not self._confirm_if_busy(f"Return the sample to holder {holder_num}"):
+        action = f"Return the sample to holder {holder_num}"
+        if not self._ready_or_say(action) or not self._confirm_if_busy(action):
             return
         eh = self.epics_handler
         eh.set_holder(holder_num)
@@ -218,7 +241,8 @@ class RobotControlMainWindow(qt.QMainWindow):
         )
 
     def _map_holder(self, holder_num, source):
-        if not self._confirm_if_busy(f"Map holder {holder_num}"):
+        action = f"Map holder {holder_num}"
+        if not self._ready_or_say(action) or not self._confirm_if_busy(action):
             return
         eh = self.epics_handler
         eh.set_holder(holder_num)
@@ -234,6 +258,8 @@ class RobotControlMainWindow(qt.QMainWindow):
         )
 
     def _recover(self):
+        if not self._ready_or_say("Recover"):
+            return
         answer = qt.QMessageBox.question(
             self, "Recover",
             "Unlock a protective stop if any, resend the robot program, and\n"
@@ -251,7 +277,7 @@ class RobotControlMainWindow(qt.QMainWindow):
         self.status_bar.showMessage("Recovering to holder standby...")
 
     def _advanced_trigger(self, mode, start_step):
-        if not self._confirm_if_busy("Trigger"):
+        if not self._ready_or_say("Trigger") or not self._confirm_if_busy("Trigger"):
             return
         eh = self.epics_handler
         eh.set_calib_mode(mode)

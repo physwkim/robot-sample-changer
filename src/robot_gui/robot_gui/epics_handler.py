@@ -1,7 +1,18 @@
 """EPICS PV Handler using pyepics."""
 
+import time
+
 import epics
 from silx.gui import qt
+
+# Robot:State codes. The daemon's DaemonState owns the numbering.
+STATE_NAMES = {
+    0: "idle",
+    1: "running",
+    2: "measurement wait",
+    3: "paused",
+    4: "hold",
+}
 
 
 class EpicsHandler(qt.QObject):
@@ -38,12 +49,30 @@ class EpicsHandler(qt.QObject):
         'jog_y': 'Robot:JogY',
         'jog_z': 'Robot:JogZ',
         'jog_step': 'Robot:JogStep',
+        'state': 'Robot:State',
+        'alive': 'Robot:Alive',
     }
+
+    # Records the sequencer publishes only where the IOC serves them.
+    # An IOC still running an older db/robot.db has neither, and the
+    # daemon runs perfectly well against it -- so their absence must not
+    # read as "this GUI is disconnected", and must not take the run
+    # buttons with it.
+    OPTIONAL_PVS = ('state', 'alive')
+
+    # How long Robot:Alive may stand still before a daemon that promised
+    # beats is treated as gone. It beats every service pass, 10 Hz in
+    # every standing loop, so this is twenty missed beats.
+    BEAT_STALE_S = 2.0
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.pvs = {}
         self.connected = False
+        # The last Robot:Alive value seen and when this GUI saw it, by
+        # its own clock: the IOC's timestamp would need the two hosts to
+        # agree, and what is being measured is "did an update arrive".
+        self._beat = None
         self._connection_timer = qt.QTimer(self)
         self._connection_timer.timeout.connect(self._check_connection)
 
@@ -80,11 +109,20 @@ class EpicsHandler(qt.QObject):
         }
 
         def callback(pvname=None, value=None, **kwargs):
-            if value is not None and name in signal_map:
+            if value is None:
+                return
+            if name == 'alive':
+                self._note_beat(int(value))
+            if name in signal_map:
                 # Use Qt's thread-safe signal emission
                 signal_map[name].emit(int(value))
 
         return callback
+
+    def _note_beat(self, value):
+        """Record when Robot:Alive last changed."""
+        if self._beat is None or self._beat[0] != value:
+            self._beat = (value, time.monotonic())
 
     def _connection_callback(self, pvname=None, conn=None, **kwargs):
         """Handle connection state changes."""
@@ -95,11 +133,55 @@ class EpicsHandler(qt.QObject):
         if not self.pvs:
             return
 
-        all_connected = all(pv.connected for pv in self.pvs.values())
+        all_connected = all(
+            pv.connected
+            for name, pv in self.pvs.items()
+            if name not in self.OPTIONAL_PVS
+        )
 
         if all_connected != self.connected:
             self.connected = all_connected
             self.connection_changed.emit(all_connected)
+
+    def not_ready_for_a_run(self):
+        """Why a trigger cannot start a run right now, or None when it
+        can.
+
+        A run begins at the idle trigger wait and nowhere else: the
+        daemon reads Robot:Trigger there, and drops whatever it finds in
+        the record when any other wait opens. So a press made while the
+        arm is moving, or while a measurement wait is standing, writes a
+        record nobody will read.
+
+        Robot:State names the loop and Robot:Alive counts its service
+        passes; neither alone is enough, since a state that is not being
+        re-stamped is the stale reading this exists to catch.
+        """
+        pv = self.pvs.get('state')
+        value = pv.get() if pv is not None and pv.connected else None
+        if value is None:
+            # No record to ask (see OPTIONAL_PVS). Nothing is known
+            # about the daemon here, so nothing is claimed: refusing
+            # would take the fallback GUI down over a missing label.
+            return None
+        state = int(value)
+        if state == 1:
+            return "the daemon is moving and reads no commands until it stops"
+        beating = (
+            self._beat is not None
+            and time.monotonic() - self._beat[1] < self.BEAT_STALE_S
+        )
+        if not beating:
+            return (
+                "the daemon is not responding — it last said "
+                f"{STATE_NAMES.get(state, state)}"
+            )
+        if state != 0:
+            return (
+                "a run starts at the idle wait, and the daemon is in the "
+                f"{STATE_NAMES.get(state, state)}"
+            )
+        return None
 
     def get_value(self, name):
         """Get current value using pyepics."""

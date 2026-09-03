@@ -28,6 +28,7 @@ const BEAT_STALE: Duration = Duration::from_secs(2);
 
 /// `Robot:State` codes this GUI acts on. The daemon's `DaemonState`
 /// owns the numbering.
+pub const IDLE: i64 = 0;
 pub const RUNNING: i64 = 1;
 pub const MEASUREMENT_WAIT: i64 = 2;
 pub const HOLD: i64 = 4;
@@ -87,6 +88,25 @@ impl DaemonWatch {
     /// True when the daemon is standing in `code` and servicing it.
     pub fn is(&self, code: i64) -> bool {
         self.read() == Presence::Listening(code)
+    }
+
+    /// Why a trigger cannot start a run right now, or `None` when it
+    /// can.
+    ///
+    /// A run begins at the idle trigger wait and nowhere else. The
+    /// daemon reads `Robot:Trigger` there, and drops whatever it finds
+    /// in the record when any other wait opens -- so a start button
+    /// offered from a measurement wait, or from the middle of a
+    /// trajectory, writes a record nobody will read.
+    pub fn not_ready_for_a_run(&self) -> Option<String> {
+        match self.read() {
+            Presence::Listening(IDLE) => None,
+            Presence::Listening(s) => Some(format!(
+                "a run starts at the idle wait — the daemon is in the {}",
+                state_name(s)
+            )),
+            _ => Some(self.note()),
+        }
     }
 
     /// Why a control is greyed, in the words the status row uses.
