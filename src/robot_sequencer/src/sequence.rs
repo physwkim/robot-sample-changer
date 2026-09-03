@@ -555,6 +555,34 @@ impl<'a> Sequencer<'a> {
                 continue;
             }
 
+            // Every leg of a seat-entering mode begins one of two ways:
+            // picking, which needs the fingers open, or carrying, which
+            // needs them shut on a puck. Fingers shut on nothing are
+            // neither, and the next steps drive them into a seat that
+            // may well have a puck in it. Two ordinary things leave them
+            // there — a `StartStep` resume skips the open that would
+            // have prepared them (the return-from-stage entry at step 7
+            // skips step 0), and the GUI's manual Close does it outright.
+            //
+            // Refused before the run's first motion rather than repaired:
+            // opening the fingers is the operator's call, since the
+            // daemon cannot know whether what they are shut on matters,
+            // and a run that started by moving the arm is exactly what
+            // this is here to prevent.
+            if calib_mode.enters_a_seat()
+                && let Some(width) = self.gripper.empty_close()
+            {
+                log::error(&format!(
+                    "Sequence #{} not started: the fingers are shut on nothing \
+                     ({:.1} mm) and mode {mode_name} drives them into a seat. \
+                     Open the gripper (GUI Gripper: Open) and trigger again.",
+                    self.sequence_count,
+                    width * 1000.0
+                ));
+                log::error("Nothing moved; CurrentStep and StartStep kept.");
+                continue;
+            }
+
             log::info("Reloading waypoints from YAML...");
             let waypoints = match WaypointData::load(&self.config.sequence.waypoints_yaml) {
                 Ok(data) => data,

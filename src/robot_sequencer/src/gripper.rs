@@ -254,11 +254,15 @@ impl Gripper {
         self.reach_tolerance
     }
 
-    /// After a close: `Some(settled_m)` when the fingers came to rest
-    /// narrower than `min_grip_position`, i.e. on each other rather than
-    /// on a puck. Only meaningful on the real gripper — the simulated
-    /// backend reaches the commanded position exactly, so it always
-    /// answers `None` — and only when the threshold is configured.
+    /// `Some(settled_m)` when the fingers are shut narrower than
+    /// `min_grip_position`, i.e. on each other rather than on a puck.
+    ///
+    /// A width test, not a history: a close step asks it about the close
+    /// it just made, and the run gate asks it about fingers a manual
+    /// Close or a skipped open left shut. Only meaningful on the real
+    /// gripper — the simulated backend reaches the commanded position
+    /// exactly, so it always answers `None` — and only when the
+    /// threshold is configured.
     pub fn empty_close(&self) -> Option<f64> {
         if matches!(self.backend, Backend::Simulated { .. }) || self.min_grip_position <= 0.0 {
             return None;
