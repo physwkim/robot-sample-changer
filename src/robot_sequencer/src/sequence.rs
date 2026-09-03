@@ -144,59 +144,63 @@ struct RunRequest {
     map_source: i32,
 }
 
-/// What a run's first leg does with the fingers, and so what has to be
-/// between them before it starts.
+/// What must be between the pads before a step of the script runs.
 ///
-/// The step script alternates: a pick leg descends into a seat and
-/// closes on what is there, a carry leg walks a gripped puck to a seat
-/// and opens. Which one a run begins with is decided by its mode and
-/// `StartStep` together, and three of the four wrong pairings used to
-/// run anyway. Only "shut on nothing" was refused, and it is not the
-/// one an operator meets: Mount pressed while the fingers still hold
-/// the puck a stopped run left in them opens those fingers wherever the
-/// arm stands, and the return errand at step 13 walks a held puck down
-/// into the stage seat the gate has just confirmed is occupied.
+/// The step numbering is shared across the modes by construction --
+/// `carry_puck` places at 7-12 and 18-23 for exactly that reason -- so
+/// this is one rule over step numbers: the fingers are empty on the way
+/// to a pick and after a release, and hold the puck from the close that
+/// took it to the open that puts it down.
+///
+/// Named for the requirement and not for the leg, because the leg is
+/// not what a step needs. Steps 11-12 belong to the leg that places at
+/// the stage and run *after* its release, with the fingers empty; a
+/// table that read "the stage-place leg carries" refused the resume at
+/// the retreat that a protective stop there asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EntryLeg {
-    /// Descends into a seat and closes: nothing may be in the fingers.
-    Pick,
-    /// Carries a puck to a seat and opens: one must be.
-    Carry,
+enum Hands {
+    /// Nothing between the pads: the approach to a pick, and the
+    /// retreat that follows a release.
+    Free,
+    /// The puck.
+    Full,
 }
 
-/// A refused run, in the two lengths it has to be said in: the line
-/// `Robot:Status` holds and the paragraph the daemon log gets.
+/// A refused step, in the two lengths it has to be said in: the line
+/// `Robot:Status` holds and the paragraph the daemon log gets, plus the
+/// one thing the operator can do about it.
 struct Refusal {
     status: &'static str,
     detail: String,
+    advice: &'static str,
 }
 
-impl EntryLeg {
-    /// Which leg a run of `mode` entered at `start` begins with, `None`
-    /// when it enters no seat or when `start` is past the last step of
-    /// its script, where nothing runs at all.
+impl Hands {
+    /// What step `step` of `mode`'s script needs before it runs, `None`
+    /// where the mode enters no seat at all or where `step` is past the
+    /// end of the script and nothing runs.
     ///
-    /// The step numbering is shared across the modes by construction --
-    /// `carry_puck` places at 7-12 and 18-23 for exactly that reason --
-    /// so this reads as one table over the script, the way
-    /// [`LegStandby::for_resume`] does.
-    fn for_run(mode: CalibMode, start: i32) -> Option<Self> {
+    /// Asked twice: of a run's `StartStep` before anything moves, and of
+    /// every step as it starts, because the fingers can change in any
+    /// wait the daemon services.
+    fn before_step(mode: CalibMode, step: i32) -> Option<Self> {
         match mode {
-            // Both refuse any start but 0 themselves, and both begin at
-            // their source seat with the fingers opened.
-            CalibMode::GripNull | CalibMode::HolderTransfer => Some(Self::Pick),
-            // One pick and one place, with a jog hold between them that
-            // stands there holding the puck.
-            CalibMode::Holder | CalibMode::SampleHolder => match start {
-                ..=4 => Some(Self::Pick),
-                5..=23 => Some(Self::Carry),
+            // The Normal script, which both errand modes reuse whole:
+            // `carry_puck` picks at 0-5 and places at 7-12 or 18-23, and
+            // a grip-null iteration picks at 0-5 and places at 20-23.
+            // The bands end at the release, not at the end of the leg.
+            CalibMode::Normal | CalibMode::GripNull | CalibMode::HolderTransfer => match step {
+                ..=4 | 11..=15 | 22..=23 => Some(Self::Free),
+                5..=10 | 16..=21 => Some(Self::Full),
                 _ => None,
             },
-            // Two of each: 0-4 picks at the rack, 5-12 carries to the
-            // stage, 13-15 picks it back up, 16-23 carries to the rack.
-            CalibMode::Normal => match start {
-                ..=4 | 13..=15 => Some(Self::Pick),
-                5..=12 | 16..=23 => Some(Self::Carry),
+            // One pick and one place with a jog hold between them, so
+            // the puck stays in the fingers across the whole middle of
+            // the numbering: 0-5 then 20-23 at a holder, 0-8 then 16-23
+            // at the stage.
+            CalibMode::Holder | CalibMode::SampleHolder => match step {
+                ..=4 | 22..=23 => Some(Self::Free),
+                5..=21 => Some(Self::Full),
                 _ => None,
             },
             // The three ways out of a run that has already gone wrong,
@@ -210,40 +214,47 @@ impl EntryLeg {
         }
     }
 
-    /// Why this leg cannot start on `fingers`, or `None` when they suit
-    /// it. Both refusals an operator can act on say what to press.
+    /// Why `fingers` cannot run a step that needs `self`, or `None` when
+    /// they suit it.
+    ///
+    /// Each says what is between the pads and what the step would do
+    /// with it, in words that hold wherever the question is asked: a run
+    /// refused before it moved and a run stopped at step 21 have the
+    /// same three faults and the same three answers.
     fn refuses(self, fingers: Fingers) -> Option<Refusal> {
         match (self, fingers) {
             (_, Fingers::Empty(w)) => Some(Refusal {
-                status: "not started: fingers shut on nothing",
+                status: "fingers shut on nothing",
                 detail: format!(
-                    "the fingers are shut on nothing ({:.1} mm) and this run drives \
-                     them into a seat. Open the gripper (GUI Gripper: Open) and \
-                     trigger again.",
+                    "the fingers are shut on nothing ({:.1} mm), and the steps from \
+                     here drive them into a seat",
                     w * 1000.0
                 ),
+                advice: "Open the gripper (GUI Gripper: Open).",
             }),
-            (Self::Pick, Fingers::Holding(w)) => Some(Refusal {
-                status: "not started: the fingers hold a puck",
+            (Self::Free, Fingers::Holding(w)) => Some(Refusal {
+                status: "the fingers hold a puck",
                 detail: format!(
-                    "the fingers are holding something ({:.1} mm) and this run begins \
-                     by picking: it would open them wherever the arm is standing, or \
-                     take them down into the seat it means to pick from. Put the puck \
-                     down first (GUI Sample: \"Put carried puck in holder\"); if the \
-                     fingers are on nothing, open the gripper.",
+                    "the fingers are holding something ({:.1} mm) and the step ahead \
+                     needs them empty: it would open them wherever the arm is \
+                     standing, or take them down into the seat it means to pick from",
                     w * 1000.0
                 ),
+                advice: "Put the puck down first (GUI Sample: \"Put carried puck in \
+                         holder\"); if the fingers are on nothing, open the gripper.",
             }),
-            (Self::Carry, Fingers::Open(w)) => Some(Refusal {
-                status: "not started: nothing in the fingers",
+            (Self::Full, Fingers::Open(w)) => Some(Refusal {
+                status: "nothing in the fingers",
                 detail: format!(
-                    "the fingers are open ({:.1} mm) and this run begins by placing: \
-                     there is nothing to put down, and the release would record the \
-                     seat as filled. Start from the pick instead (StartStep 0).",
+                    "the fingers are open ({:.1} mm) and the step ahead needs the \
+                     puck: there is nothing to put down, and the release would \
+                     record the seat as filled",
                     w * 1000.0
                 ),
+                advice: "The puck is not where the run believes it is; find it before \
+                         resuming.",
             }),
-            (Self::Pick, Fingers::Open(_)) | (Self::Carry, Fingers::Holding(_)) => None,
+            (Self::Free, Fingers::Open(_)) | (Self::Full, Fingers::Holding(_)) => None,
         }
     }
 }
@@ -740,8 +751,8 @@ impl<'a> Sequencer<'a> {
                 continue;
             }
 
-            // The leg this run begins with says what must be between
-            // the pads, and the width says what is. Both halves of the
+            // What the run's first step needs between the pads, against
+            // what the width says is there. Both halves of the
             // disagreement are ordinary: a `StartStep` resume skips the
             // open that would have prepared the fingers (the
             // return-from-stage entry at step 13 skips step 0) and the
@@ -753,16 +764,16 @@ impl<'a> Sequencer<'a> {
             // repaired: what to do with a puck the arm is holding is the
             // operator's decision, and a run that started by moving the
             // arm is exactly what this is here to prevent.
-            if let Some(leg) = EntryLeg::for_run(calib_mode, start_from_step)
+            if let Some(needs) = Hands::before_step(calib_mode, start_from_step)
                 && let Some(fingers) = self.gripper.fingers()
-                && let Some(refusal) = leg.refuses(fingers)
+                && let Some(refusal) = needs.refuses(fingers)
             {
                 log::error(&format!(
-                    "Sequence #{} not started: {}",
-                    self.sequence_count, refusal.detail
+                    "Sequence #{} not started: {}. {}",
+                    self.sequence_count, refusal.detail, refusal.advice
                 ));
                 log::error("Nothing moved; CurrentStep and StartStep kept.");
-                self.idle_status = refusal.status.into();
+                self.idle_status = format!("not started: {}", refusal.status);
                 continue;
             }
 
@@ -3893,8 +3904,8 @@ mod tests {
 
     /// Every mode is classified, and the three that are not are the
     /// three an operator reaches for when a run has already gone wrong.
-    /// A mode added without deciding fails to compile in `for_run`; one
-    /// reclassified by accident fails here.
+    /// A mode added without deciding fails to compile in `before_step`;
+    /// one reclassified by accident fails here.
     #[test]
     fn the_modes_that_enter_a_seat_are_the_ones_the_fingers_gate_covers() {
         for mode in [
@@ -3905,53 +3916,73 @@ mod tests {
             CalibMode::HolderTransfer,
         ] {
             assert!(
-                EntryLeg::for_run(mode, 0).is_some(),
+                Hands::before_step(mode, 0).is_some(),
                 "{mode:?} must be gated"
             );
         }
         for mode in [CalibMode::Recover, CalibMode::HandEye, CalibMode::SeatProbe] {
             assert!(
-                EntryLeg::for_run(mode, 0).is_none(),
+                Hands::before_step(mode, 0).is_none(),
                 "{mode:?} must stay ungated"
             );
         }
     }
 
     /// One case per boundary of the step script, not one per errand:
-    /// what the table has to get right is where a pick turns into a
-    /// carry, and the Normal run turns twice.
+    /// what the table has to get right is where the fingers take the
+    /// puck and where they let go of it, and the Normal script does
+    /// each twice.
     #[test]
-    fn each_entry_step_names_what_must_be_in_the_fingers() {
-        let normal = |start| EntryLeg::for_run(CalibMode::Normal, start);
-        assert_eq!(normal(0), Some(EntryLeg::Pick), "mount, from the top");
-        assert_eq!(normal(4), Some(EntryLeg::Pick), "the rack close");
-        assert_eq!(normal(5), Some(EntryLeg::Carry), "the lift out");
-        assert_eq!(normal(12), Some(EntryLeg::Carry));
-        assert_eq!(normal(13), Some(EntryLeg::Pick), "the return errand");
-        assert_eq!(normal(15), Some(EntryLeg::Pick), "the stage close");
-        assert_eq!(normal(16), Some(EntryLeg::Carry));
-        assert_eq!(normal(18), Some(EntryLeg::Carry), "the divert");
-        assert_eq!(normal(23), Some(EntryLeg::Carry));
+    fn each_step_names_what_must_be_in_the_fingers() {
+        let normal = |step| Hands::before_step(CalibMode::Normal, step);
+        assert_eq!(normal(0), Some(Hands::Free), "mount, from the top");
+        assert_eq!(normal(4), Some(Hands::Free), "the rack close");
+        assert_eq!(normal(5), Some(Hands::Full), "the lift out");
+        assert_eq!(normal(10), Some(Hands::Full), "the stage release");
+        assert_eq!(normal(11), Some(Hands::Free), "the retreat after it");
+        assert_eq!(normal(12), Some(Hands::Free));
+        assert_eq!(normal(13), Some(Hands::Free), "the return errand");
+        assert_eq!(normal(15), Some(Hands::Free), "the stage close");
+        assert_eq!(normal(16), Some(Hands::Full));
+        assert_eq!(normal(18), Some(Hands::Full), "the divert");
+        assert_eq!(normal(21), Some(Hands::Full), "the rack release");
+        assert_eq!(normal(22), Some(Hands::Free), "the retreat after it");
+        assert_eq!(normal(23), Some(Hands::Free));
         assert_eq!(normal(24), None, "past the script, nothing runs");
-        // The calibration holds pick once and place once, so they turn
-        // at the close and never turn back.
-        let hold = |start| EntryLeg::for_run(CalibMode::SampleHolder, start);
-        assert_eq!(hold(4), Some(EntryLeg::Pick));
-        assert_eq!(hold(13), Some(EntryLeg::Carry), "still carrying there");
-        assert_eq!(hold(23), Some(EntryLeg::Carry));
+        // The calibration holds take the puck once and put it down
+        // once, so the middle of the numbering is one long carry --
+        // the stage hold's own steps 16-18 are part of it.
+        let hold = |step| Hands::before_step(CalibMode::SampleHolder, step);
+        assert_eq!(hold(4), Some(Hands::Free));
+        assert_eq!(hold(5), Some(Hands::Full));
+        assert_eq!(hold(16), Some(Hands::Full), "still carrying there");
+        assert_eq!(hold(21), Some(Hands::Full), "the release");
+        assert_eq!(hold(22), Some(Hands::Free), "the retreat after it");
+        // The errand modes run the Normal script's numbers, so they
+        // read off the Normal row: a transfer to the stage retreats at
+        // 11-12 with the fingers empty, exactly as a mount does.
+        assert_eq!(
+            Hands::before_step(CalibMode::HolderTransfer, 11),
+            Some(Hands::Free)
+        );
+        assert_eq!(
+            Hands::before_step(CalibMode::GripNull, 20),
+            Some(Hands::Full),
+            "the put-back that ends an iteration"
+        );
     }
 
     /// The four pairings, of which three used to run. Empty is refused
-    /// either way -- it is neither what a pick opens on nor what a carry
-    /// puts down.
+    /// either way -- it is neither what an empty hand opens on nor what
+    /// a full one puts down.
     #[test]
-    fn a_leg_refuses_exactly_the_fingers_it_cannot_use() {
-        assert!(EntryLeg::Pick.refuses(Fingers::Open(0.025)).is_none());
-        assert!(EntryLeg::Carry.refuses(Fingers::Holding(0.0039)).is_none());
-        assert!(EntryLeg::Pick.refuses(Fingers::Holding(0.0039)).is_some());
-        assert!(EntryLeg::Carry.refuses(Fingers::Open(0.025)).is_some());
-        assert!(EntryLeg::Pick.refuses(Fingers::Empty(0.0007)).is_some());
-        assert!(EntryLeg::Carry.refuses(Fingers::Empty(0.0007)).is_some());
+    fn a_step_refuses_exactly_the_fingers_it_cannot_use() {
+        assert!(Hands::Free.refuses(Fingers::Open(0.025)).is_none());
+        assert!(Hands::Full.refuses(Fingers::Holding(0.0039)).is_none());
+        assert!(Hands::Free.refuses(Fingers::Holding(0.0039)).is_some());
+        assert!(Hands::Full.refuses(Fingers::Open(0.025)).is_some());
+        assert!(Hands::Free.refuses(Fingers::Empty(0.0007)).is_some());
+        assert!(Hands::Full.refuses(Fingers::Empty(0.0007)).is_some());
     }
 
     /// The status half of a refusal goes into a `stringin`, which holds
@@ -3959,14 +3990,23 @@ mod tests {
     /// so a line that only fits by losing its subject says nothing.
     #[test]
     fn every_refusal_fits_the_status_record() {
-        for leg in [EntryLeg::Pick, EntryLeg::Carry] {
+        for needs in [Hands::Free, Hands::Full] {
             for fingers in [
                 Fingers::Open(0.025),
                 Fingers::Empty(0.0007),
                 Fingers::Holding(0.0039),
             ] {
-                if let Some(r) = leg.refuses(fingers) {
-                    assert!(r.status.len() <= 39, "{:?}: {}", leg, r.status);
+                if let Some(r) = needs.refuses(fingers) {
+                    // Both prefixes the record ever carries. The rest
+                    // of a mid-run failure -- which step, and the whole
+                    // detail -- is what the cut is allowed to take, so
+                    // only the fault itself has to fit under them.
+                    for line in [
+                        format!("not started: {}", r.status),
+                        format!("STOP: {}", r.status),
+                    ] {
+                        assert!(line.len() <= 39, "{needs:?}: {line}");
+                    }
                 }
             }
         }
